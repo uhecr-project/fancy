@@ -38,8 +38,11 @@ class Uhecr:
         self.properties = None
         self.source_labels = None
 
-        self.nuc_table = get_nucleartable()
         self.nthreads = int(0.75 * cpu_count())
+
+        # stubs for empty data
+        self.rigidity = []
+        self.kappa_ds = []
 
     def _get_angerr(self):
         """Get angular reconstruction uncertainty from label"""
@@ -56,7 +59,7 @@ class Uhecr:
         return np.deg2rad(sig_omega)
 
     def from_data_file(
-        self, filename, label, mass_group=1, gmf_model="JF12", exp_factor=1.0, ptype="p"
+        self, filename, label, mass_group=1, gmf_model="JF12", exp_factor=1.0,
     ):
         """
         Define UHECR from data file of original information.
@@ -79,28 +82,32 @@ class Uhecr:
             self.day = data["day"][()]
             self.zenith_angle = np.deg2rad(data["theta"][()])
             self.energy = data["energy"][()]
+            if "rigidity" in data:
+                self.rigidity = data["rigidity"][()]
             self.N = len(self.energy)
             glon = data["glon"][()]
             glat = data["glat"][()]
-            self.coord = self.get_coordinates(glon, glat)
+            self.coords_earth = self.get_coordinates(glon, glat)
 
             # check if we can extract exposure of UHECR (auger2022 dataset)
             if "exposure" in data:
                 self.exposure = data["exposure"][()]
             else:
-                self.exposure = None
+                self.exposure = np.ones(self.N)
 
-            self.unit_vector = coord_to_uv(self.coord)
+            self.unit_vector = self.coords_earth.cartesian.xyz.value.T
             self.period = self._find_period()
             self.A = self._find_area(exp_factor)
 
             self.mass_group = mass_group
-            self.ptype = ptype
-            gmf_model = "JF12" if gmf_model == "None" else gmf_model
-            if "kappa_gmf" in data:
-                self.kappa_gmf = data["kappa_gmf"][gmf_model][f"mg{mass_group}"]["kappa_gmf"][()]
+            if "gmf" in data and gmf_model != "None":
+                glons_gb = data["gmf"][gmf_model][f"mg{mass_group}"]["glons_gb"][()]
+                glats_gb = data["gmf"][gmf_model][f"mg{mass_group}"]["glats_gb"][()]
+                self.coords_gb = self.get_coordinates(glons_gb, glats_gb)
+                self.unit_vectors_gb =  self.coords_gb.cartesian.xyz.value.T
+                self.kappa_gmfs = data["gmf"][gmf_model][f"mg{mass_group}"]["kappa_gmf"][()]  # deflection parameter
 
-    def _get_properties(self):
+    def _get_properties(self, analysis_type):
         """
         Convenience function to pack object into dict.
         """
@@ -112,8 +119,11 @@ class Uhecr:
         self.properties["energy"] = self.energy
         self.properties["A"] = self.A
         self.properties["zenith_angle"] = self.zenith_angle
-        self.properties["mass_group"] = self.mass_group
-        self.properties["kappa_gmf"] = self.kappa_gmf
+
+        if analysis_type == "joint_composition":
+            self.properties["mass_group"] = self.mass_group
+            self.properties["kappa_gmfs"] = self.kappa_gmfs
+            self.properties["unit_vectors_gb"] = self.unit_vectors_gb
 
         # Only if simulated UHECRs
         # if isinstance(self.source_labels, (list, np.ndarray)):
@@ -277,7 +287,7 @@ class Uhecr:
                         alpha=alpha_level,
                     )
 
-    def save(self, file_handle):
+    def save(self, file_handle, analysis_type):
         """
         Save to the passed H5py file handle,
         i.e. something that cna be used with
@@ -286,7 +296,7 @@ class Uhecr:
         :param file_handle: file handle
         """
 
-        self._get_properties()
+        self._get_properties(analysis_type)
 
         for key, value in self.properties.items():
             file_handle.create_dataset(key, data=value)

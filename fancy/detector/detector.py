@@ -99,6 +99,15 @@ class Detector:
         declim_index = -1 if self.label.find("TA") != -1 else 0
         self.limiting_dec = Angle((self.declination[m == 0])[declim_index], "rad")
 
+    def get_rigidity_data(self, ZGSF_file, mass_group=1, Rth_max=250):
+
+        # get mean charge to compute Rth
+        gsf_fit_vals = np.genfromtxt(ZGSF_file, skip_header=1, dtype=np.float64)
+        self.meanZ = gsf_fit_vals[int(mass_group - 1),1]
+
+        self.Rth = self.Eth / self.meanZ
+        self.Rth_max = Rth_max  # (relatively arbitrary) maximum that we set in arrival spectrum calculation
+
     def show(
         self,
         view=None,

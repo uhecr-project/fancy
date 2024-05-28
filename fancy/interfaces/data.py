@@ -45,7 +45,7 @@ class Data:
         # define source object
         self.source = new_source
 
-    def add_uhecr(self, filename, label=None, mass_group=1, ptype="p", gmf_model="JF12"):
+    def add_uhecr(self, filename, label=None, mass_group=1, gmf_model="JF12"):
         """
         Add a uhecr object to the data container from file.
 
@@ -55,12 +55,12 @@ class Data:
         """
 
         new_uhecr = Uhecr()
-        new_uhecr.from_data_file(filename, label, mass_group, ptype=ptype, gmf_model=gmf_model)
+        new_uhecr.from_data_file(filename, label, mass_group, gmf_model=gmf_model)
 
         # define uhecr object
         self.uhecr = new_uhecr
 
-    def add_detector(self, detector_properties):
+    def add_detector(self, detector_properties, ZGSF_file, mass_group=1, Rth_max = 250):
         """
         Add a detector object to complement the data.
 
@@ -68,6 +68,7 @@ class Data:
         """
 
         new_detector = Detector(detector_properties)
+        new_detector.get_rigidity_data(ZGSF_file, mass_group, Rth_max)
 
         # define detector
         self.detector = new_detector

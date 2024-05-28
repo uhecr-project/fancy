@@ -230,42 +230,7 @@ class Analysis:
             elif self.analysis_type == self.composition_type:
                 kappa_gmf = []
 
-                if not os.path.exists(composition_file):
-                    return OSError(f"File {composition_file} does not exist.")
-
-                with h5py.File(composition_file, "r") as f:
-                    alphas = f["alphas"][()]
-                    Dsrcs = f["Dsrcs"][()]
-                    Rearths = f["Rearths"][()]
-                    dRearths = f["dRearths"][()]
-                    arr_spectrums = f["arr_spectrums"][()]
-                    Rexs = f["Rexs"][()]
-
-                # set kappa_min and kappa_max based on limits of theta
-                # theta should not exceed 180 so we set a hard limit for that
-                # and compute kappa_min based on the approximate formula
-
-                # for minimum we set it such that theta = 0.1, which is on the 
-                # order of the angular reconstruction uncertainty of the detectors
-                kappa_min = 7552.0 / (180.0)**2  # ~ 0.2
-                kappa_max = 7552.0 / (0.1)**2  # ~ 7.5e5
-
-                print(f"kappa_min: {kappa_min:.3e}, kappa_max: {kappa_max:.3e}")
-
-                # set new kappa
-                # denser grid for small kappa
-                kappa_1 = np.logspace(np.log10(kappa_min), np.log10(kappa_min)+2, 200)
-                kappa_2 = np.logspace(np.log10(kappa_min)+2, np.log10(kappa_max), 200)
-                kappa = np.concatenate((kappa_1, kappa_2))
-
-                if parallel:
-                    self.tables.build_for_fit_parallel_composition(
-                        kappa, alphas, Rearths, dRearths, arr_spectrums, self.gmf_deflections, nthreads
-                    )
-                else:
-                    self.tables.build_for_fit_composition(
-                        kappa, alphas, Rearths, dRearths, arr_spectrums, self.gmf_deflections
-                    )
+                pass
 
             else:
                 if parallel:
@@ -327,42 +292,35 @@ class Analysis:
         changed.
         """
 
-        if main_only:
-            input_table = ExposureIntegralTable(input_filename=input_filename)
-            self.tables.table = input_table.table
-            self.tables.kappa = input_table.kappa
-            self.tables.alphas = input_table.alphas
+        if self.analysis_type == "joint_composition":
+            '''Read from tables containing both spectrum & weighted exposures'''
+            with h5py.File(input_filename, "r") as file:
 
-            # uncomment once we figure out bug for single source case 
-            # with h5py.File(input_filename, "r") as f:
-            #     self.E_grid = f["energy/E_grid"][()]
-            #     self.Earr_grid = f["energy/Earr_grid"][()]
+                self.dmax_grid = file["dmax_grid"][()] # Mpc
+                self.alpha_grid = file["alpha_grid"][()]
+                self.log10_Bigmf_grid = file["log10_Bigmf_grid"][()] # log10(nG)
+                self.log10_Rgrid = file["log10_rigidities"][()]
 
-        else:
-            self.tables = ExposureIntegralTable(input_filename=input_filename)
+                self.dRs_grid = file["dRs_grid"][()]
+                self.log10_arr_spect_grid = file["arr_spect_calc"]["log10_arrspect_grid"][()]  # log10(1/EV)
+                self.log10_meanEinvs_grid = file["arr_spect_calc"]["log10_meanEinvs_grid"][()] # log10(1/EeV)
 
-    def use_composition_tables(self, input_filename):
-        '''
-        Read from tables containing composition data that have already been made
-        '''
-        if self.analysis_type == self.composition_type:
-            with h5py.File(input_filename, "r") as f:
-                self.Zdet = f["Zdet"][()]
-                self.Nalphas = f["Nalphas"][()]
-                self.NRearths = f["NRearths"][()]
-                self.alphas = f["alphas"][()]
-                self.Rearths = f["Rearths"][()]
-                self.arr_spectrums = f["arr_spectrums"][()]
-                self.Rcutoffs = f["Rcutoffs"][()]
-                self.qsrcs = f["qsrcs"][()]
-                self.Qearths = f["Qearths"][()]
-                self.surv_ratios = f["surv_ratios"][()]
-                self.Rexs = f["Rexs"][()]
-                self.Zsrcs = f["Zsrcs"][()]
-
+                self.log10_wexp_grid = file["Nex_calc"]["log10_wexp_grid"][()] # log10(km^2 yr)
 
         else:
-            raise Exception(f"Analysis Type {self.analysis_type} not compatible with composition tables")
+            if main_only:
+                input_table = ExposureIntegralTable(input_filename=input_filename)
+                self.tables.table = input_table.table
+                self.tables.kappa = input_table.kappa
+                self.tables.alphas = input_table.alphas
+
+                # uncomment once we figure out bug for single source case 
+                # with h5py.File(input_filename, "r") as f:
+                #     self.E_grid = f["energy/E_grid"][()]
+                #     self.Earr_grid = f["energy/Earr_grid"][()]
+
+            else:
+                self.tables = ExposureIntegralTable(input_filename=input_filename)
 
     def _get_zenith_angle(self, c_icrs, loc, time):
         """
@@ -599,335 +557,12 @@ class Analysis:
 
         print("Done!")
 
-    def _simulate_deflections(self, kappas, Nrand=100, path_to_lens=None):
-        """
-        TODO: move to separate class in propagation/gmf.py
-        Simulate the forward propagation of UHECR in the galactic magnetic field using
-        CRPropa healpix maps and galactic lensing. The simulation performs (in essence)
-        the following:
-        1. sample from vMF distribution with the given kappa (deflections from EGMF)
-        2. Create map of particles and apply lensing given from CRPropa
-        3. Sample energies and directions from lensed map
-        4. Limit directions and corrsp. energies based on exposure of detector
-        This then returns the simulated arrival directions and detected energies
-        at Earth after deflection.
-
-        Composition is accounted for by using the rigidities instead of energies in the lensing process.
-
-        The corresponding coordinates at each point in the simulation is also recorded and written
-        into a dictionary. This will be written to the corresponding simulation output file. One can
-        use this to plot the different deflections in the future.
-
-        :param kappas: array of vMF spread parameter for each UHECR originating from a source
-        :param Nrand: number of samples performed per true UHECR for vMF, higher means more precise lensing
-        :param path_to_lens: path to the GMF lensing directory
-        """
-
-        if not crpropa:
-
-            raise ImportError("CRPropa3 must be installed to use this functionality")
-
-        N_uhecr = len(kappas)  # number of UHECRS at gal. boundary
-        self.defl_plotvars = (
-            {}
-        )  # container for plotting variables for deflection simulations
-
-        # sample from vMF distribution with obtained kappas to get
-        # coordinates at boundary
-        omega_gb, src_indices, bg_indices = self._sample_at_gb(kappas, Nrand)
-        coords_gb = np.array([uv_to_coord(omega_gb_i) for omega_gb_i in omega_gb])
-
-        # apply magnetic lensing to get energies and coordinates at Earth
-        # path to lens is by default "./JF12full_Gamale/lens.cfg", but can be set to anywhere
-        # if one wishes to construct more lenses
-        if path_to_lens is None:
-            path_to_lens = os.path.join(
-                os.path.abspath(os.path.dirname(__file__)),
-                "JF12full_Gamale",
-                "lens.cfg",
-            )
-        (
-            coords_earth,
-            energies_earth,
-            crmap_unlensed,
-            crmap_lensed,
-            nlarge_params,
-        ) = self._apply_lensing(coords_gb, N_uhecr, Nrand, path_to_lens)
-
-        # limit using detector exposure
-        # energies needed since those will also be truncated by rejected UHECRs
-        omega_det_exp_limited, energies_exp_limited = self._apply_exposure_limits(
-            coords_earth, energies_earth, N_uhecr
-        )
-
-        # apply normal sampling to energies based on detector energy uncertainty
-        energies_exp_limited = energies_exp_limited * 1e-18  # convert back to EeV
-        Eerr = self.data.detector.energy_uncertainty
-        energies_det_exp_limited = np.random.normal(
-            loc=energies_exp_limited, scale=Eerr * energies_exp_limited
-        )
-
-        # make cuts to energy based on energy threshold
-        inds = np.where(energies_det_exp_limited >= self.model.Eth)
-        energies_det = energies_det_exp_limited[inds]
-        omega_det = omega_det_exp_limited[inds]
-
-        # append to dictionary
-        self.defl_plotvars = {
-            "omega_gb": omega_gb,
-            "src_indices": src_indices,
-            "bg_indices": bg_indices,
-            "omega_earth": np.array(coord_to_uv(coords_earth)),
-            "energies_earth": energies_earth,
-            "omega_det_exp_limited": omega_det_exp_limited,
-            "energies_det_exp_limited": energies_det_exp_limited,
-            "omega_det": omega_det,
-            "energies_det": energies_det,
-            "map_unlensed": crmap_unlensed,
-            "map_lensed": crmap_lensed,
-            "energies_nlarge": nlarge_params[0],
-            "omega_nlarge": nlarge_params[1],
-        }
-
-        return omega_det, energies_det
-
-    def _sample_at_gb(self, kappas, Nrand):
-        """
-        Sample from the vMF distribution at the galactic boundary.
-
-        This is identical to what is done in the no_gmf simulation at Earth.
-        """
-        source_labels = self.source_labels
-        varpi = self.data.source.unit_vector
-
-        # get source vector in which uhecr is associated with
-        # otherwise the UHECR is associated with background
-        varpi_per_uhecr = []
-        for lmbda in source_labels:
-            if lmbda == len(varpi):  # if background
-                varpi_per_uhecr.append(None)
-            else:
-                varpi_per_uhecr.append(np.array(varpi[lmbda]))
-
-        # get UHECR indices correlating to background and source
-        src_indices = np.argwhere(source_labels != len(varpi))
-        bg_indices = np.argwhere(source_labels == len(varpi))
-
-        # obtain arrival directions at the galactic boundary
-        omega_gb = []
-        for i, lmbda in enumerate(source_labels):
-            if lmbda == len(varpi):  # from background, sample from sphere uniformly
-                omega_gb_bg = sample_sphere(1, Nrand)
-                omega_gb.append(omega_gb_bg)
-            else:  # from source, sample from vmf
-                omega_gb_src = sample_vMF(varpi_per_uhecr[i], kappas[i], Nrand)
-                omega_gb.append(omega_gb_src)
-
-        return omega_gb, src_indices, bg_indices
-
-    def _apply_lensing(self, coords_gb, N_uhecr, Nrand, path_to_lens):
-        """
-        Apply lensing from GMF obtained from https://www.desy.de/~crpropa/data/magnetic_lenses/
-        to the arrival directions at the galactic boundary. We use the JF12 model by default.
-        Returns energies and arrival directions (SkyCoord) at Earth after deflection.
-
-        Note that we can also construct our own magnetic field lens, however, this can be performed
-        for future projects.
-        (check https://crpropa.github.io/CRPropa3/pages/example_notebooks/galactic_backtracking/galactic_backtracking.v4.html#
-        for details.)
-
-        :param coords_gb: list of SkyCoord arrival directions at galactic boundary
-        """
-
-        if not crpropa:
-
-            raise ImportError("CRPropa3 must be installed to use this functionality")
-
-        energies_gb = self.Earr * crpropa.EeV  # UHECR energy at gal. boundary
-        A, Z = self.nuc_table[self.model.ptype]
-        pid = crpropa.nucleusId(A, Z)
-
-        map_container = crpropa.ParticleMapsContainer()
-
-        # divide energy by Z to get rigidity (to account for composition)
-        rigidities_gb = np.array(
-            [np.float64(energy_gb) / Z for energy_gb in energies_gb]
-        )
-
-        # add particle to map container
-        # Coordinate transformation is based on making the final map used for sampling
-        # to be sampled in the correct coordinates.
-        for i in progress_bar(
-            range(N_uhecr), total=N_uhecr, desc="Adding UHECR to Map Container"
-        ):
-            for j in range(Nrand):
-                c_gal = coords_gb[i][j].galactic
-                map_container.addParticle(
-                    pid, rigidities_gb[i], -(np.pi - c_gal.l.rad), c_gal.b.rad
-                )
-
-        # evaluate map used to plot unlensed map using healpy
-        NPIX = (
-            map_container.getNumberOfPixels()
-        )  # hardset to 49152 via CRPropa, correleats to ang. res of 0.92 deg
-        crMap_unlensed = np.zeros(NPIX)
-        rigidities = map_container.getEnergies(int(pid))  # actually getting rigidity
-        for rigidity in rigidities:
-            crMap_unlensed += map_container.getMap(int(pid), rigidity * crpropa.eV)
-
-        # apply lens of b-field model to get map of uhecrs at earth
-        # full lens to account for turbulent effects
-        lens = crpropa.MagneticLens(path_to_lens)
-        lens.normalizeLens()
-        map_container.applyLens(lens)
-
-        # same as above, but for lensed version
-        crMap_lensed = np.zeros(NPIX)
-        rigidities = map_container.getEnergies(int(pid))
-        for rigidity in rigidities:
-            crMap_lensed += map_container.getMap(int(pid), rigidity * crpropa.eV)
-
-        # now generate individual particles from lensed map
-        # lon \in [-pi, pi], lats \in [-pi/2, pi/2]
-        N = N_uhecr
-        _, rigidities_earth, lons_earth, lats_earth = map_container.getRandomParticles(
-            N
-        )
-
-        # multiply by charge to get back energy from rigidity
-        energies_earth = Z * rigidities_earth
-
-        # convert to SkyCoord coordinates
-        # lon \in [0, 2pi], lats \in [-pi/2, pi/2]
-        coords_earth = SkyCoord(
-            -(np.pi - lons_earth) * u.rad, lats_earth * u.rad, frame="galactic"
-        )
-
-        # for plotting purposes, get lon / lat with larger sample size
-        (
-            _,
-            rigidities_nlarge,
-            lons_nlarge,
-            lats_nlarge,
-        ) = map_container.getRandomParticles(int(N_uhecr * Nrand))
-
-        omega_nlarge = coord_to_uv(
-            SkyCoord(
-                -(np.pi - lons_nlarge) * u.rad, lats_nlarge * u.rad, frame="galactic"
-            )
-        )
-
-        nlarge_params = (Z * rigidities_nlarge, omega_nlarge)
-
-        return coords_earth, energies_earth, crMap_unlensed, crMap_lensed, nlarge_params
-
-    def _apply_exposure_limits(
-        self, coords_earth, energies_earth, N_uhecr, count_limit=1e3
-    ):
-        """
-        Apply the exposure from the corresponding detector to the coordinates and energies
-        obtained at Earth after lensing. This is done via rejection sampling with as with
-        `exposure_limited_vMF_rng` in `vMF.stan`.
-        Returns an array of unit vectors + energies, corresponding to those limited by the exposure
-        of the detector.
-
-        Basic algorithm for rejection + vMF sampling (the Pythonic way, based on same stan code):
-        0. Initialize an accepted-rejected container, full of zeros. This will be updated for each iteration with 1's, and
-        loop terminates when this array only contains 1's (i.e. all directions accepted).
-        1. sample from vMF distribution with ang_err as spread for ALL directions
-        2. evaluate the probability to detect the UHECR at that declination based on exposure function m(dec_det) (given as pdet)
-        3. use Bernoulli distribution (2-D categorical distribution) to sample accepted (1) or rejected (0) for
-        each sampled direction, based on pdet above.
-        4. find the indices that are (a) are not accepted by the accepted-rejected container, and (b) where the sampled values
-        are only the accepted ones
-        5. append them to the container with same indices
-        6. append the corresponding omega_det with those indices only.
-        7. terminate when either (a) all values in container are accepted ones, or (b) the count limit is exceeded (1e7 in stan code)
-        """
-        N = N_uhecr
-        # get unit vector of coordinates at earth
-        omega_true = np.array(coord_to_uv(coords_earth))
-
-        # initialization of algorithm
-        omega_det_exp_limited = np.zeros((N, 3))
-        accepted_rejected_container = np.zeros(N)
-        count = 0
-
-        print("Performing truncations due to exposure...")
-        while len(np.nonzero(accepted_rejected_container)) != N:
-            # sample from vMF distribution with angular uncertainty
-            omega_det = np.array(
-                [
-                    sample_vMF(omega_true_i, self.data.detector.kappa_d, 1)
-                    for omega_true_i in omega_true
-                ]
-            )
-            omega_det = omega_det[:, 0, :]  # to collapse the array size
-
-            # evaluate probability to detect omega with given exposure using exposure function
-            dec_det = np.pi / 2.0 - np.arccos(
-                omega_det[:, 2]
-            )  # shift since arccos \in [0, pi]
-            m_omega = np.array([m_dec(d, self.data.detector.params) for d in dec_det])
-            pdet = m_omega / self.data.detector.exposure_max
-
-            # sample from bernoulli distribution (2-D categorical distribution)
-            samples = bernoulli.rvs(pdet, size=N)
-
-            # get indices where samples != 0 and where container == 0
-            # i.e. accepted indices in this loop which are not accounted for in accepted yet
-            sample_nonzero_indices = np.argwhere(
-                (accepted_rejected_container == 0) & (samples != 0)
-            )[:, 0]
-
-            # append to locations where accepted_rejected_container == 0
-            accepted_rejected_container[sample_nonzero_indices] = samples[
-                sample_nonzero_indices
-            ]
-
-            # append the evaluated omega_det in this iteration to the same locations where
-            # sampling != 0 and container == 0
-            omega_det_exp_limited[sample_nonzero_indices, :] = omega_det[
-                sample_nonzero_indices, :
-            ]
-
-            count += 1
-            # if count exceeds some truncation limit, break the loop
-            if count > count_limit:
-                break
-
-        # remove all directions that are stuck (i.e. container == 0), as well as corresp. energies
-        container_nonzero_indices = np.nonzero(accepted_rejected_container)[0]
-        omega_det_exp_limited = omega_det_exp_limited[container_nonzero_indices]
-        energies_exp_limited = energies_earth[container_nonzero_indices]
-
-        return omega_det_exp_limited, energies_exp_limited
-
     def _prepare_fit_inputs(self):
         """
         Gather inputs from Model, Data and IntegrationTables.
         """
 
-        eps_fit = self.tables.table
-        kappa_grid = self.tables.kappa
-        # E_grid = self.E_grid
-        # Earr_grid = list(self.Earr_grid)
-        # temporary
-        E_grid = np.zeros(50)
-        Earr_grid = list(np.zeros((1, 50)))
-
-        # KW: due to multiprocessing appending,
-        # collapse dimension from (1, 23, 50) -> (23, 50)
-        if self.analysis_type != self.composition_type:
-            eps_fit.resize(self.Earr_grid.shape)
-
-        # handle selected sources
-        if self.data.source.N < eps_fit.shape[1]:
-            eps_fit = [eps_fit[i] for i in self.data.source.selection]
-            Earr_grid = [Earr_grid[i] for i in self.data.source.selection]
-
-        # add E interpolation for background component (possible extension with Dbg)
-        Earr_grid.append([0 for e in E_grid])
+        
 
         # convert scale for sampling
         D = self.data.source.distance
@@ -938,17 +573,39 @@ class Analysis:
         # prepare fit inputs
         self.fit_input = {
             "Ns": self.data.source.N,
-            "varpi": self.data.source.unit_vector,
+            "varpi": self.data.source.coord.cartesian.xyz.value.T,
             "D": D,
             "N": self.data.uhecr.N,
-            "arrival_direction": self.data.uhecr.unit_vector,
             "A": self.data.uhecr.A,
-            "alpha_T": alpha_T,
-            "Ngrid": len(kappa_grid),
-            "eps": eps_fit,
-            "kappa_grid": kappa_grid,
             "zenith_angle": self.data.uhecr.zenith_angle,
+            "alpha_T": alpha_T,
         }
+
+        if self.analysis_type != self.composition_type:
+            eps_fit = self.tables.table
+            kappa_grid = self.tables.kappa
+            # E_grid = self.E_grid
+            # Earr_grid = list(self.Earr_grid)
+            # temporary
+            E_grid = np.zeros(50)
+            Earr_grid = list(np.zeros((1, 50)))
+
+            # KW: due to multiprocessing appending,
+            # collapse dimension from (1, 23, 50) -> (23, 50)
+            eps_fit.resize(self.Earr_grid.shape)
+
+            # handle selected sources
+            if self.data.source.N < eps_fit.shape[1]:
+                eps_fit = [eps_fit[i] for i in self.data.source.selection]
+                Earr_grid = [Earr_grid[i] for i in self.data.source.selection]
+
+            # add E interpolation for background component (possible extension with Dbg)
+            Earr_grid.append([0 for e in E_grid])
+
+            self.fit_input["arrival_direction"] = self.data.uhecr.unit_vector
+            self.fit_input["eps"] = eps_fit
+            self.fit_input["Ngrid"] = len(kappa_grid)
+            self.fit_input["kappa_grid"] = kappa_grid
 
         if (
             self.analysis_type == self.joint_type
@@ -966,69 +623,42 @@ class Analysis:
             _, self.fit_input["Z"] = self.nuc_table[ptype]
 
         if self.analysis_type == self.gmf_type or self.analysis_type == self.composition_type:
-            self.fit_input["kappa_gmf"] = self.data.uhecr.kappa_gmf
+            self.fit_input["kappa_gmfs"] = self.data.uhecr.kappa_gmfs
             # self.fit_input["kappa_gmf"] = np.ones_like(
             #     self.data.uhecr.kappa_gmf) * self.data.detector.kappa_d
         else:
             self.fit_input["kappa_d"] = self.data.detector.kappa_d
 
         if self.analysis_type == self.composition_type:
-            # interpolation grid for theta & kappa
-            self.fit_input["NthetaP"] = len(self.gmf_deflections._thetaP_grid)
-            self.fit_input["thetaP_grid"] = np.rad2deg(self.gmf_deflections._thetaP_grid)
-            self.fit_input["kappa_interp_grid"] = self.gmf_deflections._f_kappa(self.gmf_deflections._thetaP_grid)
+            
+            # UHECR parameters
+            self.fit_input["arrival_direction"] = self.data.uhecr.unit_vectors_gb
+            # if we find rigidity in dataset, then use that, otherwise divide by meanZ of mass group
+            if len(self.data.uhecr.rigidity) > 0:
+                self.fit_input["Rdet"] = self.data.uhecr.rigidity
+            else:
+                self.fit_input["Rdet"] = self.data.uhecr.energy / self.data.detector.meanZ
+            self.fit_input["exp_factors"] = self.data.uhecr.exposure
 
-            # add rigidity instead of energy
-            self.fit_input["Rdet"] = self.data.uhecr.energy / self.Zdet
-            self.fit_input["Rth"] = self.data.detector.Eth / self.Zdet
+            # detector parameters
+            self.fit_input["Rth"] = self.data.detector.Rth
+            self.fit_input["Rth_max"] = self.data.detector.Rth_max
             self.fit_input["Rerr"] = self.data.detector.energy_uncertainty
 
-            # for BG model
-            self.fit_input["Zsrcs"] = self.Zsrcs
-            self.fit_input["NZsrcs"] = len(self.Zsrcs)
+            # arrival spectrum parameters
+            self.fit_input["Ndmaxs"] = len(self.dmax_grid)
+            self.fit_input["NRs"] = len(self.log10_Rgrid)
+            self.fit_input["Nalphas"] = len(self.alpha_grid)
+            self.fit_input["dmax_grid"] = self.dmax_grid
+            self.fit_input["log10_Rgrid"] = self.log10_Rgrid
+            self.fit_input["alpha_grid"] = self.alpha_grid
+            self.fit_input["log_arr_spectrum_grid"] = np.log(10.0**self.log10_arr_spect_grid)
 
-            # for arrival spectrum
-            self.fit_input["Zdet"] = self.Zdet
-            self.fit_input["Nalphas"] = self.Nalphas
-            self.fit_input["NRearths"] = self.NRearths
-            self.fit_input["alpha_grid"] = self.alphas
-            self.fit_input["Rearth_grid"] = self.Rearths
-            self.fit_input["log_arr_spectrum_grid"] = np.log(self.arr_spectrums)
-            # self.fit_input["Rmax_grid"] = self.Rmaxs
-            
-            self.fit_input["Rcutoff"] = self.Rcutoffs[0]
-            self.fit_input["log_qsrc_grid"] = np.log10(self.qsrcs)
-            self.fit_input["surv_ratio_grid"] = self.surv_ratios
-            self.fit_input["log_Qearth_grid"] = np.log10(self.Qearths)
-            self.fit_input["Rex_grid"] = self.Rexs 
-
-            # make eps into log scale 
-            self.fit_input["log_eps"] = np.log10(self.fit_input["eps"])
-
-            # truncate any Rex values that are NaN, and the corresponding 
-            # source parameters too
-            if np.any(np.isnan(self.Rexs)):
-
-                Rexs_tmp = []
-                for a in range(self.Nalphas):
-                    Rex_isnan = np.isnan(self.Rexs[a,:])
-                    Rexs_tmp.append(self.Rexs[a,~Rex_isnan])
-                    # we assume that cutoff for sources are the same for all alphas
-                    # so we just do this once
-                    # in the case it is not, we have to think otherwise
-                    if a == 0:
-                        self.fit_input["D"] = self.fit_input["D"][~Rex_isnan]
-                        self.fit_input["varpi"] = self.fit_input["varpi"][~Rex_isnan]
-                        self.fit_input["Ns"] = len(self.fit_input["D"])
-
-                    self.fit_input["eps"] = self.fit_input["eps"][a,~Rex_isnan,:]
-
-                # set new Rex 
-                self.fit_input["Rex_grid"] = np.asarray(Rexs_tmp)
-
-            # alpha grid for effective exposure
-            self.fit_input["alpha_eps_grid"] = self.tables.alphas
-            self.fit_input["Nalphas_eps"] = len(self.tables.alphas)
+            # Nex / flux parameters
+            self.fit_input["log10_meanEinvs_grid"] = self.log10_meanEinvs_grid
+            self.fit_input["NBigmfs"] = len(self.log10_Bigmf_grid)
+            self.fit_input["log10_Bigmf_grid"] = self.log10_Bigmf_grid
+            self.fit_input["log10_wexp_grid"] = self.log10_wexp_grid
 
             
 
@@ -1047,7 +677,7 @@ class Analysis:
 
             uhecr_handle = f.create_group("uhecr")
             if self.data.uhecr:
-                self.data.uhecr.save(uhecr_handle)
+                self.data.uhecr.save(uhecr_handle, self.analysis_type)
 
             detector_handle = f.create_group("detector")
             if self.data.detector:

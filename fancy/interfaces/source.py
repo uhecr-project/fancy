@@ -34,7 +34,7 @@ class Source:
         with h5py.File(filename, "r") as f:
             data = f[self.label]
             self.distance = data["D"][()]
-            self.N = 1 if np.isscalar(self.distance) else len(self.distance)
+            self.N = len(self.distance)
             glon = data["glon"][()]
             glat = data["glat"][()]
             self.coord = self.get_coordinates(glon, glat)
@@ -49,10 +49,6 @@ class Source:
                         self.name.append(data["name"][i])
 
         self.unit_vector = coord_to_uv(self.coord)
-        if self.N == 1:
-            self.distance = np.asarray([self.distance])
-            self.coord = np.asarray([self.coord])
-            self.unit_vector = np.asarray([self.unit_vector])
 
     def _get_properties(self):
         """
