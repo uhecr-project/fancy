@@ -87,7 +87,7 @@ class Uhecr:
             self.N = len(self.energy)
             glon = data["glon"][()]
             glat = data["glat"][()]
-            self.coords_earth = self.get_coordinates(glon, glat)
+            self.coord = self.get_coordinates(glon, glat)
 
             # check if we can extract exposure of UHECR (auger2022 dataset)
             if "exposure" in data:
@@ -95,17 +95,22 @@ class Uhecr:
             else:
                 self.exposure = np.ones(self.N)
 
-            self.unit_vector = self.coords_earth.cartesian.xyz.value.T
+            self.unit_vector = self.coord.cartesian.xyz.value.T
             self.period = self._find_period()
             self.A = self._find_area(exp_factor)
 
             self.mass_group = mass_group
-            if "gmf" in data and gmf_model != "None":
-                glons_gb = data["gmf"][gmf_model][f"mg{mass_group}"]["glons_gb"][()]
-                glats_gb = data["gmf"][gmf_model][f"mg{mass_group}"]["glats_gb"][()]
-                self.coords_gb = self.get_coordinates(glons_gb, glats_gb)
-                self.unit_vectors_gb =  self.coords_gb.cartesian.xyz.value.T
-                self.kappa_gmfs = data["gmf"][gmf_model][f"mg{mass_group}"]["kappa_gmf"][()]  # deflection parameter
+            # first check if 
+            if "gmf" in data and gmf_model != "None": 
+                
+                # only read if data exists for both GMF model key and MG key
+                if gmf_model in list(data.keys()) and f"mg{mass_group}" in list(data[gmf_model].keys()):
+
+                    glons_gb = data["gmf"][gmf_model][f"mg{mass_group}"]["glons_gb"][()]
+                    glats_gb = data["gmf"][gmf_model][f"mg{mass_group}"]["glats_gb"][()]
+                    self.coords_gb = self.get_coordinates(glons_gb, glats_gb)
+                    self.unit_vectors_gb =  self.coords_gb.cartesian.xyz.value.T
+                    self.kappa_gmfs = data["gmf"][gmf_model][f"mg{mass_group}"]["kappa_gmf"][()]  # deflection parameter
 
     def _get_properties(self, analysis_type):
         """
