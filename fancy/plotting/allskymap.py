@@ -1,5 +1,12 @@
 import numpy as np
 from matplotlib import pyplot as plt
+import sys
+
+try:
+    import ligo.skymap.plot
+except ImportError:
+    pass
+
 from matplotlib.patches import PathPatch, Polygon
 from matplotlib.path import Path
 
@@ -9,11 +16,6 @@ from astropy.wcs import WCS
 from astropy.io.fits import Header
 
 from pyproj import Geod
-
-try:
-    import ligo.skymap.plot
-except ImportError:
-    pass
 
 
 __all__ = ["AllSkyMap"]
@@ -57,6 +59,9 @@ class SphericalCircle(PathPatch):
     def __init__(
         self, center, radius, resolution=100, lon_0=0.0, vertex_unit=u.degree, **kwargs
     ):
+        # raise issue if ligo.skymap is not installed
+        if "ligo.skymap" not in sys.modules:
+            raise ImportError("ligo.skymap (>=py39) needs to be installed to use this functionality.")
 
         boundary = (lon_0 + 180) % 360
 
