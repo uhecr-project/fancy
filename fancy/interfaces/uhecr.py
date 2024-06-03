@@ -104,13 +104,15 @@ class Uhecr:
             if "gmf" in data and gmf_model != "None": 
                 
                 # only read if data exists for both GMF model key and MG key
-                if gmf_model in list(data.keys()) and f"mg{mass_group}" in list(data[gmf_model].keys()):
+                config_key = f"{gmf_model}_mg{mass_group}"
+                if config_key not in list(data['gmf'].keys()):
+                    raise KeyError(f"GMF data for configuration {gmf_model}, MG{mass_group} is not found.")
 
-                    glons_gb = data["gmf"][gmf_model][f"mg{mass_group}"]["glons_gb"][()]
-                    glats_gb = data["gmf"][gmf_model][f"mg{mass_group}"]["glats_gb"][()]
-                    self.coords_gb = self.get_coordinates(glons_gb, glats_gb)
-                    self.unit_vectors_gb =  self.coords_gb.cartesian.xyz.value.T
-                    self.kappa_gmfs = data["gmf"][gmf_model][f"mg{mass_group}"]["kappa_gmf"][()]  # deflection parameter
+                glons_gb = data["gmf"][config_key]["glons_gb"][()]
+                glats_gb = data["gmf"][config_key]["glats_gb"][()]
+                self.coords_gb = self.get_coordinates(glons_gb, glats_gb)
+                self.unit_vectors_gb =  self.coords_gb.cartesian.xyz.value.T
+                self.kappa_gmfs = data["gmf"][config_key]["kappa_gmf"][()]  # deflection parameter
 
     def _get_properties(self, analysis_type):
         """
