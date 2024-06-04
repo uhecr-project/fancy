@@ -353,7 +353,7 @@ class Uhecr:
             start_julianyear = period_start.year + period_start.day / 365.25
             deltats = (self.year + self.day / 365.25) - start_julianyear
 
-            if self.exposure != None:
+            if len(self.exposure) > 0:
                 area = self.exposure / (M * deltats)
             else:
                 area = np.tile(A, self.N)
