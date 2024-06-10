@@ -6,8 +6,8 @@ from astropy import units as u
 from scipy import integrate, interpolate
 import h5py
 
-from fancy.propagation.energy_loss import EnergyLoss
-from fancy.propagation.cosmology import H0, Om, DH
+from fancy.propagation.energy_loss.energy_loss import EnergyLoss
+from fancy.propagation.energy_loss.cosmology import H0, Om, DH
 from fancy.utils.package_data import get_path_to_energy_approx_tables
 
 try:

@@ -2,6 +2,8 @@ import os
 import requests
 import shutil
 
+from .gmf.gmf_backpropagation import GMFBackPropagation
+
 def install_gmflens():
     '''Install GMFlens from CRPropa database'''
     dir_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "gmf_lens")

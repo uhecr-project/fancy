@@ -60,14 +60,14 @@ class Data:
         # define uhecr object
         self.uhecr = new_uhecr
 
-    def add_detector(self, detector_properties, ZGSF_file, mass_group=1, Rth_max = 250):
+    def add_detector(self, detector_properties, ZGSF_file, mass_group=1, deltaR=None, Rth_max = 250):
         """
         Add a detector object to complement the data.
 
         :param detector_properties: dict of properties.
         """
 
-        new_detector = Detector(detector_properties)
+        new_detector = Detector(detector_properties, deltaR)
         new_detector.get_rigidity_data(ZGSF_file, mass_group, Rth_max)
 
         # define detector

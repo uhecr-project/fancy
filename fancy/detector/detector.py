@@ -16,11 +16,12 @@ class Detector:
     UHECR observatory information and instrument response.
     """
 
-    def __init__(self, detector_properties):
+    def __init__(self, detector_properties, deltaR=None):
         """
         UHECR observatory information and instrument response.
 
         :param detector_properties: dict of properties.
+        :param deltaR: manually configure the rigidity uncertainty if not None
         """
 
         self.properties = detector_properties
@@ -50,6 +51,7 @@ class Detector:
         self.coord_uncertainty = np.sqrt(7552.0 / self.kappa_d)
 
         self.energy_uncertainty = detector_properties["f_E"]
+        self.rigidity_uncertainty = detector_properties["f_E"] if deltaR == None else deltaR
 
         self.num_points = 500
 

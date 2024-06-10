@@ -5,8 +5,8 @@ from astropy.constants import c
 from astropy import units as u
 from typing import List, Tuple
 
-from fancy.propagation.energy_loss import EnergyLoss
-from fancy.propagation.cosmology import H0, Om, Ol, DH
+from fancy.propagation.energy_loss.energy_loss import EnergyLoss
+from fancy.propagation.energy_loss.cosmology import H0, Om, Ol, DH
 
 
 class ProtonApproxEnergyLoss(EnergyLoss):

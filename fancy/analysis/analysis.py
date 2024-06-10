@@ -15,15 +15,15 @@ from ..interfaces.data import Uhecr
 from ..interfaces.utils import get_nucleartable, kappa_ex
 
 from ..plotting import AllSkyMap
-from ..propagation.proton_energy_loss import ProtonApproxEnergyLoss
-from ..propagation.crpropa_energy_loss import CRPropaApproxEnergyLoss
+from ..propagation.energy_loss.proton_energy_loss import ProtonApproxEnergyLoss
+from ..propagation.energy_loss.crpropa_energy_loss import CRPropaApproxEnergyLoss
 from ..detector.vMF.vmf import sample_vMF, sample_sphere
 from ..detector.exposure import m_dec
 
 from fancy.interfaces.data import Data
 from fancy.interfaces.stan import Model
 
-from fancy.propagation.gmf import GMFDeflections
+from fancy.propagation.gmf.gmf import GMFDeflections
 
 try:
 
