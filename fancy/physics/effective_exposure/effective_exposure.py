@@ -105,7 +105,7 @@ class EffectiveExposure:
             else:
                 # parametrize expected energies as rigidities
                 self.Eexs_grid = 10**f[config_label]["log10_Eexs_grid"][()] * u.EV
-                self.Eth_srcs = f[config_label]["Eth_srcs_grid"][()] * u.EeV
+                self.Eth_srcs = f[config_label]["Eth_src_grid"][()] * u.EeV
 
         self.Nalphas = len(self.alpha_grid)
         self.Ndistances = len(self.distances_grid)
@@ -209,6 +209,7 @@ class EffectiveExposure:
                         # compute expected energy and find index in rigidity grid corresponding to it (we parametrize energy as rigidity for MG1)
                         Eex = self.Eexs_grid[d_idx, ia]
                         Eex_idx = np.digitize(Eex.value, self.rigidities_grid.value, right=True)
+                        
 
                         # weighting factor calculated by analytical integral of source & arrival distribution, see CM19 for details
                         # TODO: update this for bounded energy spectrum

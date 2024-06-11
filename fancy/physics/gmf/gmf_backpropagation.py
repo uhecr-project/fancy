@@ -58,7 +58,7 @@ class GMFBackPropagation:
 
     def _compile_vMFmodel(self):
         # model to fit vMF with
-        stan_path = "./resources/stan/"
+        stan_path = "./stan/"
         fit_filename = stan_path + "fit_from_vMF.stan"
         stanc_options = {"include-paths": stan_path}
 

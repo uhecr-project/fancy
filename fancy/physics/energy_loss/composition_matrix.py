@@ -13,11 +13,15 @@ from astropy.cosmology import WMAP9, z_at_value, Planck18
 import astropy.units as u
 from scipy.interpolate import UnivariateSpline
 
-import prince_cr.config
-from prince_cr import core, photonfields, cross_sections
-from prince_cr import util as pru
-from prince_cr.solvers import UHECRPropagationSolverBDF
-from prince_cr.cr_sources import CosmicRaySource
+try:
+    import prince_cr as pcr
+    import prince_cr.config
+    from prince_cr import core, photonfields, cross_sections
+    from prince_cr import util as pru
+    from prince_cr.solvers import UHECRPropagationSolverBDF
+    from prince_cr.cr_sources import CosmicRaySource
+except ImportError:
+    pcr = None
 
 class CompositionMatrixContainer:
 
@@ -64,6 +68,9 @@ class CompositionMatrixContainer:
         self.dmax = dmax
         self.distances = np.linspace(dmin, dmax, Nds)
         self.resources_path = resources_path
+
+        if pcr == None:
+            raise ImportError("Prince-CR needs to be installed for using this module!")
 
         # set mkl threads
         prince_cr.config.set_mkl_threads(nthreads)
