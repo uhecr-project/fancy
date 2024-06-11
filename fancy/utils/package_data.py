@@ -13,7 +13,7 @@ def get_path_to_energy_approx_tables(file_name: str) -> Path:
 
 def get_available_energy_approx_tables():
 
-    config_path = resource_filename("fancy", "propagation/energy_loss_tables")
+    config_path = resource_filename("fancy", "physics/energy_loss/energy_loss_tables")
 
     paths = list(Path(config_path).rglob("*.h5"))
 
@@ -39,7 +39,7 @@ def get_path_to_stan_includes() -> Path:
 def get_path_to_lens(lens_name: str) -> Path:
 
     lens_path = resource_filename(
-        "fancy", "propagation/gmf_lens/%s/lens.cfg" % lens_name
+        "fancy", "physics/gmf/gmf_lens/%s/lens.cfg" % lens_name
     )
 
     return Path(lens_path)

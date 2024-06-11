@@ -22,6 +22,10 @@ class GMFLensing:
     Class that handles forward simulations of GMF deflections (lensing / weighted vMF maps)
     '''
 
+    lens_names = {
+        "JF12":"JF12full_Gamale"
+    }
+
     def __init__(self, gmf_model : str = "JF12"):
 
         '''
@@ -34,10 +38,10 @@ class GMFLensing:
             raise ImportError("CRPropa must be installed to use this functionality.")
 
         self.gmf_model = gmf_model
+        path_to_lens = str(get_path_to_lens(self.lens_names[self.gmf_model]))
 
         # read in GMF lens if we have GMF enabled
         if gmf_model == "JF12":
-            path_to_lens = str(get_path_to_lens(self.lens_name))
             self.gmf_lens = crpropa.MagneticLens(path_to_lens)
         else:
             raise NotImplementedError(f"Lensing for GMF model {gmf_model} not yet implemented.")
