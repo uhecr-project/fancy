@@ -76,6 +76,8 @@ class Detector:
 
         self.Eth = detector_properties["Eth"]
 
+        self.mass_group = 1  # default value of 1
+
     def exposure(self):
         """
         Calculate and plot the exposure for a given detector
@@ -109,6 +111,8 @@ class Detector:
 
         self.Rth = self.Eth / self.meanZ
         self.Rth_max = Rth_max  # (relatively arbitrary) maximum that we set in arrival spectrum calculation
+
+        self.mass_group = mass_group
 
     def show(
         self,
