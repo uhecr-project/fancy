@@ -153,9 +153,12 @@ class Analysis:
                 self.distances_grid = file[config_label]["distances_grid"][()] # Mpc
                 self.alpha_grid = file[config_label]["alpha_grid"][()]
                 self.log10_Rgrid = file[config_label]["log10_rigidities"][()]
+                self.log10_Eexs_grid = file[config_label]["log10_Eexs_grid"][()] # log10(EeV)
 
-                self.log10_arr_spect_grid = file[config_label]["log10_arrspect_grid"][()]  # log10(1/EV)
-                self.log10_Eexs_grid = file[config_label]["log10_Eexs_grid"][()] # log10(1/EeV)
+                if self.data.detector.mass_group != 1:
+                    self.log10_arr_spect_grid = file[config_label]["log10_arrspect_grid"][()]  # log10(1/EV)
+                else:
+                    self.Rarr_grid = file[config_label]["Rarr_grid"][()]  # log10(1/EV)
 
             '''Read from exposure table'''
             with h5py.File(exposure_table_file, "r") as file:
@@ -272,7 +275,11 @@ class Analysis:
             self.fit_input["distances_grid"] = self.distances_grid
             self.fit_input["log10_Rgrid"] = self.log10_Rgrid
             self.fit_input["alpha_grid"] = self.alpha_grid
-            self.fit_input["log_arr_spectrum_grid"] = np.log(10.0**self.log10_arr_spect_grid)
+
+            if self.data.detector.mass_group != 1:
+                self.fit_input["log_arr_spectrum_grid"] = np.log(10.0**self.log10_arr_spect_grid)
+            else:
+                self.fit_input["Rarr_grid"] = self.Rarr_grid
 
             # Nex / flux parameters
             self.fit_input["log10_Eexs_grid"] = self.log10_Eexs_grid

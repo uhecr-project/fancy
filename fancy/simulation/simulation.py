@@ -24,7 +24,7 @@ class Simulation:
     Handles the generation of simulation samples 
     '''
 
-    truth_input_keys = ["f", "alpha_s", "alpha_b", "alpha", "log10_L", "Bigmf"]
+    truth_input_keys = ["f", "alpha_s", "alpha_b", "alpha", "log10_L", "Bigmf", "Nex"]
 
     def __init__(self, data : Data, energy_loss_table_file : str, exposure_table_file : str, gmf_model : str = "None"):
 
@@ -124,8 +124,13 @@ class Simulation:
         alpha_s = input_dict["alpha_s"]
         alpha_b = input_dict["alpha_b"]
         Bigmf = input_dict["Bigmf"] * u.nG
-        L = 10**input_dict["log10_L"] * (u.EeV * u.yr**-1)
+        Nex = input_dict["Nex"]
         f = input_dict["f"]
+
+        # calculate expected events from background using source fraction
+        Nex_src = Nex * f
+        Nex_bg = Nex * (1 - f)
+        print(f"Nex: {Nex:.3f}, Nex_src: {Nex_src:.3f}, Nex_bg: {Nex_bg:.3f}")
 
         # calculate the number of expected events from all sources using weighted exposure * total flux
         wexps_src = np.zeros(self.Nsrcs) * (u.km**2 * u.yr)  
@@ -142,12 +147,8 @@ class Simulation:
             Eex = 10.0**f_log10_Eexs(alpha_s) * u.EeV
             Fs_per_Ls[id] = 1 / (4 * np.pi * Dsrc.to(u.km)**2) / Eex
 
-        Nex_src = L * (np.sum(wexps_src * Fs_per_Ls))
-
-        # calculate expected events from background using source fraction
-        Nex_bg = Nex_src * ((1 - f) / f)
-        Nex = Nex_src + Nex_bg
-        print(f"Nex: {Nex:.3f}, Nex_src: {Nex_src:.3f}, Nex_bg: {Nex_bg:.3f}")
+        L = Nex_src / (np.sum(wexps_src * Fs_per_Ls)) / self.Nsrcs
+        print(f"Luminosity per source: {L:.4e}")
 
         # convert to integer using np.round (TODO: strictly should be Poisson, edit later)
         # store as object since we need to use this for sampling
@@ -172,8 +173,8 @@ class Simulation:
             "alpha_b":input_dict["alpha_b"],
             "f":input_dict["f"],
             "f1":f1,
-            "L":10.0**input_dict["log10_L"],
-            "log10_L":input_dict["log10_L"],
+            "L":L,
+            "log10_L":np.log10(L.value),
             "Bigmf":input_dict["Bigmf"],
             "F0":F0.value,
             "log10_F0":np.log10(F0.value),
@@ -235,10 +236,10 @@ class Simulation:
                     # sample using random.choice
                     Rsrcs_samples = rng.choice(self.rigidities, size=Nsamples, p=probs_src)
                     # store arrival rigidities, computed via interpolation
-                    sampled_rigidities.append(self.f_Rarr(Rsrcs_samples.value)[id,:] * u.EV)
+                    sampled_rigidities.append(self.f_Rarr(Rsrcs_samples)[id,:])
                 else:
                     # otherwise no losses
-                    sampled_rigidities.append(rng.choice(self.energies, size=Nsamples, p=probs_bg))
+                    sampled_rigidities.append(rng.choice(self.rigidities, size=Nsamples, p=probs_bg))
 
         '''Sampling for arrival directions'''
         sampled_coords_gb = []
