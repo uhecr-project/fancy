@@ -39,13 +39,16 @@ class EffectiveExposure:
         self.mass_group = data.detector.mass_group
         self.detector_type = data.detector.label
 
+        self.source_type = data.source.label
         self.Dsrcs = data.source.distance * u.Mpc
         self.coords_src = data.source.coord  # this returns galactic coordinates
         src_names = data.source.name
         self.Nsrcs = len(self.Dsrcs)
 
-        print(f"Source: {src_names}")
+        print(f"Configuration: {self.source_type}, {self.detector_type}, {self.mass_group}")
+
         if verbose:
+            print(f"Sources: {src_names}")
             print(f"Distances: {self.Dsrcs}")
             print(f"Coordinates: {self.coords_src}")
 
@@ -105,7 +108,7 @@ class EffectiveExposure:
             else:
                 # parametrize expected energies as rigidities
                 self.Eexs_grid = 10**f[config_label]["log10_Eexs_grid"][()] * u.EV
-                self.Eth_srcs = f[config_label]["Eth_src_grid"][()] * u.EeV
+                self.Rth_srcs = f[config_label]["Rth_src_grid"][()] * u.EV
 
         self.Nalphas = len(self.alpha_grid)
         self.Ndistances = len(self.distances_grid)
@@ -125,11 +128,12 @@ class EffectiveExposure:
         self.coords_healpy.transform_to("galactic")
 
 
-    def compute_effective_exposure(self, gmflens : GMFLensing, kappa_max = 1e6, exposure_min = 1e-30 * u.km**2 * u.yr):
+    def compute_effective_exposure(self, gmflens : GMFLensing, disable_gmf = False, kappa_max = 1e6, exposure_min = 1e-30 * u.km**2 * u.yr):
         '''
         Computation of the effective exposure.
 
         :param gmflens: GMFLensing object that will map the lens back to Earth
+        :param disable_gmf: force disabling of GMF
         :param kappa_max: maximum threshold value for kappa computation
         :param exposure_min: minimum threshold value for exposure
         '''
@@ -155,14 +159,14 @@ class EffectiveExposure:
                 # if source model, then iterate for each magnetic field and compute individual kappas
                 if id < self.Nsrcs:
                     for ib, Bigmf in enumerate(self.Bigmf_grid):
-                        kigmf = self.kappa_igmf(R, Bigmf, Dsrc, kappa_max=kappa_max)
+                        kigmf = kappa_igmf(R, Bigmf, Dsrc, kappa_max=kappa_max)
 
                         self.coords_healpy.representation_type = "cartesian"
                         weighted_map = self.vMF(self.coords_healpy.cartesian.xyz.value, src_uv, kigmf) * self.delta_ang
                         weighted_map /= np.sum(weighted_map)  # some numerical error in normalisation, so we force normalisation here
 
                         # lens the map
-                        lensed_map = gmflens.apply_lens_to_map(weighted_map, R.to_value(u.EV))
+                        lensed_map = gmflens.apply_lens_to_map(weighted_map, R.to_value(u.EV), disable_gmf=disable_gmf)
 
                         # compute effective exposure
                         eff_exp = np.dot(self.exposures, lensed_map)
@@ -176,7 +180,7 @@ class EffectiveExposure:
                     weighted_map /= np.sum(weighted_map)  # some numerical error in normalisation, so we force normalisation here
 
                     # lens the map
-                    lensed_map = gmflens.apply_lens_to_map(weighted_map, R.to_value(u.EV))
+                    lensed_map = gmflens.apply_lens_to_map(weighted_map, R.to_value(u.EV), disable_gmf=disable_gmf)
 
                     # compute effective exposure
                     eff_exp = np.dot(self.exposures, lensed_map)
@@ -207,21 +211,20 @@ class EffectiveExposure:
                         self.wexp_grid[id,ia,ib] = np.trapz(y=self.arrspects_grid[d_idx,:,ia] * self.eff_exposure_grid[id, :, ib] * p_rdet, x=self.rigidities_grid)
                     else:
                         # compute expected energy and find index in rigidity grid corresponding to it (we parametrize energy as rigidity for MG1)
-                        Eex = self.Eexs_grid[d_idx, ia]
-                        Eex_idx = np.digitize(Eex.value, self.rigidities_grid.value, right=True)
+                        Rex = self.Eexs_grid[d_idx, ia]
+                        Rex_idx = np.digitize(Rex.value, self.rigidities_grid.value, right=True)
                         
-
                         # weighting factor calculated by analytical integral of source & arrival distribution, see CM19 for details
                         # TODO: update this for bounded energy spectrum
-                        w_factor = (self.Eth_srcs[d_idx].value / self.data.detector.Eth)**(1.0 - alpha)
+                        w_factor = (self.Rth_srcs[d_idx].value / self.data.detector.Rth)**(1.0 - alpha)
                         
-                        self.wexp_grid[id,ia,ib] = self.eff_exposure_grid[id, Eex_idx, ib] * w_factor
+                        self.wexp_grid[id,ia,ib] = self.eff_exposure_grid[id, Rex_idx, ib] * w_factor
 
             else:  # background -> just a power law
                 if self.mass_group != 1:
                     
                     # integrate over background spectrum w/ detection effects, which is jsut a power law
-                    bg_spectrum = self.background_spectrum(self.rigidities_grid.value, alpha, self.data.detector.Rth, self.data.detector.Rth_max) * (1 / u.EV)
+                    bg_spectrum = bounded_power_law(self.rigidities_grid.value, alpha, self.data.detector.Rth, self.data.detector.Rth_max) * (1 / u.EV)
                     self.wexp_grid[id,ia,ib] = np.trapz(y=bg_spectrum * self.eff_exposure_grid[id, :, ib] * p_rdet, x=self.rigidities_grid)
 
                 else: # for MG1 we just use the default exposure since rigidity / energy doesnt play a role here
@@ -243,31 +246,6 @@ class EffectiveExposure:
             config_gr.create_dataset("effective_exposure", data=self.eff_exposure_grid)
             config_gr.create_dataset("log10_wexp_grid", data=np.log10(self.wexp_grid.to_value(u.km**2 * u.yr)))
 
-
-    def theta_igmf(self, R, Bigmf, D, lc=1):
-        '''
-        Deflection angle for IGMF in degrees
-
-        :param R: rigidity in EV
-        :param Bigmf: IGMF magnetic field strength in nG
-        :param D: distance of the source in Mpc
-        :param lc: coherence length in Mpc (default 1 Mpc)
-        '''
-        return (2.3 * (50 * u.EV / R) * (Bigmf / (1 * u.nG)) * np.sqrt(D / (10 * u.Mpc)) * np.sqrt(lc)) * u.deg
-    
-    def kappa_igmf(self, R, Bigmf, D, lc=1, kappa_max = 1e6):
-        '''
-        Deflection parameter for IGMF. Calculated using the approximate formula (for k >> 1)
-
-        :param R: rigidity in EV
-        :param Bigmf: IGMF magnetic field strength in nG
-        :param D: distance of the source in Mpc
-        :param lc: coherence length in Mpc (default 1 Mpc)
-        :param kappa_max: some maximum threshold value for high kappa (== super small angles)
-        '''
-        k = (7552 * (self.theta_igmf(R, Bigmf, D, lc) / (1 * u.deg))**-2).value
-        return k if k < kappa_max else kappa_max
-    
     def vMF(self, x, mu, kappa):
         '''
         vMF distribution given mean direction mu, spread parameter kappa
@@ -283,12 +261,39 @@ class EffectiveExposure:
             return (
                 kappa / (4 * np.pi * np.sinh(kappa)) * np.exp(kappa * np.dot(x.T, mu))
             )
+
+
+def theta_igmf(R, Bigmf, D, lc=1):
+    '''
+    Deflection angle for IGMF in degrees
+
+    :param R: rigidity in EV
+    :param Bigmf: IGMF magnetic field strength in nG
+    :param D: distance of the source in Mpc
+    :param lc: coherence length in Mpc (default 1 Mpc)
+    '''
+    return (2.3 * (50 * u.EV / R) * (Bigmf / (1 * u.nG)) * np.sqrt(D / (10 * u.Mpc)) * np.sqrt(lc)) * u.deg
+
+def kappa_igmf(R, Bigmf, D, lc=1, kappa_max = 1e6):
+    '''
+    Deflection parameter for IGMF. Calculated using the approximate formula (for k >> 1)
+
+    :param R: rigidity in EV
+    :param Bigmf: IGMF magnetic field strength in nG
+    :param D: distance of the source in Mpc
+    :param lc: coherence length in Mpc (default 1 Mpc)
+    :param kappa_max: some maximum threshold value for high kappa (== super small angles)
+    '''
+    k = (7552 * (theta_igmf(R, Bigmf, D, lc) / (1 * u.deg))**-2).value
+    return k if k < kappa_max else kappa_max
+    
+    
         
-    def background_spectrum(self, R, alpha_b, Rmin, Rmax):
-        '''Background spectrum'''
-        if alpha_b != 1.0:
-            norm = (1.0 - alpha_b) / (Rmax**(1.0 - alpha_b) - Rmin**(1.0 - alpha_b))
-        else:
-            norm = 1.0 / (np.log(Rmax) - np.log(Rmin))
-        
-        return norm * R**(-alpha_b)
+def bounded_power_law(R, alpha_b, Rmin, Rmax):
+    '''Background spectrum'''
+    if alpha_b != 1.0:
+        norm = (1.0 - alpha_b) / (Rmax**(1.0 - alpha_b) - Rmin**(1.0 - alpha_b))
+    else:
+        norm = 1.0 / (np.log(Rmax) - np.log(Rmin))
+    
+    return norm * R**(-alpha_b)

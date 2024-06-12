@@ -27,6 +27,13 @@ class EnergyLoss(ABC):
         self.Rth_max = data.detector.Rth_max
         self.verbose = verbose
 
+        # minimum and maximum rigidity threshold 
+        self.Rmin = data.detector.Rth * u.EV
+        self.Rmax = data.detector.Rth_max * u.EV
+
+        print(f"Minimum rigidity for {self.detector_type}, mg{self.mass_group}: {self.Rmin:.2f}")
+        print(f"Maximum rigidity for {self.detector_type}, mg{self.mass_group}: {self.Rmax:.2f}\n")
+
     @abstractmethod
     def initialise_grid(
             self, 
@@ -54,6 +61,13 @@ class EnergyLoss(ABC):
 
         self.Ndistances = len(self.distances)
 
+        ## setting up the rigidity grid
+        dlR = 0.05
+        lRbins = np.arange(np.log10(self.Rmin.to_value(u.EV)) - 0.5*dlR, np.log10(self.Rmax.to_value(u.EV)) + 1.5*dlR, dlR) # 1.5 to include endpoint
+        self.dRs_grid = (10**lRbins[1:] - 10**lRbins[:-1]) * u.EV
+        self.rigidities_grid = 10**(0.5*(lRbins[1:] + lRbins[:-1])) * u.EV
+        self.NRs = len(self.rigidities_grid)
+
         self.Eexs = np.zeros((self.Ndistances, self.Nalphas)) * u.EeV
     
     @abstractmethod
@@ -62,7 +76,7 @@ class EnergyLoss(ABC):
         pass
 
     @abstractmethod
-    def p_gt_thresh(self, delta):
+    def p_gt_Rth(self, delta):
         """
         Probability that rigidity is anove threshold. For MG1, this is the arrival energy
 

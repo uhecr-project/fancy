@@ -28,13 +28,6 @@ class NucleiEnergyLoss(EnergyLoss):
         # raise exception if mass group = 1, since we should use proton energy loss for this
         if self.mass_group == 1:
             raise ValueError(f"Mass Group {self.mass_group} not valid with this approach. Use Proton Energy Loss Model isntead.")
-
-        # minimum and maximum rigidity threshold 
-        self.Rmin = data.detector.Rth * u.EV
-        self.Rmax = data.detector.Rth_max * u.EV
-
-        print(f"Minimum rigidity for {self.detector_type}, mg{self.mass_group}: {self.Rmin:.2f}")
-        print(f"Maximum rigidity for {self.detector_type}, mg{self.mass_group}: {self.Rmax:.2f}\n")
         
 
     def initialise_grid(
@@ -70,13 +63,6 @@ class NucleiEnergyLoss(EnergyLoss):
         # limits for each mass group, required to filter out the required mass group range for As and Zs
         self.mg_lidx, self.mg_uidx = mass_group_idxlims[self.mass_group_idx]
         print(f"Range of masses (A) for MG{self.mass_group}: [{self.As[self.mg_lidx]}, {self.As[self.mg_uidx]}]")
-
-        ## setting up the rigidity grid
-        dlR = 0.05
-        lRbins = np.arange(np.log10(self.Rmin.to_value(u.EV)) - 0.5*dlR, np.log10(self.Rmax.to_value(u.EV)) + 1.5*dlR, dlR) # 1.5 to include endpoint
-        self.dRs_grid = (10**lRbins[1:] - 10**lRbins[:-1]) * u.EV
-        self.rigidities_grid = 10**(0.5*(lRbins[1:] + lRbins[:-1])) * u.EV
-        self.NRs = len(self.rigidities_grid)
 
 
         # truncate the weights also
@@ -174,7 +160,7 @@ class NucleiEnergyLoss(EnergyLoss):
         arr_spect_intR = np.trapz(y=self.arr_spects_full, x=self.rigidities_grid, axis=2)
         self.Aearth_pdfs = arr_spect_intR / np.sum(arr_spect_intR, axis=1)[:,None,:]
 
-    def p_gt_thresh(self, delta = None):
+    def p_gt_Rth(self, delta = None):
         '''
         Probability that rigidity is anove threshold. For MG1, this is the arrival energy
 

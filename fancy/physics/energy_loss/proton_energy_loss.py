@@ -7,7 +7,7 @@ from astropy import units as u
 from typing import List, Tuple
 from scipy import stats, optimize
 
-from multiprocessing import Pool
+from joblib import Parallel, delayed
 from tqdm import tqdm
 import h5py
 
@@ -37,8 +37,6 @@ class ProtonApproxEnergyLoss(EnergyLoss):
             alpha_min=-3, 
             alpha_max=10, 
             Nalphas=50,
-            Emax=250,
-            NEs = 50,
         ):
         '''
         Initalise our grid using composition weights
@@ -49,96 +47,71 @@ class ProtonApproxEnergyLoss(EnergyLoss):
         '''
         super().initialise_grid(weights_dir, alpha_min, alpha_max, Nalphas)
 
-        self.E_grid = np.logspace(
-            np.log(self.Eth), np.log(Emax), NEs, base=np.e
-        )
-        self.Earr_grid = []
+        self.Rarr_grid = np.zeros((self.Ndistances, self.NRs))
 
-    def get_arrival_energy(self, Esrc: float, D: float):
+    def get_arrival_rigidity(self, Rsrc: float, D: float):
         """
-        Get the arrival energy for a given initial energy.
+        Get the arrival rigidity for a given initial rigidity.
         Takes into account all propagation affects.
 
-        :param Esrc: Source energy in EeV
+        :param Rsrc: Source rigidity in EV
         :param D: Source distance in Mpc
         """
-        Esrc = Esrc * 1.0e18
+        Rsrc = Rsrc * 1.0e18
         integrator = integrate.ode(_dEdr).set_integrator("lsoda", method="bdf")
-        integrator.set_initial_value(Esrc, 0)
+        integrator.set_initial_value(Rsrc, 0)
         r1 = D
         dr = min(D / 10, 10)
 
         while integrator.successful() and integrator.t < r1:
             integrator.integrate(integrator.t + dr)
 
-        Earr = integrator.y / 1.0e18
-        return Earr
+        Rarr = integrator.y / 1.0e18
+        return Rarr
 
-    def get_arrival_energy_vec(self, args: Tuple):
+    def get_arrival_rigidity_vec(self, args: Tuple):
         """
-        Get the arrival energy for a given initial energy.
+        Get the arrival rigidity for a given initial rigidity.
         Takes into account all propagation affects.
         Version for parallelisation.
 
         :param args: Tuple containing source energies in EeV
             and source distances in Mpc
         """
-        Evec, D = args
+        didx, Rvec, D = args
 
-        Earr_vec = []
-        for E in Evec:
-            E = E * 1.0e18
+        print(f"Current source: {D}")
+
+        Rarr_vec = np.zeros_like(Rvec)
+        for i, R in enumerate(Rvec):
+            R = R * 1.0e18
             integrator = integrate.ode(_dEdr).set_integrator("lsoda", method="bdf")
-            integrator.set_initial_value(E, 0)
+            integrator.set_initial_value(R, 0)
             r1 = D
             dr = min(D / 10, 10)
 
             while integrator.successful() and integrator.t < r1:
                 integrator.integrate(integrator.t + dr)
 
-            Earr = integrator.y / 1.0e18
+            Rarr = integrator.y / 1.0e18
 
-            Earr_vec.append(Earr[0])
+            Rarr_vec[i] = Rarr[0]
 
-        return Earr_vec
+        return didx, Rarr_vec
     
-    def p_gt_thresh(self, delta):
+    def p_gt_Rth(self, delta, d=5):
         """
-        Probability that arrival energy is anove threshold.
+        Probability that arrival energy is anove threshold for some distance
 
         :param delta: Uncertainty in energy reconstruction (%)
         """
         delta = self.delta if delta == None else delta
-        return 1 - np.array([stats.norm.cdf(self.Eth, Earr, delta * Earr) for Earr in self.Earr_grid])
+        didx = np.digitize(d * u.Mpc, self.distances_grid, right=True)
+        return 1 - np.array([stats.norm.cdf(self.Rth, Rarr, delta * Rarr) for Rarr in self.Rarr_grid[didx,:]])
     
-    def p_gt_Eth(self, Earr: float, Eerr: float, Eth: float):
-        """
-        Probability that arrival energy is anove threshold.
-
-        :param Earr: Arrival energy in EeV
-        :param Eerr: Uncertainty in energy reconstruction (%)
-        :param Eth: Threshold energy in EeV
-        """
-
-        return 1 - stats.norm.cdf(Eth, Earr, Eerr * Earr)
-
-    def get_Eth_sim(self, Eerr: float, Eth: float):
-        """
-        Get a sensible threshold energy for the simulation
-        given the threshold energy and uncertainty in the
-        energy reconstruction.
-
-        :param Eerr: Uncertainty in energy reconstruction (%)
-        :param Eth: Threshold energy in EeV
-        """
-
-        E = optimize.fsolve(self.p_gt_Eth, Eth, args=(Eerr, Eth))
-
-        return round(E[0])
-    
-    def compute_arrival_energies(self, parallel=True, njobs=4):
+    def compute_arrival_rigidities(self, parallel=True, njobs=4):
         '''
-        Compute arrival energies to make the tables
+        Compute arrival rigidities to make the tables
         
         :param parallel: to enable parallel calculation or not (default True)
         :param njobs: number of jobs to parallelise (default 4)
@@ -146,42 +119,36 @@ class ProtonApproxEnergyLoss(EnergyLoss):
 
         if parallel:
 
-            args_list = [(self.E_grid, d) for d in self.distances.value]
+            args_list = [(i, self.rigidities_grid.value, d) for i, d in enumerate(self.distances.value)]
             # parallelize for each source distance
-            with Pool(njobs) as mpool:
-                results = list(
-                    tqdm(
-                        mpool.imap(self.get_arrival_energy_vec, args_list),
-                        total=len(args_list),
-                        desc="Precomputing energy grids",
-                    )
-                )
-
-                self.Earr_grid = results
+            results = Parallel(n_jobs=njobs)(delayed(self.get_arrival_rigidity_vec)(arg) for arg in args_list)
+            
+            for didx, Rarr_vec in results:
+                self.Rarr_grid[didx,:] = Rarr_vec
 
         else:
             for i in tqdm(
-                range(len(self.distances)), desc="Precomputing energy grids"
+                range(len(self.distances)), desc="Precomputing rigidity grids"
             ):
                 d = self.distances[i].value
-                self.Earr_grid.append(
-                    [self.get_arrival_energy(e, d) for e in self.E_grid]
-                )
+                for j, r in enumerate(self.rigidities_grid):
+                    self.Rarr_grid[i,j] = self.get_arrival_rigidity(r, d)
 
     def compute_Eexs(self):
         '''Compute expected energies for all distance and energies'''
         for i, d in enumerate(self.distances.value):
-            Eth_src = _proton_approx_get_source_threshold_energy(self.Eth, d)[0]
-            self.Eexs[i,:] = 2 ** (1 / (self.alpha_grid - 1)) * Eth_src * u.EeV
+            Rth_src = _proton_approx_get_source_threshold_energy(self.Rth, d)[0]
+            # NB: here force unit of EeV since its the expected energy
+            self.Eexs[i,:] = 2 ** (1 / (self.alpha_grid - 1)) * Rth_src * u.EeV
 
         # limit to some smaller value
-        self.Eexs[self.Eexs > np.max(self.E_grid) * u.EeV] = np.max(self.E_grid) * u.EeV
+        self.Eexs[self.Eexs.value > self.Rmax.value] = self.Rmax.value * u.EeV
 
-    def compute_Eth_srcs(self):
+    def compute_Rth_srcs(self):
         '''Compute source threshold energies'''
-        self.Eth_srcs = np.zeros(self.Ndistances)
+        self.Rth_srcs = np.zeros(self.Ndistances)
         for i, d in enumerate(self.distances.value):
-            self.Eth_srcs[i] = _proton_approx_get_source_threshold_energy(self.Eth, d)[0]
+            self.Rth_srcs[i] = _proton_approx_get_source_threshold_energy(self.Rth, d)[0]
 
         
     def save(self, outfile):
@@ -194,10 +161,36 @@ class ProtonApproxEnergyLoss(EnergyLoss):
 
             config_gr.create_dataset("distances_grid", data=self.distances)
             config_gr.create_dataset("alpha_grid", data=self.alpha_grid)
-            config_gr.create_dataset("E_grid", data=self.E_grid)
-            config_gr.create_dataset("Earr_grid", data=self.Earr_grid)
-            config_gr.create_dataset("Eth_src_grid", data = self.Eth_srcs)
+            config_gr.create_dataset("log10_rigidities", data=np.log10(self.rigidities_grid.to_value(u.EV)))
+            config_gr.create_dataset("Rarr_grid", data=self.Rarr_grid)
+            config_gr.create_dataset("Rth_src_grid", data = self.Rth_srcs)
             config_gr.create_dataset("log10_Eexs_grid", data=np.log10(self.Eexs.to_value(u.EeV)))
+
+
+    # def p_gt_Eth(self, Earr: float, Eerr: float, Eth: float):
+    #     """
+    #     Probability that arrival energy is anove threshold.
+
+    #     :param Earr: Arrival energy in EeV
+    #     :param Eerr: Uncertainty in energy reconstruction (%)
+    #     :param Eth: Threshold energy in EeV
+    #     """
+
+    #     return 1 - stats.norm.cdf(Eth, Earr, Eerr * Earr)
+
+    # def get_Eth_sim(self, Eerr: float, Eth: float):
+    #     """
+    #     Get a sensible threshold energy for the simulation
+    #     given the threshold energy and uncertainty in the
+    #     energy reconstruction.
+
+    #     :param Eerr: Uncertainty in energy reconstruction (%)
+    #     :param Eth: Threshold energy in EeV
+    #     """
+
+    #     E = optimize.fsolve(self.p_gt_Eth, Eth, args=(Eerr, Eth))
+
+    #     return round(E[0])
 
 """
 Energy loss functions for propagation of UHECR protons. 
