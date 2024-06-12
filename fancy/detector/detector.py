@@ -74,7 +74,6 @@ class Detector:
 
         self.start_year = detector_properties["start_year"]
         self.period_start = detector_properties["period_start"]
-        self.properties.pop("period_start")
 
         self.Eth = detector_properties["Eth"]
 
@@ -217,6 +216,8 @@ class Detector:
         """
 
         for key, value in self.properties.items():
+            if key == "period_start":
+                continue
             file_handle.create_dataset(key, data=value)
 
     def _exposure_colorbar(self, cmap):
