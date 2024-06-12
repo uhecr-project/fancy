@@ -9,7 +9,6 @@ from cmdstanpy import CmdStanModel
 from ..interfaces.stan import Direction, Mpc_to_km, convert_scale
 from ..detector.exposure import m_integrand
 from ..interfaces.integration import ExposureIntegralTable
-from fancy.physics.energy_loss.proton_energy_loss import ProtonApproxEnergyLoss
 
 from fancy.plotting import AllSkyMap
 
@@ -165,7 +164,7 @@ class PPC:
         self.Nex_preds = []
         self.labels_preds = []
 
-        self.energy_loss = ProtonApproxEnergyLoss()
+        # self.energy_loss = ProtonApproxEnergyLoss()
 
     def simulate(self, fit_chain, input_data, detector, source, seed=None, N=3):
         """

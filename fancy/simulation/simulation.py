@@ -24,7 +24,7 @@ class Simulation:
     Handles the generation of simulation samples 
     '''
 
-    truth_input_keys = ["f", "alpha_s", "alpha_b", "alpha", "log10_L", "Bigmf", "Nex"]
+    truth_input_keys = ["f", "alpha_s", "alpha_b", "log10_L", "Bigmf", "Nex"]
 
     def __init__(self, data : Data, energy_loss_table_file : str, exposure_table_file : str, gmf_model : str = "None"):
 
@@ -122,10 +122,12 @@ class Simulation:
         assert np.all([k_input in self.truth_input_keys for k_input in input_dict.keys()]), "Truth inputs do not match."
 
         alpha_s = input_dict["alpha_s"]
-        alpha_b = input_dict["alpha_b"]
         Bigmf = input_dict["Bigmf"] * u.nG
         Nex = input_dict["Nex"]
         f = input_dict["f"]
+
+        if self.mass_group != 1:
+            alpha_b = input_dict["alpha_b"]
 
         # calculate expected events from background using source fraction
         Nex_src = Nex * f
@@ -162,7 +164,10 @@ class Simulation:
         Fs = np.sum(Fs_per_Ls) * L
         # for background flux, interpolate weighted exposure and calculate using Nex_bg
         f_log10_wexp_bg = CubicSpline(x=self.alpha_grid, y=self.log10_wexp_bg_grid)  # NB: take any index for Bigmf since no dependence on it
-        F0 = Nex_bg / (10.0**f_log10_wexp_bg(alpha_b) * (u.km**2 * u.yr))
+        if self.mass_group != 1:
+            F0 = Nex_bg / (10.0**f_log10_wexp_bg(alpha_b) * (u.km**2 * u.yr))
+        else:
+            F0 = Nex_bg / (10.0**f_log10_wexp_bg(alpha_s) * (u.km**2 * u.yr))
         FT = Fs + F0  # total flux
         f1 = Fs / FT  # source fraction before detection
         print(f"FT: {FT:.3f}, Fs: {Fs:.3f}, F0: {F0:.3f}, f1 = Fs / FT: {f1:.3f}")
@@ -170,12 +175,11 @@ class Simulation:
         # create dictionaryu of truths
         self.truth_dict = {
             "alpha_s":alpha_s,
-            "alpha_b":input_dict["alpha_b"],
-            "f":input_dict["f"],
+            "f":f,
             "f1":f1,
             "L":L,
             "log10_L":np.log10(L.value),
-            "Bigmf":input_dict["Bigmf"],
+            "Bigmf":Bigmf.value,
             "F0":F0.value,
             "log10_F0":np.log10(F0.value),
             "Fs":Fs.value,
@@ -184,6 +188,8 @@ class Simulation:
             "Nsrc":Nex_src,
             "Nbg":Nex_bg
         }
+        if self.mass_group != 1:
+            self.truth_dict["alpha_b"] = alpha_b
 
         print(f"Storing truths to {truth_outfile}")
         with open(truth_outfile, "wb") as file:
@@ -227,7 +233,7 @@ class Simulation:
             src_spectrum_grid = lbounded_power_law(self.rigidities.value, self.truth_dict["alpha_s"], self.data.detector.Rth)
             probs_src = src_spectrum_grid * self.rigidity_widths.value / np.sum(src_spectrum_grid * self.rigidity_widths.value)
 
-            bg_spectrum_grid = lbounded_power_law(self.rigidities.value, self.truth_dict["alpha_b"], self.data.detector.Rth)
+            bg_spectrum_grid = lbounded_power_law(self.rigidities.value, self.truth_dict["alpha_s"], self.data.detector.Rth)
             probs_bg = bg_spectrum_grid * self.rigidity_widths.value / np.sum(bg_spectrum_grid * self.rigidity_widths.value)
 
             for id, Nsamples in enumerate(Nsamples_arr):
@@ -439,15 +445,16 @@ class Simulation:
             simulated_data.create_dataset("glon", data=glons_det)
             simulated_data.create_dataset("exposure", data=self.exposure_factors)
 
-            gmfdefl_datas_grp = simulated_data.create_group("gmf")
-            config_key = f"{self.gmf_model}_mg{self.mass_group}"
-            if config_key in gmfdefl_datas_grp.keys():
-                del gmfdefl_datas_grp[config_key]
-            gmfdefl_datas_config_grp = gmfdefl_datas_grp.create_group(config_key)
-            gmfdefl_datas_config_grp.create_dataset("kappa_gmf", data=self.kappa_gmfs)
-            gmfdefl_datas_config_grp.create_dataset("thetaP", data=self.thetaPs)
-            gmfdefl_datas_config_grp.create_dataset("glons_gb", data=self.glons_gb)
-            gmfdefl_datas_config_grp.create_dataset("glats_gb", data=self.glats_gb)
+            if self.gmf_model != "None":
+                gmfdefl_datas_grp = simulated_data.create_group("gmf")
+                config_key = f"{self.gmf_model}_mg{self.mass_group}"
+                if config_key in gmfdefl_datas_grp.keys():
+                    del gmfdefl_datas_grp[config_key]
+                gmfdefl_datas_config_grp = gmfdefl_datas_grp.create_group(config_key)
+                gmfdefl_datas_config_grp.create_dataset("kappa_gmf", data=self.kappa_gmfs)
+                gmfdefl_datas_config_grp.create_dataset("thetaP", data=self.thetaPs)
+                gmfdefl_datas_config_grp.create_dataset("glons_gb", data=self.glons_gb)
+                gmfdefl_datas_config_grp.create_dataset("glats_gb", data=self.glats_gb)
 
     # convert starting period to decimal year
     def _year_fraction(self, date):

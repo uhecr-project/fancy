@@ -127,7 +127,7 @@ class Uhecr:
         self.properties["A"] = self.A
         self.properties["zenith_angle"] = self.zenith_angle
 
-        if analysis_type == "joint_composition":
+        if analysis_type == "joint_gmf_composition":
             self.properties["mass_group"] = self.mass_group
             self.properties["kappa_gmf"] = self.kappa_gmfs
             self.properties["unit_vector_gb"] = self.unit_vector_gb

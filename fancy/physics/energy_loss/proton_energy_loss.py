@@ -80,7 +80,7 @@ class ProtonApproxEnergyLoss(EnergyLoss):
         """
         didx, Rvec, D = args
 
-        print(f"Current source: {D}")
+        print(f"Current source distance: {D:.2f} Mpc")
 
         Rarr_vec = np.zeros_like(Rvec)
         for i, R in enumerate(Rvec):

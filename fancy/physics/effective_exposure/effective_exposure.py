@@ -24,7 +24,7 @@ class EffectiveExposure:
     Also constructs tables that will be passed to stan for interpolation.
     '''
 
-    def __init__(self, data : Data, verbose=False):
+    def __init__(self, data : Data, gmf_model : str = "JF12", verbose=False):
         '''
         Class to manage calculation of the effective exposure from given source(s). 
         Also constructs tables that will be passed to stan for interpolation.
@@ -33,6 +33,7 @@ class EffectiveExposure:
         :param verbose: enable verbosity
         '''
         self.data = data
+        self.gmf_model = gmf_model
         self.verbose = verbose
 
         # detector properties
@@ -128,7 +129,7 @@ class EffectiveExposure:
         self.coords_healpy.transform_to("galactic")
 
 
-    def compute_effective_exposure(self, gmflens : GMFLensing, disable_gmf = False, kappa_max = 1e6, exposure_min = 1e-30 * u.km**2 * u.yr):
+    def compute_effective_exposure(self, gmflens : GMFLensing, kappa_max = 1e6, exposure_min = 1e-30 * u.km**2 * u.yr):
         '''
         Computation of the effective exposure.
 
@@ -166,7 +167,8 @@ class EffectiveExposure:
                         weighted_map /= np.sum(weighted_map)  # some numerical error in normalisation, so we force normalisation here
 
                         # lens the map
-                        lensed_map = gmflens.apply_lens_to_map(weighted_map, R.to_value(u.EV), disable_gmf=disable_gmf)
+                        if self.gmf_model != "None":
+                            lensed_map = gmflens.apply_lens_to_map(weighted_map, R.to_value(u.EV))
 
                         # compute effective exposure
                         eff_exp = np.dot(self.exposures, lensed_map)
@@ -180,7 +182,8 @@ class EffectiveExposure:
                     weighted_map /= np.sum(weighted_map)  # some numerical error in normalisation, so we force normalisation here
 
                     # lens the map
-                    lensed_map = gmflens.apply_lens_to_map(weighted_map, R.to_value(u.EV), disable_gmf=disable_gmf)
+                    if self.gmf_model != "None":
+                        lensed_map = gmflens.apply_lens_to_map(weighted_map, R.to_value(u.EV))
 
                     # compute effective exposure
                     eff_exp = np.dot(self.exposures, lensed_map)

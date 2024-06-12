@@ -39,15 +39,18 @@ class GMFLensing:
             raise ImportError("CRPropa must be installed to use this functionality.")
 
         self.gmf_model = gmf_model
-        path_to_lens = str(get_path_to_lens(self.lens_names[self.gmf_model]))
 
         # read in GMF lens if we have GMF enabled
         if gmf_model == "JF12":
+            path_to_lens = str(get_path_to_lens(self.lens_names[self.gmf_model]))
             self.gmf_lens = crpropa.MagneticLens(path_to_lens)
+            self.disable_gmf = False
+        elif gmf_model == "None":
+            self.disable_gmf = True
         else:
             raise NotImplementedError(f"Lensing for GMF model {gmf_model} not yet implemented.")
         
-    def apply_lens_with_particles(self, rigidities, coordinates : SkyCoord, disable_gmf=False):
+    def apply_lens_with_particles(self, rigidities, coordinates : SkyCoord):
         '''
         Apply GMF lensing by sampling & re-sampling. Returns same number of sampled events at earth as SkyCoord objects
 
@@ -70,7 +73,7 @@ class GMFLensing:
             )
 
         # lens 
-        if disable_gmf:
+        if not self.disable_gmf:
             particle_map.applyLens(self.gmf_lens)
         
         # sample back same number of particles at earth
@@ -78,7 +81,7 @@ class GMFLensing:
 
         return SkyCoord(glon_earth * u.rad, glat_earth * u.rad, frame="galactic", representation_type="unitspherical")
     
-    def apply_lens_to_map(self, weighted_map, R : float, disable_gmf=False):
+    def apply_lens_to_map(self, weighted_map, R : float):
         '''
         Apply GMF lensing from weighted healpy map
 
@@ -99,7 +102,7 @@ class GMFLensing:
         particles.addWeights(R * crpropa.EeV, weighted_map)
 
         # apply lensing
-        if disable_gmf:
+        if not self.disable_gmf:
             particles.applyLens(R * crpropa.EeV, self.gmf_lens)
 
         # obtain the lensed weights
