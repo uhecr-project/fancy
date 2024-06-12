@@ -233,7 +233,7 @@ class EffectiveExposure:
 
     def save(self, outfile):
         '''Save tabulated results to h5py File'''
-        with h5py.File(outfile, "w") as f:
+        with h5py.File(outfile, "a") as f:
             config_label = f"{self.detector_type}_mg{self.mass_group}"
             if config_label in f.keys():
                 del f[config_label]

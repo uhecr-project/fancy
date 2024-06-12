@@ -1,38 +1,9 @@
 import numpy as np
-from astropy.coordinates import SkyCoord, AltAz
-from astropy.time import Time
-from astropy import units as u
-from matplotlib import pyplot as plt
 import h5py
-from tqdm import tqdm as progress_bar
-from multiprocessing import Pool, cpu_count
-from scipy.stats import bernoulli
-import os
-
-from ..interfaces.integration import ExposureIntegralTable
-from ..interfaces.stan import Direction, convert_scale, coord_to_uv, uv_to_coord
-from ..interfaces.data import Uhecr
-from ..interfaces.utils import get_nucleartable, kappa_ex
-
-from ..plotting import AllSkyMap
-from ..physics.energy_loss.proton_energy_loss import ProtonApproxEnergyLoss
-from ..physics.energy_loss.crpropa_energy_loss import CRPropaApproxEnergyLoss
-from ..detector.vMF.vmf import sample_vMF, sample_sphere
-from ..detector.exposure import m_dec
 
 from fancy.interfaces.data import Data
 from fancy.interfaces.stan import Model
-
-from fancy.physics.gmf.gmf import GMFDeflections
-
-try:
-
-    import crpropa
-
-except ImportError:
-
-    crpropa = None
-
+from fancy.interfaces.integration import ExposureIntegralTable
 
 class Analysis:
     """
