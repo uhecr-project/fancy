@@ -190,25 +190,26 @@ class EffectiveExposure:
         '''
         Compute the weighted exposure
         '''
-        self.wexp_grid = np.zeros((self.Nsrcs+1, self.Nalphas, self.NBigmfs)) * (u.km**2 * u.yr)
+        self.wexp_src_grid = np.zeros((self.Nsrcs, self.Nalphas, self.NBigmfs)) * (u.km**2 * u.yr)
+        self.wexp_bg_grid = np.zeros(self.Nalphas) * (u.km**2 * u.yr)
 
         if self.mass_group != 1:
             # compute the detection threshold CCDF to take into account downscattering of events
             p_rdet = 1 - np.array([norm.cdf(self.data.detector.Rth, loc=R.value, scale=self.data.detector.energy_uncertainty * R.value) for R in self.rigidities_grid])
 
-        for (id, ia) in np.ndindex(self.Nsrcs+1, self.Nalphas):
+        for ia in range(self.Nalphas):
 
             alpha = self.alpha_grid[ia]
 
-            if id < self.Nsrcs:  # sources
-
+            # source case
+            for id in range(self.Nsrcs):
                 d_idx = np.digitize(self.Dsrcs[id], self.distances_grid, right=True)  # get index from distance grid in prince calculation
 
                 for ib in range(self.NBigmfs):
                 
                     if self.mass_group != 1:
                         # integrate over all rigidities including detection effects
-                        self.wexp_grid[id,ia,ib] = np.trapz(y=self.arrspects_grid[d_idx,:,ia] * self.eff_exposure_grid[id, :, ib] * p_rdet, x=self.rigidities_grid)
+                        self.wexp_src_grid[id,ia,ib] = np.trapz(y=self.arrspects_grid[d_idx,:,ia] * self.eff_exposure_grid[id, :, ib] * p_rdet, x=self.rigidities_grid)
                     else:
                         # compute expected energy and find index in rigidity grid corresponding to it (we parametrize energy as rigidity for MG1)
                         Rex = self.Eexs_grid[d_idx, ia]
@@ -218,17 +219,17 @@ class EffectiveExposure:
                         # TODO: update this for bounded energy spectrum
                         w_factor = (self.Rth_srcs[d_idx].value / self.data.detector.Rth)**(1.0 - alpha)
                         
-                        self.wexp_grid[id,ia,ib] = self.eff_exposure_grid[id, Rex_idx, ib] * w_factor
+                        self.wexp_src_grid[id,ia,ib] = self.eff_exposure_grid[id, Rex_idx, ib] * w_factor
 
-            else:  # background -> just a power law
-                if self.mass_group != 1:
-                    
-                    # integrate over background spectrum w/ detection effects, which is jsut a power law
-                    bg_spectrum = bounded_power_law(self.rigidities_grid.value, alpha, self.data.detector.Rth, self.data.detector.Rth_max) * (1 / u.EV)
-                    self.wexp_grid[id,ia,ib] = np.trapz(y=bg_spectrum * self.eff_exposure_grid[id, :, ib] * p_rdet, x=self.rigidities_grid)
+            # background case
+            if self.mass_group != 1:
+                
+                # integrate over background spectrum w/ detection effects, which is jsut a power law
+                bg_spectrum = bounded_power_law(self.rigidities_grid.value, alpha, self.data.detector.Rth, self.data.detector.Rth_max) * (1 / u.EV)
+                self.wexp_bg_grid[ia] = np.trapz(y=bg_spectrum * self.eff_exposure_grid[-1, :, 0] * p_rdet, x=self.rigidities_grid, axis=0)
 
-                else: # for MG1 we just use the default exposure since rigidity / energy doesnt play a role here
-                    self.wexp_grid[id,ia,ib] = self.data.detector.alpha_T / (4 * np.pi) * (u.km**2 * u.yr)
+            else: # for MG1 we just use the default exposure since rigidity / energy doesnt play a role here
+                self.wexp_bg_grid[ia] = self.data.detector.alpha_T / (4 * np.pi) * (u.km**2 * u.yr)
 
     def save(self, outfile):
         '''Save tabulated results to h5py File'''
@@ -244,7 +245,8 @@ class EffectiveExposure:
             config_gr.create_dataset("log10_Bigmf_grid", data=np.log10(self.Bigmf_grid.to_value(u.nG)))
             config_gr.create_dataset("distances_grid", data=self.distances_grid)
             config_gr.create_dataset("effective_exposure", data=self.eff_exposure_grid)
-            config_gr.create_dataset("log10_wexp_grid", data=np.log10(self.wexp_grid.to_value(u.km**2 * u.yr)))
+            config_gr.create_dataset("log10_wexp_src_grid", data=np.log10(self.wexp_src_grid.to_value(u.km**2 * u.yr)))
+            config_gr.create_dataset("log10_wexp_bg_grid", data=np.log10(self.wexp_bg_grid.to_value(u.km**2 * u.yr)))
 
     def vMF(self, x, mu, kappa):
         '''

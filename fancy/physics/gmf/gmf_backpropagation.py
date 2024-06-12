@@ -1,5 +1,5 @@
 '''Class to determine backpropagated events from a given distribution of UHECRs with a particular detector'''
-
+import os
 import numpy as np
 from astropy.coordinates import SkyCoord
 from fancy import Data
@@ -58,8 +58,8 @@ class GMFBackPropagation:
 
     def _compile_vMFmodel(self):
         # model to fit vMF with
-        stan_path = "./stan/"
-        fit_filename = stan_path + "fit_from_vMF.stan"
+        stan_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "stan")
+        fit_filename = os.path.join(stan_path, "fit_from_vMF.stan")
         stanc_options = {"include-paths": stan_path}
 
         self.vMF_model = CmdStanModel(

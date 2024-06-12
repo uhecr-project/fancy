@@ -6,6 +6,7 @@ import h5py
 import pickle as pickle
 
 from astropy.coordinates import SkyCoord
+import astropy.units as u
 
 from fancy.utils.package_data import (
     get_path_to_lens,
@@ -75,7 +76,7 @@ class GMFLensing:
         # sample back same number of particles at earth
         _, _, glon_earth, glat_earth = particle_map.getRandomParticles(int(Nsamples))
 
-        return SkyCoord(glon_earth, glat_earth, frame="galactic", representation_type="unitspherical")
+        return SkyCoord(glon_earth * u.rad, glat_earth * u.rad, frame="galactic", representation_type="unitspherical")
     
     def apply_lens_to_map(self, weighted_map, R : float, disable_gmf=False):
         '''

@@ -111,7 +111,7 @@ class Uhecr:
                 glons_gb = data["gmf"][config_key]["glons_gb"][()]
                 glats_gb = data["gmf"][config_key]["glats_gb"][()]
                 self.coords_gb = self.get_coordinates(glons_gb, glats_gb)
-                self.unit_vectors_gb =  self.coords_gb.cartesian.xyz.value.T
+                self.unit_vector_gb =  self.coords_gb.cartesian.xyz.value.T
                 self.kappa_gmfs = data["gmf"][config_key]["kappa_gmf"][()]  # deflection parameter
 
     def _get_properties(self, analysis_type):
@@ -129,8 +129,8 @@ class Uhecr:
 
         if analysis_type == "joint_composition":
             self.properties["mass_group"] = self.mass_group
-            self.properties["kappa_gmfs"] = self.kappa_gmfs
-            self.properties["unit_vectors_gb"] = self.unit_vectors_gb
+            self.properties["kappa_gmf"] = self.kappa_gmfs
+            self.properties["unit_vector_gb"] = self.unit_vector_gb
 
         # Only if simulated UHECRs
         # if isinstance(self.source_labels, (list, np.ndarray)):

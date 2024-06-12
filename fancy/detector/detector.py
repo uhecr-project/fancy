@@ -73,6 +73,7 @@ class Detector:
         self.params.append(self.M)
 
         self.start_year = detector_properties["start_year"]
+        self.period_start = detector_properties["period_start"]
 
         self.Eth = detector_properties["Eth"]
 
