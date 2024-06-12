@@ -74,6 +74,7 @@ class Detector:
 
         self.start_year = detector_properties["start_year"]
         self.period_start = detector_properties["period_start"]
+        self.properties.pop("period_start")
 
         self.Eth = detector_properties["Eth"]
 
@@ -114,6 +115,7 @@ class Detector:
         self.Rth_max = Rth_max  # (relatively arbitrary) maximum that we set in arrival spectrum calculation
 
         self.mass_group = mass_group
+        
 
     def show(
         self,
