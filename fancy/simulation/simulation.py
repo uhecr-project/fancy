@@ -103,7 +103,7 @@ class Simulation:
         # now read the exposure table file
         with h5py.File(exposure_table_file, "r") as f:
             # find the relevant group
-            config_label = f"{self.detector_type}_mg{self.mass_group}"
+            config_label = f"{self.source_type}_{self.detector_type}_mg{self.mass_group}_{self.gmf_model}"
             self.log10_Bigmf_grid = f[config_label]["log10_Bigmf_grid"][()] * u.nG
             self.log10_wexp_src_grid = f[config_label]["log10_wexp_src_grid"][()] * u.km**2 * u.yr
             self.log10_wexp_bg_grid = f[config_label]["log10_wexp_bg_grid"][()] * u.km**2 * u.yr

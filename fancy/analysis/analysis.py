@@ -14,6 +14,7 @@ class Analysis:
         self,
         data: Data,
         model: Model,
+        gmf_model : str = "None",
         analysis_type=None,
         filename=None,
         summary=b"",
@@ -32,14 +33,15 @@ class Analysis:
 
         self.data = data
         self.model = model
-        self.filename = filename
+        # self.filename = filename
+        self.gmf_model = gmf_model
 
-        # Initialise file
-        if self.filename:
+        #  # Initialise file
+        # if self.filename:
 
-            with h5py.File(self.filename, "w") as f:
-                desc = f.create_group("description")
-                desc.attrs["summary"] = summary
+        #     with h5py.File(self.filename, "w") as f:
+        #         desc = f.create_group("description")
+        #         desc.attrs["summary"] = summary
 
         self.simulation_input = None
         self.fit_input = None
@@ -117,9 +119,9 @@ class Analysis:
         """
 
         if self.analysis_type == self.composition_type or self.analysis_type == self.gmf_composition_type:
-            config_label = f"{self.data.detector.label}_mg{self.data.detector.mass_group}"
             '''Read from energy loss tables'''
             with h5py.File(energy_loss_table_file, "r") as file:
+                config_label = f"{self.data.detector.label}_mg{self.data.detector.mass_group}"
 
                 self.distances_grid = file[config_label]["distances_grid"][()] # Mpc
                 self.alpha_grid = file[config_label]["alpha_grid"][()]
@@ -133,6 +135,7 @@ class Analysis:
 
             '''Read from exposure table'''
             with h5py.File(exposure_table_file, "r") as file:
+                config_label = f"{self.data.source.label}_{self.data.detector.label}_mg{self.data.detector.mass_group}_{self.gmf_model}"
                 self.log10_Bigmf_grid = file[config_label]["log10_Bigmf_grid"][()] # log10(nG)
                 self.log10_wexp_src_grid = file[config_label]["log10_wexp_src_grid"][()] # km^2 yr
                 self.log10_wexp_bg_grid = file[config_label]["log10_wexp_bg_grid"][()] # km^2 yr
@@ -303,12 +306,12 @@ class Analysis:
 
 
 
-    def save(self):
+    def save(self, outfile):
         """
         Write the analysis to file.
         """
 
-        with h5py.File(self.filename, "r+") as f:
+        with h5py.File(outfile, "r+") as f:
 
             source_handle = f.create_group("source")
             if self.data.source:

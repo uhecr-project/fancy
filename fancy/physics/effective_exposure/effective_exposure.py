@@ -169,9 +169,11 @@ class EffectiveExposure:
                         # lens the map
                         if self.gmf_model != "None":
                             lensed_map = gmflens.apply_lens_to_map(weighted_map, R.to_value(u.EV))
-
-                        # compute effective exposure
-                        eff_exp = np.dot(self.exposures, lensed_map)
+                            # compute effective exposure
+                            eff_exp = np.dot(self.exposures, lensed_map)
+                        else:
+                            eff_exp = np.dot(self.exposures, weighted_map)
+                        
                         # set some limit incase the effective exposure is so small
                         eff_exp = exposure_min if eff_exp < exposure_min else eff_exp
                         self.eff_exposure_grid[id, ir, ib] = eff_exp
@@ -184,9 +186,12 @@ class EffectiveExposure:
                     # lens the map
                     if self.gmf_model != "None":
                         lensed_map = gmflens.apply_lens_to_map(weighted_map, R.to_value(u.EV))
+                        # compute effective exposure
+                        eff_exp = np.dot(self.exposures, lensed_map)
+                    else:
+                        eff_exp = np.dot(self.exposures, weighted_map)
 
                     # compute effective exposure
-                    eff_exp = np.dot(self.exposures, lensed_map)
                     self.eff_exposure_grid[id, ir, :] = eff_exp
 
     def get_weighted_exposure(self):
@@ -237,7 +242,7 @@ class EffectiveExposure:
     def save(self, outfile):
         '''Save tabulated results to h5py File'''
         with h5py.File(outfile, "a") as f:
-            config_label = f"{self.detector_type}_mg{self.mass_group}"
+            config_label = f"{self.source_type}_{self.detector_type}_mg{self.mass_group}_{self.gmf_model}"
             if config_label in f.keys():
                 del f[config_label]
             config_gr = f.create_group(config_label)
