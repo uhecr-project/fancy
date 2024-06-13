@@ -562,23 +562,13 @@ class Analysis:
         Gather inputs from Model, Data and IntegrationTables.
         """
 
-        
-
-        # convert scale for sampling
-        D = self.data.source.distance
-        alpha_T = self.data.detector.alpha_T
-        if self.analysis_type != self.composition_type:
-            D, alpha_T, eps_fit = convert_scale(D, alpha_T, eps_fit)
-
         # prepare fit inputs
         self.fit_input = {
             "Ns": self.data.source.N,
             "varpi": self.data.source.coord.cartesian.xyz.value.T,
-            "D": D,
             "N": self.data.uhecr.N,
             "A": self.data.uhecr.A,
             "zenith_angle": self.data.uhecr.zenith_angle,
-            "alpha_T": alpha_T,
         }
 
         if self.analysis_type != self.composition_type:
@@ -589,6 +579,12 @@ class Analysis:
             # temporary
             E_grid = np.zeros(50)
             Earr_grid = list(np.zeros((1, 50)))
+
+            # convert scale for sampling
+            D = self.data.source.distance
+            alpha_T = self.data.detector.alpha_T
+            if self.analysis_type != self.composition_type:
+                D, alpha_T, eps_fit = convert_scale(D, alpha_T, eps_fit)
 
             # KW: due to multiprocessing appending,
             # collapse dimension from (1, 23, 50) -> (23, 50)
@@ -606,6 +602,8 @@ class Analysis:
             self.fit_input["eps"] = eps_fit
             self.fit_input["Ngrid"] = len(kappa_grid)
             self.fit_input["kappa_grid"] = kappa_grid
+            self.fit_input["D"] = D
+            self.fit_input["alpha_T"] = alpha_T
 
         if (
             self.analysis_type == self.joint_type
