@@ -209,7 +209,7 @@ class GMFBackPropagation:
         self.uhecr_coords_gb.representation_type = "unitspherical"
 
     def compute_kappa_gmf(self):
-        '''compute kappa gmf'''
+        '''Compute kappa gmf by fitting to vMF distribution'''
         self.kappa_gmfs = Parallel(n_jobs=2)(delayed(self._get_kappa_gmf)(uhecr_idx) for uhecr_idx in range(self.Nuhecrs))
         self.thetaPs = self.f_theta(self.kappa_gmfs)  # for plotting purposes
 

@@ -311,7 +311,7 @@ class Analysis:
         Write the analysis to file.
         """
 
-        with h5py.File(outfile, "r+") as f:
+        with h5py.File(outfile, "w") as f:
 
             source_handle = f.create_group("source")
             if self.data.source:
