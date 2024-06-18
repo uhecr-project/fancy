@@ -23,28 +23,30 @@ class ProtonApproxEnergyLoss(EnergyLoss):
     Wrapper class to update code below for new interface.
     """
 
-    def __init__(self, data : Data, verbose=False):
+    def __init__(self, data: Data, verbose=False):
 
         super().__init__(data, verbose)
 
         # raise exception if mass group != 1
         if self.mass_group != 1:
-            raise ValueError(f"Mass Group {self.mass_group} not valid with this approach. Use Nuclei Energy Loss Model isntead.")
-    
+            raise ValueError(
+                f"Mass Group {self.mass_group} not valid with this approach. Use Nuclei Energy Loss Model isntead."
+            )
+
     def initialise_grid(
-            self, 
-            weights_dir : str = "./resources/composition_weights_PSB.h5", 
-            alpha_min=-3, 
-            alpha_max=10, 
-            Nalphas=50,
-        ):
-        '''
+        self,
+        weights_dir: str = "./resources/composition_weights_PSB.h5",
+        alpha_min=-3,
+        alpha_max=10,
+        Nalphas=50,
+    ):
+        """
         Initalise our grid using composition weights
-        
+
         :param weights_dir: directory to composition weights
         :param alpha_min, alpha_max, Nalphas: the min / max and density of spectral index grid
         :param Emax, NEs: the maximum energy (in EeV) and density of the log-spaced source energy grid
-        '''
+        """
         super().initialise_grid(weights_dir, alpha_min, alpha_max, Nalphas)
 
         self.Rarr_grid = np.zeros((self.Ndistances, self.NRs))
@@ -98,7 +100,7 @@ class ProtonApproxEnergyLoss(EnergyLoss):
             Rarr_vec[i] = Rarr[0]
 
         return didx, Rarr_vec
-    
+
     def p_gt_Rth(self, delta, d=5):
         """
         Probability that arrival energy is anove threshold for some distance
@@ -107,24 +109,34 @@ class ProtonApproxEnergyLoss(EnergyLoss):
         """
         delta = self.delta if delta == None else delta
         didx = np.digitize(d * u.Mpc, self.distances_grid, right=True)
-        return 1 - np.array([stats.norm.cdf(self.Rth, Rarr, delta * Rarr) for Rarr in self.Rarr_grid[didx,:]])
-    
+        return 1 - np.array(
+            [
+                stats.norm.cdf(self.Rth, Rarr, delta * Rarr)
+                for Rarr in self.Rarr_grid[didx, :]
+            ]
+        )
+
     def compute_arrival_rigidities(self, parallel=True, njobs=4):
-        '''
+        """
         Compute arrival rigidities to make the tables
-        
+
         :param parallel: to enable parallel calculation or not (default True)
         :param njobs: number of jobs to parallelise (default 4)
-        '''
+        """
 
         if parallel:
 
-            args_list = [(i, self.rigidities_grid.value, d) for i, d in enumerate(self.distances.value)]
+            args_list = [
+                (i, self.rigidities_grid.value, d)
+                for i, d in enumerate(self.distances.value)
+            ]
             # parallelize for each source distance
-            results = Parallel(n_jobs=njobs)(delayed(self.get_arrival_rigidity_vec)(arg) for arg in args_list)
-            
+            results = Parallel(n_jobs=njobs)(
+                delayed(self.get_arrival_rigidity_vec)(arg) for arg in args_list
+            )
+
             for didx, Rarr_vec in results:
-                self.Rarr_grid[didx,:] = Rarr_vec
+                self.Rarr_grid[didx, :] = Rarr_vec
 
         else:
             for i in tqdm(
@@ -132,27 +144,28 @@ class ProtonApproxEnergyLoss(EnergyLoss):
             ):
                 d = self.distances[i].value
                 for j, r in enumerate(self.rigidities_grid):
-                    self.Rarr_grid[i,j] = self.get_arrival_rigidity(r, d)
+                    self.Rarr_grid[i, j] = self.get_arrival_rigidity(r, d)
 
     def compute_Eexs(self):
-        '''Compute expected energies for all distance and energies'''
+        """Compute expected energies for all distance and energies"""
         for i, d in enumerate(self.distances.value):
             Rth_src = _proton_approx_get_source_threshold_energy(self.Rth, d)[0]
             # NB: here force unit of EeV since its the expected energy
-            self.Eexs[i,:] = 2 ** (1 / (self.alpha_grid - 1)) * Rth_src * u.EeV
+            self.Eexs[i, :] = 2 ** (1 / (self.alpha_grid - 1)) * Rth_src * u.EeV
 
         # limit to some smaller value
         self.Eexs[self.Eexs.value > self.Rmax.value] = self.Rmax.value * u.EeV
 
     def compute_Rth_srcs(self):
-        '''Compute source threshold energies'''
+        """Compute source threshold energies"""
         self.Rth_srcs = np.zeros(self.Ndistances)
         for i, d in enumerate(self.distances.value):
-            self.Rth_srcs[i] = _proton_approx_get_source_threshold_energy(self.Rth, d)[0]
+            self.Rth_srcs[i] = _proton_approx_get_source_threshold_energy(self.Rth, d)[
+                0
+            ]
 
-        
     def save(self, outfile):
-        '''Save to h5py output file'''
+        """Save to h5py output file"""
         with h5py.File(outfile, "a") as f:
             config_label = f"{self.detector_type}_mg{self.mass_group}"
             if config_label in f.keys():
@@ -161,11 +174,14 @@ class ProtonApproxEnergyLoss(EnergyLoss):
 
             config_gr.create_dataset("distances_grid", data=self.distances)
             config_gr.create_dataset("alpha_grid", data=self.alpha_grid)
-            config_gr.create_dataset("log10_rigidities", data=np.log10(self.rigidities_grid.to_value(u.EV)))
+            config_gr.create_dataset(
+                "log10_rigidities", data=np.log10(self.rigidities_grid.to_value(u.EV))
+            )
             config_gr.create_dataset("Rarr_grid", data=self.Rarr_grid)
-            config_gr.create_dataset("Rth_src_grid", data = self.Rth_srcs)
-            config_gr.create_dataset("log10_Eexs_grid", data=np.log10(self.Eexs.to_value(u.EeV)))
-
+            config_gr.create_dataset("Rth_src_grid", data=self.Rth_srcs)
+            config_gr.create_dataset(
+                "log10_Eexs_grid", data=np.log10(self.Eexs.to_value(u.EeV))
+            )
 
     # def p_gt_Eth(self, Earr: float, Eerr: float, Eth: float):
     #     """
@@ -191,6 +207,7 @@ class ProtonApproxEnergyLoss(EnergyLoss):
     #     E = optimize.fsolve(self.p_gt_Eth, Eth, args=(Eerr, Eth))
 
     #     return round(E[0])
+
 
 """
 Energy loss functions for propagation of UHECR protons. 

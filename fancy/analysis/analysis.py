@@ -5,6 +5,7 @@ from fancy.interfaces.data import Data
 from fancy.interfaces.stan import Model
 from fancy.interfaces.integration import ExposureIntegralTable
 
+
 class Analysis:
     """
     To manage the running of simulations and fits based on Data and Model objects.
@@ -14,7 +15,7 @@ class Analysis:
         self,
         data: Data,
         model: Model,
-        gmf_model : str = "None",
+        gmf_model: str = "None",
         analysis_type=None,
         filename=None,
         summary=b"",
@@ -108,9 +109,9 @@ class Analysis:
         # table containing (A, Z) of each element
         # self.nuc_table = get_nucleartable()
 
-    
-
-    def use_tables(self, exposure_table_file : str, energy_loss_table_file : str, main_only=True):
+    def use_tables(
+        self, exposure_table_file: str, energy_loss_table_file: str = "", main_only=True
+    ):
         """
         Pass in names of integral tables that have already been made.
         Only the main table is read in by default, the simulation table
@@ -118,27 +119,44 @@ class Analysis:
         changed.
         """
 
-        if self.analysis_type == self.composition_type or self.analysis_type == self.gmf_composition_type:
-            '''Read from energy loss tables'''
+        if (
+            self.analysis_type == self.composition_type
+            or self.analysis_type == self.gmf_composition_type
+        ):
+            """Read from energy loss tables"""
             with h5py.File(energy_loss_table_file, "r") as file:
-                config_label = f"{self.data.detector.label}_mg{self.data.detector.mass_group}"
+                config_label = (
+                    f"{self.data.detector.label}_mg{self.data.detector.mass_group}"
+                )
 
-                self.distances_grid = file[config_label]["distances_grid"][()] # Mpc
+                self.distances_grid = file[config_label]["distances_grid"][()]  # Mpc
                 self.alpha_grid = file[config_label]["alpha_grid"][()]
                 self.log10_Rgrid = file[config_label]["log10_rigidities"][()]
-                self.log10_Eexs_grid = file[config_label]["log10_Eexs_grid"][()] # log10(EeV)
+                self.log10_Eexs_grid = file[config_label]["log10_Eexs_grid"][
+                    ()
+                ]  # log10(EeV)
 
                 if self.data.detector.mass_group != 1:
-                    self.log10_arr_spect_grid = file[config_label]["log10_arrspect_grid"][()]  # log10(1/EV)
+                    self.log10_arr_spect_grid = file[config_label][
+                        "log10_arrspect_grid"
+                    ][
+                        ()
+                    ]  # log10(1/EV)
                 else:
                     self.Rarr_grid = file[config_label]["Rarr_grid"][()]  # log10(1/EV)
 
-            '''Read from exposure table'''
+            """Read from exposure table"""
             with h5py.File(exposure_table_file, "r") as file:
                 config_label = f"{self.data.source.label}_{self.data.detector.label}_mg{self.data.detector.mass_group}_{self.gmf_model}"
-                self.log10_Bigmf_grid = file[config_label]["log10_Bigmf_grid"][()] # log10(nG)
-                self.log10_wexp_src_grid = file[config_label]["log10_wexp_src_grid"][()] # km^2 yr
-                self.log10_wexp_bg_grid = file[config_label]["log10_wexp_bg_grid"][()] # km^2 yr
+                self.log10_Bigmf_grid = file[config_label]["log10_Bigmf_grid"][
+                    ()
+                ]  # log10(nG)
+                self.log10_wexp_src_grid = file[config_label]["log10_wexp_src_grid"][
+                    ()
+                ]  # km^2 yr
+                self.log10_wexp_bg_grid = file[config_label]["log10_wexp_bg_grid"][
+                    ()
+                ]  # km^2 yr
 
         else:
             if main_only:
@@ -147,7 +165,7 @@ class Analysis:
                 self.tables.kappa = input_table.kappa
                 self.tables.alphas = input_table.alphas
 
-                # uncomment once we figure out bug for single source case 
+                # uncomment once we figure out bug for single source case
                 # with h5py.File(input_filename, "r") as f:
                 #     self.E_grid = f["energy/E_grid"][()]
                 #     self.Earr_grid = f["energy/Earr_grid"][()]
@@ -221,20 +239,27 @@ class Analysis:
                     _, self.fit_input["Z"] = self.nuc_table[ptype]
                     self.fit_input["kappa_gmfs"] = self.data.uhecr.kappa_gmfs
 
-        elif self.analysis_type == self.composition_type or self.analysis_type == self.gmf_composition_type:
+        elif (
+            self.analysis_type == self.composition_type
+            or self.analysis_type == self.gmf_composition_type
+        ):
             if self.analysis_type == self.gmf_composition_type:
                 self.fit_input["arrival_direction"] = self.data.uhecr.unit_vector_gb
                 self.fit_input["kappa_ds"] = self.data.uhecr.kappa_gmfs
             else:
                 self.fit_input["arrival_direction"] = self.data.uhecr.unit_vector
-                self.fit_input["kappa_ds"] = np.full(self.data.uhecr.N, self.data.detector.kappa_d)
-            
+                self.fit_input["kappa_ds"] = np.full(
+                    self.data.uhecr.N, self.data.detector.kappa_d
+                )
+
             # UHECR parameters
             # if we find rigidity in dataset, then use that, otherwise divide by meanZ of mass group
             if len(self.data.uhecr.rigidity) > 0:
                 self.fit_input["Rdet"] = self.data.uhecr.rigidity
             else:
-                self.fit_input["Rdet"] = self.data.uhecr.energy / self.data.detector.meanZ
+                self.fit_input["Rdet"] = (
+                    self.data.uhecr.energy / self.data.detector.meanZ
+                )
             self.fit_input["exp_factors"] = self.data.uhecr.exposure
 
             # detector parameters
@@ -251,7 +276,9 @@ class Analysis:
             self.fit_input["alpha_grid"] = self.alpha_grid
 
             if self.data.detector.mass_group != 1:
-                self.fit_input["log_arr_spectrum_grid"] = np.log(10.0**self.log10_arr_spect_grid)
+                self.fit_input["log_arr_spectrum_grid"] = np.log(
+                    10.0**self.log10_arr_spect_grid
+                )
             else:
                 self.fit_input["Rarr_grid"] = self.Rarr_grid
 
@@ -293,7 +320,7 @@ class Analysis:
             show_progress=show_progress,
             output_dir=output_dir,
             iter_warmup=warmup,
-            **kwargs
+            **kwargs,
         )
 
         # Diagnositics
@@ -303,8 +330,6 @@ class Analysis:
         self.chain = self.fit.stan_variables()
         print("Done!")
         return self.fit
-
-
 
     def save(self, outfile):
         """
@@ -501,7 +526,6 @@ class Analysis:
     #             E_group = f.create_group("energy")
     #             E_group.create_dataset("E_grid", data=self.E_grid)
     #             E_group.create_dataset("Earr_grid", data=self.Earr_grid)
-    
 
     # def plot(self, type=None, cmap=None):
     #     """
@@ -596,7 +620,7 @@ class Analysis:
     #     new_uhecr.from_properties(uhecr_properties)
 
     #     self.data.uhecr = new_uhecr
-    
+
     # def _get_zenith_angle(self, c_icrs, loc, time):
     #     """
     #     Calculate the zenith angle of a known point
