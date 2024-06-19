@@ -209,8 +209,8 @@ class Simulation:
         self.truth_dict = {
             "alpha_s": alpha_s,
             "f": f,
-            "f1": f1,
-            "L": L,
+            "f1": f1.value,
+            "L": L.value,
             "log10_L": np.log10(L.value),
             "Bigmf": Bigmf.value,
             "F0": F0.value,
@@ -663,7 +663,7 @@ def bounded_power_law(x, alpha, xmin, xmax):
 
 def lbounded_power_law(x, alpha, xmin):
     """Lower bounded power law spectrum"""
-    return (alpha - 1.0) * xmin ** (alpha - 1) * x ** (-alpha)
+    return (alpha - 1.0) * xmin ** (alpha - 1.0) * x ** (-alpha)
 
 
 def theta_igmf(R, Bigmf, D, lc=1):
