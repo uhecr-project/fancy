@@ -203,7 +203,7 @@ class Simulation:
             F0 = Nex_bg / (10.0 ** f_log10_wexp_bg(alpha_s) * (u.km**2 * u.yr))
         FT = Fs + F0  # total flux
         f1 = Fs / FT  # source fraction before detection
-        print(f"FT: {FT:.3f}, Fs: {Fs:.3f}, F0: {F0:.3f}, f1 = Fs / FT: {f1:.3f}")
+        print(f"FT: {FT:.3e}, Fs: {Fs:.3e}, F0: {F0:.3e}, f1 = Fs / FT: {f1:.3e}")
 
         # create dictionaryu of truths
         self.truth_dict = {

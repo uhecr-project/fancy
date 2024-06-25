@@ -193,7 +193,7 @@ class NucleiEnergyLoss(EnergyLoss):
 
                 src_spect_unnormed = (
                     self.Asrc_pdfs[id, im, :]
-                    * self.Zs[im] ** (1 - self.alpha_grid[ia])
+                    * self.Zs[im] ** (1.0 - self.alpha_grid[ia])
                     * self.rigidities_grid.to_value(u.EV) ** (-self.alpha_grid[ia])
                 )
 
@@ -210,6 +210,9 @@ class NucleiEnergyLoss(EnergyLoss):
 
             # important to sum first, then divide to avoid Nan issues
             self.Eexs[id, ia] = (src_Enorm / src_norm) * u.EeV
+
+        # apply some absolute minimum
+        self.Eexs[self.Eexs < 1e-10 * u.EeV] = 1e-10 * u.EeV
 
     def compute_arrival_PDF(self):
         """Compute arrival composition PDF"""
