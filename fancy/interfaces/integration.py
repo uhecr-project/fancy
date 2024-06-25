@@ -1,11 +1,24 @@
 from re import T
 from scipy import integrate, interpolate
+from scipy.integrate import trapezoid
 import h5py
 from tqdm import tqdm as progress_bar
+import time 
 
 from ..detector.exposure import *
 
 from multiprocessing import Pool, cpu_count
+
+'''
+
+KW (20.06.24): This class is no longer in use in the current framework except in analysis.use_tables 
+when the model type is not joint_composition or joint_gmf_composition. But in any case we are not in 
+either of these categories so it will not be called.
+
+This is also called in PPC in results, but we also do not use it in the current framework.
+As such, this class now only exists for compatibility sake and can be removed if appropriately taken care of.
+
+'''
 
 __all__ = ["ExposureIntegralTable"]
 
@@ -15,9 +28,6 @@ class ExposureIntegralTable:
     Handles the building and storage of exposure integral tables
     that are passed to Stan to be interpolated over.
     """
-
-    # number of threads, take 3/4 so that CPU doesnt overload
-    nthreads = int(cpu_count() * 0.75)
 
     def __init__(self, varpi=None, params=None, input_filename=None):
         """
@@ -36,6 +46,7 @@ class ExposureIntegralTable:
 
         self.table = []
         self.sim_table = []
+        self.alphas = []
 
         if input_filename != None:
             self.init_from_file(input_filename)
@@ -97,7 +108,7 @@ class ExposureIntegralTable:
             self.sim_table = results
             print()
 
-    def build_for_sim_parallel(self, kappa, alpha, B, D):
+    def build_for_sim_parallel(self, kappa, alpha, B, D, nthreads):
         """
         Build the tabulated integrals to be used for simulations and posterior predictive checks.
         Save with the filename given.
@@ -119,7 +130,7 @@ class ExposureIntegralTable:
 
             args = [(v, k, self.params) for v in self.varpi]
 
-            with Pool(self.nthreads) as mpool:
+            with Pool(nthreads) as mpool:
                 results = list(
                     progress_bar(
                         mpool.imap(self.eps_per_source_sim, args),
@@ -135,7 +146,7 @@ class ExposureIntegralTable:
         else:
             args = [(v, k, self.params) for v, k in zip(self.varpi, self.sim_kappa)]
 
-            with Pool(self.nthreads) as mpool:
+            with Pool(nthreads) as mpool:
                 results = list(
                     progress_bar(
                         mpool.imap(self.eps_per_source_sim, args),
@@ -214,7 +225,7 @@ class ExposureIntegralTable:
 
         return results
 
-    def build_for_fit_parallel(self, kappa):
+    def build_for_fit_parallel(self, kappa, nthreads):
         """
         Build the tabulated integrals to be interpolated over in the fit.
         Save with filename given.
@@ -230,7 +241,7 @@ class ExposureIntegralTable:
 
         self.kappa = kappa
 
-        with Pool(self.nthreads) as mpool:
+        with Pool(nthreads) as mpool:
             results = list(
                 progress_bar(
                     mpool.imap(self.eps_per_source, self.varpi),
@@ -299,7 +310,39 @@ class ExposureIntegralTable:
 
         return results
 
-    def build_for_fit_parallel_gmf(self, kappa, Eex, A, Z, deflections):
+    def eps_per_source_composition(self, args):
+        """
+        Evaluate exposure integral per source. This corresponds to the inner for loop
+        that contains the double integral evaluation for each kappa.
+
+        :param: v : source unit vector
+        """
+
+        indices, v, kappa, REs, J_REs, dRearths, deflections = args
+        print(indices)
+        results = np.zeros(len(kappa))
+
+        for k, kap in enumerate(kappa):
+            
+            # compute kappa_gmf
+            kappa_gmf = deflections.get_kappa_gmf_per_source_composition(v, kap, REs, dRearths, J_REs)
+            # print("Computed kappa_gmf")
+
+            result, err = integrate.dblquad(
+                integrand,
+                0,
+                np.pi,
+                lambda phi: 0,
+                lambda phi: 2 * np.pi,
+                args=(v, kappa_gmf, self.params),
+            )
+            # print("Computed exposure")
+
+            results[k] = result
+
+        return indices, results
+
+    def build_for_fit_parallel_gmf(self, kappa, Eex, A, Z, deflections, nthreads):
         """
         Build the tabulated integrals to be interpolated over in the fit.
         Save with filename given.
@@ -319,7 +362,7 @@ class ExposureIntegralTable:
 
         # Cannot parallelise w/ imap due to magnetic lens pickling...
         args = []
-        for v in self.varpi:
+        for i, v in progress_bar(enumerate(self.varpi), total=len(self.varpi), desc="Precomputing kappa_gmf for each source"):
 
             kappa_gmf = []
             for k in self.kappa:
@@ -329,7 +372,7 @@ class ExposureIntegralTable:
 
             args.append((v, kappa_gmf))
 
-        with Pool(self.nthreads) as mpool:
+        with Pool(nthreads) as mpool:
             results = list(
                 progress_bar(
                     mpool.imap(self.eps_per_source_gmf, args),
@@ -340,6 +383,76 @@ class ExposureIntegralTable:
             self.table.append(np.asarray(results))
             print()
         self.table = np.asarray(self.table)
+
+    def build_for_fit_parallel_composition(self, kappa, alpha_grid, Rearths, dRearths, arr_spectrums, deflections, nthreads):
+        """
+        Build the tabulated integrals to be interpolated over in the fit.
+        Save with filename given.
+
+        Update calculation to handle GMF deflections.
+
+        This is the parallelized version, using multiprocessing over each source
+        in the provided source catalogue.
+
+        For SBG, runtime decreases from 30 min -> 1.5 min with ~28 cores
+
+        Expects self.kappa to be a list of kappa values to evaluate the integral for,
+        for each source individually.
+        """
+
+        self.kappa = kappa
+        self.alphas = alpha_grid
+
+        # truncate alphas to smaller values
+        # self.alphas = np.linspace(np.min(alpha_grid), np.max(alpha_grid), int(len(alpha_grid)//2))
+        self.table = np.zeros((len(self.alphas), len(self.varpi), len(kappa)))
+
+        args = []
+        # create argument list for 2d parallelization based on sources & alphas
+        print("Constructing arguments for precomputation")
+        for indices in np.ndindex(len(self.alphas), len(self.varpi)):
+            # unpack
+            a, i = indices
+
+            # get values
+            v = self.varpi[i]
+            alpha = self.alphas[a]
+
+            # evaluate index corresponding to original alpha grid
+            aa = np.digitize(alpha, alpha_grid, right=True)
+            J_REs = arr_spectrums[i,aa,:] 
+
+            # normalize
+            J_REs /= np.sum(J_REs * dRearths)
+
+            # dont perform exposure calculation if arrival spectrum is nan
+            if np.all(np.isnan(J_REs)):
+                continue
+
+            args.append(((a, i), v, self.kappa, Rearths, dRearths, J_REs, deflections))
+
+        #  measure time it takes to run this part
+        t0 = time.perf_counter()
+
+        # perform 2d paralleilization
+        with Pool(nthreads) as mpool:
+            # returns indices & effective exposure for each kappa
+            results = tuple(
+                progress_bar(
+                    mpool.imap(self.eps_per_source_composition, args),
+                    desc="Precomputing Exposure Integral & kappa_GMF",
+                    total=len(args)
+                )
+            )
+
+            # get indices & values within results
+            for indices, vals in results:
+                a, i = indices
+                self.table[a,i,:] = vals
+
+        t1 = time.perf_counter()
+
+        print(f"Total time elapsed: {(t1 - t0) / 3600 :.5f} hrs")
 
     def init_from_file(self, input_filename):
         """
@@ -352,6 +465,9 @@ class ExposureIntegralTable:
             self.params = f["params"][()]
             self.kappa = f["main"]["kappa"][()]
             self.table = f["main"]["table"][()]
+            
+            if f["main"]["alphas"][()] is not h5py.Empty("f"):
+                self.alphas = f["main"]["alphas"][()]
 
             if f["simulation"]["kappa"][()] is not h5py.Empty("f"):
                 try:
@@ -387,6 +503,11 @@ class ExposureIntegralTable:
             else:
                 main.create_dataset("kappa", data=h5py.Empty("f"))
                 main.create_dataset("table", data=h5py.Empty("f"))
+
+            if self.alphas != []:
+                main.create_dataset("alphas", data=self.alphas)
+            else:
+                main.create_dataset("alphas", data=h5py.Empty("f"))
 
             # simulation table
             sim = f.create_group("simulation")
