@@ -15,7 +15,6 @@ class Analysis:
         self,
         data: Data,
         model: Model,
-        gmf_model: str = "None",
         analysis_type=None,
         filename=None,
         summary=b"",
@@ -35,7 +34,6 @@ class Analysis:
         self.data = data
         self.model = model
         # self.filename = filename
-        self.gmf_model = gmf_model
 
         #  # Initialise file
         # if self.filename:
@@ -110,7 +108,7 @@ class Analysis:
         # self.nuc_table = get_nucleartable()
 
     def use_tables(
-        self, exposure_table_file: str, energy_loss_table_file: str = "", main_only=True
+        self, exposure_table_file: str, energy_loss_table_file: str = "", gmf_model : str = "None", main_only=True
     ):
         """
         Pass in names of integral tables that have already been made.
@@ -147,7 +145,7 @@ class Analysis:
 
             """Read from exposure table"""
             with h5py.File(exposure_table_file, "r") as file:
-                config_label = f"{self.data.source.label}_{self.data.detector.label}_mg{self.data.detector.mass_group}_{self.gmf_model}"
+                config_label = f"{self.data.source.label}_{self.data.detector.label}_mg{self.data.detector.mass_group}_{gmf_model}"
                 self.log10_Bigmf_grid = file[config_label]["log10_Bigmf_grid"][
                     ()
                 ]  # log10(nG)
