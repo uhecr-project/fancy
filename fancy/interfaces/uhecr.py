@@ -351,11 +351,13 @@ class Uhecr:
             # get period for each event - in years, taking into account days
             start_julianyear = period_start.year + period_start.day / 365.25
             deltats = (self.year + self.day / 365.25) - start_julianyear
-
-            if len(self.exposure) > 0:
-                area = self.exposure / (M * deltats)
-            else:
-                area = np.tile(A, self.N)
+            
+            # very hacky, but only exists currently for backwards compatibility anyways
+            # if len(self.exposure) > 0:
+            #     area = self.exposure / (M * deltats)
+            # else:
+            #     area = np.tile(A, self.N)
+            area = np.tile(A, self.N)
 
         elif self.label == "TA2015":
             from ..detector.TA2015 import A1, A2
