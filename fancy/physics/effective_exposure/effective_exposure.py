@@ -253,7 +253,7 @@ class EffectiveExposure:
                     norm.cdf(
                         self.data.detector.Rth,
                         loc=R.value,
-                        scale=self.data.detector.energy_uncertainty * R.value,
+                        scale=self.data.detector.rigidity_uncertainty * R.value,
                     )
                     for R in self.rigidities_grid
                 ]
