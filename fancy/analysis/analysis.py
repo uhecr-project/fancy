@@ -263,7 +263,7 @@ class Analysis:
             # detector parameters
             self.fit_input["Rth"] = self.data.detector.Rth
             self.fit_input["Rth_max"] = self.data.detector.Rth_max
-            self.fit_input["Rerr"] = self.data.detector.energy_uncertainty
+            self.fit_input["Rerr"] = self.data.detector.rigidity_uncertainty
 
             # arrival spectrum parameters
             self.fit_input["Nds"] = len(self.distances_grid)
