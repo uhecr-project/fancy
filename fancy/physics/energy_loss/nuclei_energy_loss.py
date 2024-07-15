@@ -178,7 +178,7 @@ class NucleiEnergyLoss(EnergyLoss):
         )
 
         # apply some absolute minimum
-        self.arr_spects[self.arr_spects < 1e-100 * (1 / u.EV)] = 1e-100 * (1 / u.EV)
+        self.arr_spects[self.arr_spects < 1e-200 * (1 / u.EV)] = 1e-200 * (1 / u.EV)
 
     def compute_Eexs(self):
         for id, ia in np.ndindex(self.Ndistances, self.Nalphas):
