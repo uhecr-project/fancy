@@ -15,7 +15,7 @@ from fancy import Data
 from tqdm import tqdm
 import h5py
 
-from fancy.detector.exposure import *
+from fancy.detector.exposure import m_dec
 from fancy.physics.gmf import GMFLensing
 
 
@@ -114,25 +114,32 @@ class EffectiveExposure:
             self.alpha_grid = f[config_label]["alpha_grid"][()]
             self.distances_grid = f[config_label]["distances_grid"][()] * u.Mpc
 
+            self.Nalphas = len(self.alpha_grid)
+            self.Ndistances = len(self.distances_grid)
+
             if self.mass_group != 1:
                 log10_arrspect_grid = f[config_label]["log10_arrspect_grid"][()]
                 log10_Rgrid = f[config_label]["log10_rigidities"][()]
 
-                # interpolate for the rigidity grid used here
-                f_log10_arrspect = CubicSpline(
-                    y=log10_arrspect_grid, x=log10_Rgrid, axis=1
-                )
-                self.arrspects_grid = 10 ** f_log10_arrspect(
-                    np.log10(self.rigidities_grid.value)
-                ) * (1 / u.EV)
+                # get the arrival spectrum values for the values of the rigidity
+                # grid defined using look-up tables
+                # interpolation doesnt work for faraway sources due to sharp gradients
+                Rs_idces = [
+                    np.digitize(r.value, 10**log10_Rgrid, right=True)
+                    for r in self.rigidities_grid
+                ]
 
+                self.arrspects_grid = np.zeros(
+                    (self.Ndistances, self.NRs, self.Nalphas)
+                ) * (1 / u.EV)
+                for ir, r_idx in enumerate(Rs_idces):
+                    self.arrspects_grid[:, ir, :] = (
+                        10 ** log10_arrspect_grid[:, r_idx, :]
+                    ) * (1 / u.EV)
             else:
                 # parametrize expected energies as rigidities
                 self.Eexs_grid = 10 ** f[config_label]["log10_Eexs_grid"][()] * u.EV
                 self.Rth_srcs = f[config_label]["Rth_src_grid"][()] * u.EV
-
-        self.Nalphas = len(self.alpha_grid)
-        self.Ndistances = len(self.distances_grid)
 
     def _compute_exposure(self):
         """Compute the exposure as a function of declination in healpy"""
@@ -168,7 +175,6 @@ class EffectiveExposure:
         self._compute_exposure()
 
         for id in range(self.Nsrcs + 1):
-
             # print if we are running source case or background case
             if id < self.Nsrcs:
                 Dsrc = self.Dsrcs[id]
@@ -181,7 +187,6 @@ class EffectiveExposure:
                 desc="Computing effective exposure grid over rigidities: ",
                 total=self.NRs,
             ):
-
                 R = self.rigidities_grid[ir]
 
                 # if source model, then iterate for each magnetic field and compute individual kappas
@@ -260,7 +265,6 @@ class EffectiveExposure:
             )
 
         for ia in range(self.Nalphas):
-
             alpha = self.alpha_grid[ia]
 
             # source case
@@ -270,7 +274,6 @@ class EffectiveExposure:
                 )  # get index from distance grid in prince calculation
 
                 for ib in range(self.NBigmfs):
-
                     if self.mass_group != 1:
                         # integrate over all rigidities including detection effects
                         self.wexp_src_grid[id, ia, ib] = np.trapz(
@@ -298,7 +301,6 @@ class EffectiveExposure:
 
             # background case
             if self.mass_group != 1:
-
                 # integrate over background spectrum w/ detection effects, which is jsut a power law
                 bg_spectrum = bounded_power_law(
                     self.rigidities_grid.value,
