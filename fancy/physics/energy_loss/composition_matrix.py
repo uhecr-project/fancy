@@ -56,13 +56,19 @@ class CompositionMatrixContainer:
     massids = [
         101,
         201,
+        301,
         302,
         402,
+        603,
+        703,
+        704,
         904,
+        1004,
         1005,
         1105,
         1206,
         1306,
+        1406,
         1407,
         1507,
         1608,
@@ -72,10 +78,12 @@ class CompositionMatrixContainer:
         2010,
         2110,
         2210,
+        2211,
         2311,
         2412,
         2512,
         2612,
+        2613,
         2713,
         2814,
         2914,
@@ -84,27 +92,27 @@ class CompositionMatrixContainer:
         3216,
         3316,
         3416,
-        3517,
-        3618,
+        3516,
+        3617,
         3718,
         3818,
         3919,
-        4019,
-        4119,
+        4020,
+        4120,
         4220,
         4320,
-        4420,
+        4422,
         4521,
         4622,
         4722,
         4822,
-        4922,
-        5023,
-        5123,
+        4923,
+        5024,
+        5124,
         5224,
-        5324,
-        5424,
-        5525,
+        5325,
+        5426,
+        5526,
         5626,
     ]
 
@@ -175,78 +183,56 @@ class CompositionMatrixContainer:
         self.As = np.array([self.fA(massid) for massid in self.massids])
         self.Zs = np.array([self.fZ(massid) for massid in self.massids])
 
-    def run_single_injection_solver(self, run_args):
-        """Wrapper for paralleilisation of injection solver"""
-        dinit_idx, dinit, zinit, prince_run, massids = run_args
-        print(f"solving for dinit={dinit:.3f} Mpc")
-        results_per_dinit = []
+    def run_injection_solver(self, reset=False):
+        """Run injection solver. It will try to find the `sol_injection_solver.pkl` and load from it. Otherwise it will compute it.
 
-        for massid in tqdm(massids):
-            # initialise solver
-            solver = UniformInjectionSolver(
-                initial_z=zinit,
-                final_z=0.0,
-                prince_run=prince_run,
-                enable_pairprod_losses=True,
-                enable_adiabatic_losses=True,
-                enable_injection_jacobian=False,
-                enable_partial_diff_jacobian=True,
-            )
-
-            solver.add_source_class(
-                NoInjection(prince_run, params={})
-            )  # no source model
-            solver.set_initial_state(
-                massid, zinit
-            )  # set uniform injection as initial state
-            solver.solve(
-                dz=min(zinit / 200, 3e-4), verbose=False, progressbar=False
-            )  # solve
-            # append for each mass
-            results_per_dinit.append(
-                (
-                    solver.res,
-                    solver.initial_state[solver.spec_man.ncoid2sref[massid].sl],
-                )
-            )
-
-        return (dinit_idx, results_per_dinit)
-
-    def run_injection_solver(self, njobs=4, reset=False):
-        """
-        Run injection solver. It will try to find the `sol_injection_solver.pkl` and load from it. otherwise
-        it will compute it.
-
-        :param njobs: number of cpus used for distance parallelisation
         :param reset: to reset the pre-computation or not
         """
+        solver_res_path = os.path.join(self.resources_path, "injection_solver")
+        if not os.path.exists(solver_res_path):
+            os.mkdir(solver_res_path)
 
-        solver_res_path = os.path.join(self.resources_path, "sol_injection_solver.pkl")
-        if not os.path.exists(solver_res_path) or reset == True:
+        solver_res_files = [
+            os.path.join(solver_res_path, f"sol_injection_solver_D{dinit:.2f}.pkl")
+            for dinit in self.distances
+        ]
+
+        if reset:
             print("Computing the injection solver")
 
             # create linearly spaced grid for distances
             redshifts = self.spl_d_to_z_plk(self.distances)
 
-            # iterate for each maximal distance <-> redshift & injection mass
-            run_args = [
-                (i, self.distances[i], redshifts[i], self.prince_run, self.massids)
-                for i in range(len(self.distances))
-            ]
+            for i, dinit in enumerate(self.distances):
+                
+                # there is still some memory issue that needs to be solved over here...
+                # very temporary and bad hack below for now
+                # if dinit < 86:
+                #     continue
 
-            solver_res = [self.run_single_injection_solver(arg) for arg in run_args]
+                # initialise theinjection solver helper
+                solver = InjectionSolverRunContainer(self.distances[i], redshifts[i], self.massids, self.prince_run)
+                solver_res_single = solver.run()
+                # write to pickle file
+                pickle.dump(solver_res_single, open(solver_res_files[i], "wb"), protocol=-1)
+
+                # delete the solver helper to avoid any memory issues
+                del solver
 
             # currently parallelising over distances is not working too well, maybe because its contained within a class...
             # but using many threads can be as fast as parallelising over this so in principle its not necessary
             # solver_res = Parallel(n_jobs=njobs)(delayed(self.run_single_injection_solver)(arg) for arg in run_args)
 
-            solver_res.sort(key=lambda x: x[0])  # sort based on dinit index
-
-            # write to pickle file
-            pickle.dump(solver_res, open(solver_res_path, "wb"), protocol=-1)
         else:
-            print("Using pre-computed solver. set reset=True to re-compute")
-            solver_res = pickle.load(open(solver_res_path, "rb"))
+            print(
+                "Using pre-computed solver results. Set reset == True to re-run the injection solver."
+            )
+            assert all(
+                [os.path.exists(f) for f in solver_res_files]
+            ), "Files dont exist. Please run injection solver with reset=True."
+
+        solver_res = [pickle.load(open(f, "rb")) for f in solver_res_files]
+        # solver_res = []
 
         return solver_res
 
@@ -259,7 +245,6 @@ class CompositionMatrixContainer:
         self.mass_group_idxlims = []
 
         for lnA_lower, lnA_upper in [(0, 1), (1, 2), (2, 3), (3, 4)]:
-
             id_per_mg = []
 
             for im, massid in enumerate(self.massids):
@@ -300,10 +285,9 @@ class CompositionMatrixContainer:
 
         # iterate for each distance & source mass
         for id in range(len(self.distances)):
-            _, solver_res_per_d = solver_res[id]
+            solver_res_per_d = solver_res[id]
 
             for ims in range(len(self.massids)):
-
                 res, src_spect = solver_res_per_d[ims]
 
                 for ime, massid_earth in enumerate(self.massids):
@@ -344,7 +328,6 @@ class CompositionMatrixContainer:
         rigidities_widths = np.diff(self.prince_run.cr_grid.bins) * A_per_Z
 
         with h5py.File(outfile, "w") as f:
-
             f.create_dataset("distances", data=self.distances)
             f.create_dataset("massids", data=self.massids)
             f.create_dataset("As", data=self.As)
@@ -425,6 +408,58 @@ class CompositionMatrixContainer:
             (spl_z_to_d_plk, spl_d_to_z_plk, spl_z_to_d_wmap, spl_d_to_z_wmap),
             open(self.redshift_distance_datapath, "wb"),
         )
+
+class InjectionSolverRunContainer:
+    """Helper class to instantiate and generate a single run for each distance"""
+    def __init__(self, dinit : float, zinit : float, massids : list, prince_run : core.PriNCeRun) -> None:
+        """Initialise the run container.
+        
+        Parameters
+        ----------
+        dinit : float
+            the distance of the source in Mpc
+        """
+        self.dinit = dinit
+        self.zinit = zinit
+        self.massids = massids
+        self.prince_run = prince_run
+
+    def run(self):
+        """Wrapper for paralleilisation of injection solver"""
+        print(f"solving for dinit={self.dinit:.3f} Mpc")
+        results_per_dinit = []
+
+        for massid in tqdm(self.massids):
+            # initialise solver
+            solver = UniformInjectionSolver(
+                initial_z=self.zinit,
+                final_z=0.0,
+                prince_run=self.prince_run,
+                enable_pairprod_losses=True,
+                enable_adiabatic_losses=True,
+                enable_injection_jacobian=False,
+                enable_partial_diff_jacobian=True,
+            )
+
+            solver.add_source_class(
+                NoInjection(self.prince_run, params={})
+            )  # no source model
+            solver.set_initial_state(
+                massid, self.zinit
+            )  # set uniform injection as initial state
+            solver.solve(
+                dz=min(self.zinit / 200, 3e-4), verbose=False, progressbar=False
+            )  # solve
+            # append for each mass
+            results_per_dinit.append(
+                (
+                    solver.res,
+                    solver.initial_state[solver.spec_man.ncoid2sref[massid].sl],
+                )
+            )
+
+        return results_per_dinit
+
 
 
 class UniformInjectionSolver(UHECRPropagationSolverBDF):
