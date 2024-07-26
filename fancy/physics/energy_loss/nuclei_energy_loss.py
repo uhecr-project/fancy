@@ -124,29 +124,25 @@ class NucleiEnergyLoss(EnergyLoss):
         """Computation of the source & arrival spectrum & mean energy"""
         self.src_spects_full = np.zeros(
             (self.Ndistances, self.NAsrcs, self.NRs, self.Nalphas)
-        ) * (
-            1 / u.EV
-        )  # since its for all source compositions
+        ) * (1 / u.EV)  # since its for all source compositions
 
         self._compute_source_PDF()  # compute the source composition PDF
 
         # finally get the source spectrrum, normalised over constatn marginalisaed over all source compositions
         for id, ia in np.ndindex(self.Ndistances, self.Nalphas):
-
             # temporary arrays that store the normaliseation per alpha per distance
             # alsostore the unnormalised source spectrum here
-            src_norm = 0.0  # [EeV^(1-alpha)]
+            src_norm = 0.0  # [EV^(1-alpha)]
             src_spect_unnormed = np.zeros((self.NAsrcs, self.NRs))  # [ e EeV^-alpha ]
 
             for im in range(self.NAsrcs):
-
                 src_spect_unnormed = (
                     self.Asrc_pdfs[id, im, :]
-                    * self.Zs[im] ** (1 - self.alpha_grid[ia])
+                    * self.Zs[im] ** (1.0 - self.alpha_grid[ia])
                     * self.rigidities_grid.to_value(u.EV) ** (-self.alpha_grid[ia])
                 )
 
-                # zeroths moment
+                # zeroths moment, in (EeV)^(1-alpha)
                 src_norm += np.trapz(
                     y=src_spect_unnormed, x=self.rigidities_grid.to_value(u.EV)
                 )
@@ -154,35 +150,36 @@ class NucleiEnergyLoss(EnergyLoss):
             # normalisation is carried by contribution over all masses at the source
             self.src_spects_full[id, ..., ia] = (src_spect_unnormed / src_norm) * (
                 1 / u.EV
-            )
+            )  # [1 / EV]
 
         # summed over all soruce compostiions that contribute in mass group
-        self.src_spects = np.sum(self.src_spects_full, axis=1)
+        self.src_spects = np.sum(
+            self.src_spects_full, axis=1
+        )  # distances x rigidities x alphas
 
     def compute_arrival_spectrum(self):
         """Computation of the arrival spectrum"""
         self.arr_spects_full = np.zeros(
             (self.Ndistances, self.NAearths, self.NRs, self.Nalphas)
-        ) * (
-            1 / u.EV
-        )  # here NAearths is for the *arrival composition*
+        ) * (1 / u.EV)  # here NAearths is for the *arrival composition*
 
         for ime, ir, ia in np.ndindex(self.NAearths, self.NRs, self.Nalphas):
-
             self.arr_spects_full[:, ime, ir, ia] = np.sum(
                 self.weights[:, :, ime, ir] * self.src_spects_full[:, :, ir, ia], axis=1
             )
 
+        # sum over arrival masses within the mass group only
         self.arr_spects = np.sum(
             self.arr_spects_full[:, self.mg_lidx : self.mg_uidx + 1, ...], axis=1
-        )
+        )  # distances x arrival masses x rigidities x alphas
 
         # apply some absolute minimum
-        self.arr_spects[self.arr_spects < 1e-200 * (1 / u.EV)] = 1e-200 * (1 / u.EV)
+        self.arr_spects[self.arr_spects < 1e-200 * (1 / u.EV)] = 1e-200 * (
+            1 / u.EV
+        )  # distances x rigidities x alphas
 
     def compute_Eexs(self):
         for id, ia in np.ndindex(self.Ndistances, self.Nalphas):
-
             # temporary arrays that store the normaliseation per alpha per distance
             # alsostore the unnormalised source spectrum here
             src_norm = 0.0  # [EeV^(1-alpha)]
@@ -190,7 +187,6 @@ class NucleiEnergyLoss(EnergyLoss):
             src_spect_unnormed = np.zeros((self.NAsrcs, self.NRs))  # [ e EeV^-alpha ]
 
             for im in range(self.NAsrcs):
-
                 src_spect_unnormed = (
                     self.Asrc_pdfs[id, im, :]
                     * self.Zs[im] ** (1.0 - self.alpha_grid[ia])
@@ -219,7 +215,9 @@ class NucleiEnergyLoss(EnergyLoss):
         arr_spect_intR = np.trapz(
             y=self.arr_spects_full, x=self.rigidities_grid, axis=2
         )
-        self.Aearth_pdfs = arr_spect_intR / np.sum(arr_spect_intR, axis=1)[:, None, :]
+        self.Aearth_pdfs = (
+            arr_spect_intR / np.sum(arr_spect_intR, axis=1)[:, None, :]
+        )  # distances x arrival mass x alphas
 
     def p_gt_Rth(self, delta=None):
         """
