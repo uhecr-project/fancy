@@ -212,12 +212,12 @@ class NucleiEnergyLoss(EnergyLoss):
 
     def compute_arrival_PDF(self):
         """Compute arrival composition PDF"""
-        arr_spect_intR = np.trapz(
-            y=self.arr_spects_full, x=self.rigidities_grid, axis=2
-        )
-        self.Aearth_pdfs = (
-            arr_spect_intR / np.sum(arr_spect_intR, axis=1)[:, None, :]
-        )  # distances x arrival mass x alphas
+        self.Aearth_pdfs = np.zeros_like(self.arr_spects_full)
+
+        for ime in range(self.NAearths):
+            self.Aearth_pdfs[:,ime,...] = self.Zs[ime] * self.arr_spects_full[:,ime,...]
+        
+        self.Aearth_pdfs /= np.sum( self.Aearth_pdfs, axis=1)[:,None,...]
 
     def p_gt_Rth(self, delta=None):
         """
