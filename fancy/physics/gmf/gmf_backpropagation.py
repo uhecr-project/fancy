@@ -24,6 +24,8 @@ class GMFBackPropagation:
     :param gmf_model : the GMF model considered for backpropagation.
 
     """
+    __gmf_models = ["JF12", "UF23", "UF23Turb", "PT11", "TF17"]
+    __Nmodels_UF23 = 8
 
     def __init__(self, data: Data, gmf_model="JF12"):
         """
@@ -34,6 +36,8 @@ class GMFBackPropagation:
 
         """
         self.gmf_model = gmf_model
+
+        assert gmf_model in self.__gmf_models, f"GMF model {gmf_model} is not an available GMF model."
 
         # raise exception if CRPropa is not installed, since it requires CRPropa
         if cr == None:
@@ -85,7 +89,7 @@ class GMFBackPropagation:
             / (60 * 60 * 24 * 365)
         )
 
-    def _setup_simulation(self, obs):
+    def _setup_simulation(self, obs, mt_num):
         """Setup crpropa backtracking simulation"""
         sim = cr.ModuleList()
 
@@ -93,6 +97,17 @@ class GMFBackPropagation:
         if self.gmf_model == "JF12":
             seed = np.random.randint(10000000)
             gmf_cr = cr.JF12Field()
+            gmf_cr.randomStriated(seed)
+            gmf_cr.randomTurbulent(seed)
+
+            
+        elif self.gmf_model == "UF23":
+            gmf_cr = cr.UF23Field(mt_num)
+
+        elif self.gmf_model == "UF23Turb":
+            seed = np.random.randint(10000000)
+
+            gmf_cr = cr.UF23Field(mt_num)
             gmf_cr.randomStriated(seed)
             gmf_cr.randomTurbulent(seed)
         elif self.gmf_model == "PT11":
@@ -133,7 +148,10 @@ class GMFBackPropagation:
         for k, uhecr_uv in enumerate(uhecr_uvs):
             # setup simulations once every 50 samples
             if k % 50 == 0:
-                sim = self._setup_simulation(obs)
+                # map the model number given the number of samples we dealt so far
+                # so that we cover all models
+                mt_num = int(np.floor(k / (len(uhecr_uvs) // self.__Nmodels_UF23)))
+                sim = self._setup_simulation(obs, mt_num)
 
             # get crropa Vector3D version of sampled arrival directions
             uhecr_vector3d = cr.Vector3d(*uhecr_uv)
@@ -197,6 +215,13 @@ class GMFBackPropagation:
     # parallelize for each UHECR
     def run_backpropagation(self, Nsamples=500, njobs=4, parallel=True):
         """Run backpropagation for all UHECRs"""
+
+        # if UF23, make sure that number of samples are divisible by 
+        # number of models in UF23 (8 models)
+        # such that we have uniform number of samples per model
+        # we just multiply the number of samples by 8
+        if self.gmf_model.find("UF23") != -1:
+            Nsamples = int(Nsamples * self.__Nmodels_UF23)
 
         self.arr_sampled_uvs = np.zeros((self.Nuhecrs, Nsamples, 3))
         self.defl_sampled_uvs = np.zeros((self.Nuhecrs, Nsamples, 3))
