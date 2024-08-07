@@ -41,7 +41,7 @@ class EnergyLoss(ABC):
     @abstractmethod
     def initialise_grid(
         self,
-        weights_dir: str = "./resources/composition_weights_PSB.h5",
+        matrix_dir: str = "./resources/composition_weights_PSB.h5",
         alpha_min=-3,
         alpha_max=10,
         Nalphas=50,
@@ -49,7 +49,7 @@ class EnergyLoss(ABC):
         """
         Initalise our grid using composition weights
 
-        :param weights_dir: directory to composition weights
+        :param matrix_dir: directory to composition weights
         :param alpha_min, alpha_max, Nalphas: the min / max and density of spectral index grid
         """
         # set grid for spectral index
@@ -59,12 +59,12 @@ class EnergyLoss(ABC):
             f"Shape of alpha grid: [{np.min(self.alpha_grid):.1f} : {np.max(self.alpha_grid):.1f} : {self.Nalphas}]"
         )
 
-        if not os.path.exists(weights_dir):
+        if not os.path.exists(matrix_dir):
             raise FileNotFoundError(
                 f"Composition weights file is missing. Re-run composition weight calculation."
             )
 
-        with h5py.File(weights_dir, "r") as f:
+        with h5py.File(matrix_dir, "r") as f:
             self.distances = f["distances"][()] * u.Mpc
 
         self.Ndistances = len(self.distances)

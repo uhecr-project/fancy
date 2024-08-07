@@ -34,7 +34,7 @@ class NucleiEnergyLoss(EnergyLoss):
 
     def initialise_grid(
         self,
-        weights_dir: str = "./resources/composition_weights_PSB.h5",
+        matrix_dir: str = "./resources/composition_weights_PSB.h5",
         alpha_min=-3,
         alpha_max=10,
         Nalphas=50,
@@ -42,21 +42,21 @@ class NucleiEnergyLoss(EnergyLoss):
         """
         Initalise our grid using composition weights
 
-        :param weights_dir: directory to composition weights
+        :param matrix_dir: directory to composition weights
         :param alpha_min, alpha_max, Nalphas: the min / max and density of spectral index grid
         :param Emax, NEs: the maximum energy (in EeV) and density of the log-spaced source energy grid
         """
-        super().initialise_grid(weights_dir, alpha_min, alpha_max, Nalphas)
+        super().initialise_grid(matrix_dir, alpha_min, alpha_max, Nalphas)
 
-        with h5py.File(weights_dir, "r") as f:
+        with h5py.File(matrix_dir, "r") as f:
             rigidities = f["rigidities"][()] * u.GV
             massids = f["massids"][()]
             self.As = f["As"][()]
             self.Zs = f["Zs"][()]
 
-            weights_full = f["full"]["weights"][()]
-            weights_full_mg = f["mass_groups"]["weights_mg"][()]
-            mass_group_idxlims = f["mass_groups"]["mass_group_idxlims"][()]
+            propagation_matrix = f["propa_matrix"][()]
+            inj_eff_matrix = f["inj_eff_matrix"][()]
+            mass_group_idxlims = f["mass_group_idxlims"][()]
 
         # set up dimensions
         self.NAsrcs = len(massids)
@@ -69,22 +69,23 @@ class NucleiEnergyLoss(EnergyLoss):
         )
 
         # truncate the weights also
-        self.weights = CubicSpline(
-            x=rigidities.to_value(u.EV), y=weights_full, axis=-1
+        self.propagation_matrix = CubicSpline(
+            x=rigidities.to_value(u.EV), y=propagation_matrix, axis=-1, bc_type='natural',
         )(self.rigidities_grid)
-        self.weights_mg = CubicSpline(
+        self.inj_eff_matrix = CubicSpline(
             x=rigidities.to_value(u.EV),
-            y=weights_full_mg[..., self.mass_group_idx, :],
+            y=inj_eff_matrix[..., self.mass_group_idx, :],
             axis=-1,
+            bc_type='natural',
         )(self.rigidities_grid)
 
         if self.verbose:
             # initial size of wieghts
             print(
-                f"Shape of weights from file: {weights_full.shape}"
+                f"Shape of propagation matrix from file: {propagation_matrix.shape}"
             )  # (Dsrc, Asrc, Aearths, R)
             print(
-                f"Shape of mass-group integrated weights from file: {weights_full_mg.shape}"
+                f"Shape of injection efficiency matrix from file: {inj_eff_matrix.shape}"
             )  # (Dsrc, Asrc, MG, R)
 
             # check if this makes sense
@@ -97,10 +98,10 @@ class NucleiEnergyLoss(EnergyLoss):
             # new shape of wieghts
             print("\nWeights after truncating to appropriate range of rigidities:")
             print(
-                f"Shape of weights for MG{self.mass_group}: {self.weights.shape}"
+                f"Shape of weights for MG{self.mass_group}: {self.propagation_matrix.shape}"
             )  # (Dsrc, Asrc, Aearths, R_mg)
             print(
-                f"Shape of weights for MG{self.mass_group}: {self.weights_mg.shape}"
+                f"Shape of weights for MG{self.mass_group}: {self.inj_eff_matrix.shape}"
             )  # (Dsrc, Asrc, R_mg)
 
             # new shapes for everything
@@ -109,15 +110,15 @@ class NucleiEnergyLoss(EnergyLoss):
             )
 
     def _compute_source_PDF(self):
-        """Compute source composition PDF"""
+        """Compute source composition PDF for injection efficiency"""
         self.Asrc_pdfs = np.zeros(
             (self.Ndistances, self.NAsrcs, self.NRs)
         )  # shape of (distances, source masses, rigidities)
 
         # iterate over each distance & rigidity
         for id, ir in np.ndindex((self.Ndistances, self.NRs)):
-            self.Asrc_pdfs[id, :, ir] = self.weights_mg[id, :, ir] / np.sum(
-                self.weights_mg[id, :, ir]
+            self.Asrc_pdfs[id, :, ir] = self.inj_eff_matrix[id, :, ir] / np.sum(
+                self.inj_eff_matrix[id, :, ir]
             )
 
     def compute_source_spectrum(self):
@@ -165,7 +166,7 @@ class NucleiEnergyLoss(EnergyLoss):
 
         for ime, ir, ia in np.ndindex(self.NAearths, self.NRs, self.Nalphas):
             self.arr_spects_full[:, ime, ir, ia] = np.sum(
-                self.weights[:, :, ime, ir] * self.src_spects_full[:, :, ir, ia], axis=1
+                self.propagation_matrix[:, :, ime, ir] * self.src_spects_full[:, :, ir, ia], axis=1
             )
 
         # sum over arrival masses within the mass group only

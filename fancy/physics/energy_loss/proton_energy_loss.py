@@ -35,7 +35,7 @@ class ProtonApproxEnergyLoss(EnergyLoss):
 
     def initialise_grid(
         self,
-        weights_dir: str = "./resources/composition_weights_PSB.h5",
+        matrix_dir: str = "./resources/composition_weights_PSB.h5",
         alpha_min=-3,
         alpha_max=10,
         Nalphas=50,
@@ -43,11 +43,11 @@ class ProtonApproxEnergyLoss(EnergyLoss):
         """
         Initalise our grid using composition weights
 
-        :param weights_dir: directory to composition weights
+        :param matrix_dir: directory to composition weights
         :param alpha_min, alpha_max, Nalphas: the min / max and density of spectral index grid
         :param Emax, NEs: the maximum energy (in EeV) and density of the log-spaced source energy grid
         """
-        super().initialise_grid(weights_dir, alpha_min, alpha_max, Nalphas)
+        super().initialise_grid(matrix_dir, alpha_min, alpha_max, Nalphas)
 
         self.Rarr_grid = np.zeros((self.Ndistances, self.NRs))
 
