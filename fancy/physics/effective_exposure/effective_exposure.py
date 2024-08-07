@@ -59,6 +59,7 @@ class EffectiveExposure:
     def initialise_grids(
         self,
         energy_loss_table_file: str,
+        kappa_theta_file : str = "",
         Bigmf_min: float = 0.001,
         Bigmf_max: float = 10,
         NBigmfs: int = 50,
@@ -141,6 +142,15 @@ class EffectiveExposure:
                 self.Eexs_grid = 10 ** f[config_label]["log10_Eexs_grid"][()] * u.EV
                 self.Rth_srcs = f[config_label]["Rth_src_grid"][()] * u.EV
 
+        # read in the theta <-> kappa interpolated file
+        if len(kappa_theta_file) == 0:
+            kappa_theta_file = os.path.join(
+                os.path.dirname(os.path.realpath(__file__)),
+                "..", "..",
+                "utils/resources/kappa_theta_map.pkl",
+            )
+        (_, _, self.f_log10_kappa) = pickle.load(open(kappa_theta_file, "rb"))
+
     def _compute_exposure(self):
         """Compute the exposure as a function of declination in healpy"""
         # first transform coordianates to declination
@@ -192,7 +202,8 @@ class EffectiveExposure:
                 # if source model, then iterate for each magnetic field and compute individual kappas
                 if id < self.Nsrcs:
                     for ib, Bigmf in enumerate(self.Bigmf_grid):
-                        kigmf = kappa_igmf(R, Bigmf, Dsrc, kappa_max=kappa_max)
+                        kigmf = 10**self.f_log10_kappa(theta_igmf(R, Bigmf, Dsrc).to_value(u.deg))
+                        kigmf = kappa_max if kigmf > kappa_max else kigmf
 
                         self.coords_healpy.representation_type = "cartesian"
                         weighted_map = (
@@ -383,18 +394,18 @@ def theta_igmf(R, Bigmf, D, lc=1):
     ) * u.deg
 
 
-def kappa_igmf(R, Bigmf, D, lc=1, kappa_max=1e6):
-    """
-    Deflection parameter for IGMF. Calculated using the approximate formula (for k >> 1)
+# def kappa_igmf(R, Bigmf, D, lc=1, kappa_max=1e6):
+#     """
+#     Deflection parameter for IGMF. Calculated using the approximate formula (for k >> 1)
 
-    :param R: rigidity in EV
-    :param Bigmf: IGMF magnetic field strength in nG
-    :param D: distance of the source in Mpc
-    :param lc: coherence length in Mpc (default 1 Mpc)
-    :param kappa_max: some maximum threshold value for high kappa (== super small angles)
-    """
-    k = (7552 * (theta_igmf(R, Bigmf, D, lc) / (1 * u.deg)) ** -2).value
-    return k if k < kappa_max else kappa_max
+#     :param R: rigidity in EV
+#     :param Bigmf: IGMF magnetic field strength in nG
+#     :param D: distance of the source in Mpc
+#     :param lc: coherence length in Mpc (default 1 Mpc)
+#     :param kappa_max: some maximum threshold value for high kappa (== super small angles)
+#     """
+#     k = (7552 * (theta_igmf(R, Bigmf, D, lc) / (1 * u.deg)) ** -2).value
+#     return k if k < kappa_max else kappa_max
 
 
 def bounded_power_law(R, alpha_b, Rmin, Rmax):

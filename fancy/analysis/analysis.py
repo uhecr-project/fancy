@@ -1,5 +1,7 @@
 import numpy as np
 import h5py
+import pickle
+import os
 
 from fancy.interfaces.data import Data
 from fancy.interfaces.stan import Model
@@ -108,7 +110,12 @@ class Analysis:
         # self.nuc_table = get_nucleartable()
 
     def use_tables(
-        self, exposure_table_file: str, energy_loss_table_file: str = "", gmf_model : str = "None", main_only=True
+        self,
+        exposure_table_file: str,
+        energy_loss_table_file: str = "",
+        gmf_model: str = "None",
+        kappa_theta_file: str = "",
+        main_only=True,
     ):
         """
         Pass in names of integral tables that have already been made.
@@ -137,9 +144,7 @@ class Analysis:
                 if self.data.detector.mass_group != 1:
                     self.log10_arr_spect_grid = file[config_label][
                         "log10_arrspect_grid"
-                    ][
-                        ()
-                    ]  # log10(1/EV)
+                    ][()]  # log10(1/EV)
                 else:
                     self.Rarr_grid = file[config_label]["Rarr_grid"][()]  # log10(1/EV)
 
@@ -155,6 +160,18 @@ class Analysis:
                 self.log10_wexp_bg_grid = file[config_label]["log10_wexp_bg_grid"][
                     ()
                 ]  # km^2 yr
+
+            if len(kappa_theta_file) == 0:
+                kappa_theta_file = os.path.join(
+                    os.path.dirname(os.path.realpath(__file__)),
+                    "..",
+                    "utils/resources/kappa_theta_map.pkl",
+                )
+
+            """Read from kappa_theta map"""
+            (self.thetas_interp_arr, self.log10_kappas_interp_arr, _) = pickle.load(
+                open(kappa_theta_file, "rb")
+            )
 
         else:
             if main_only:
@@ -224,7 +241,6 @@ class Analysis:
                 self.analysis_type == self.joint_type
                 or self.analysis_type == self.gmf_type
             ):
-
                 self.fit_input["Edet"] = self.data.uhecr.energy
                 self.fit_input["Eth"] = self.data.detector.Eth
                 self.fit_input["Eerr"] = self.data.detector.energy_uncertainty
@@ -241,6 +257,7 @@ class Analysis:
             self.analysis_type == self.composition_type
             or self.analysis_type == self.gmf_composition_type
         ):
+            # arrival direction parameters
             if self.analysis_type == self.gmf_composition_type:
                 self.fit_input["arrival_direction"] = self.data.uhecr.unit_vector_gb
                 self.fit_input["kappa_ds"] = self.data.uhecr.kappa_gmfs
@@ -249,6 +266,11 @@ class Analysis:
                 self.fit_input["kappa_ds"] = np.full(
                     self.data.uhecr.N, self.data.detector.kappa_d
                 )
+
+            self.fit_input["Nkappas"] = len(self.log10_kappas_interp_arr)
+            self.fit_input["log10_kappas_grid"] = self.log10_kappas_interp_arr
+            self.fit_input["Nthetas"] = len(self.thetas_interp_arr)
+            self.fit_input["thetas_grid"] = self.thetas_interp_arr
 
             # UHECR parameters
             # if we find rigidity in dataset, then use that, otherwise divide by meanZ of mass group
@@ -335,7 +357,6 @@ class Analysis:
         """
 
         with h5py.File(outfile, "w") as f:
-
             source_handle = f.create_group("source")
             if self.data.source:
                 self.data.source.save(source_handle)
@@ -354,7 +375,6 @@ class Analysis:
 
             fit_handle = f.create_group("fit")
             if self.fit:
-
                 # fit inputs
                 fit_input_handle = fit_handle.create_group("input")
                 for key, value in self.fit_input.items():
