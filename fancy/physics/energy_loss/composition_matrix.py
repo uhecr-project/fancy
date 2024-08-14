@@ -305,24 +305,21 @@ class CompositionMatrixContainer:
             )
         )
 
-        for img in range(4):
-            print(f"Current mass group: MG{img+1}")
+        # iterate for each distance & source mass
+        for id in tqdm(range(len(self.distances)), desc="Iterating over all distances: ", total=len(self.distances)):
+            solver_res_per_d = solver_res[id]
 
-            mg_lidx, mg_uidx = self.mass_group_idxlims[img]
-            Asrcs_mg = self.As[mg_lidx:]  # since we only care about sources masses > min(MG)
+             # temporary arrays to store results per distance bin
+            earth_spects_mg = np.zeros(
+                (len(self.massids), NRs, 4)
+            )
+            src_spects = np.zeros(
+                (len(self.massids), NRs)
+            )
 
-            # iterate for each distance & source mass
-            for id in tqdm(range(len(self.distances)), desc="Iterating over all distances: ", total=len(self.distances)):
-                solver_res_per_d = solver_res[id]
+            for img in range(4):
 
-                # temporary arrays to store results per mass group per distance bin
-                # only store up to the defined source masses to exclude any unphysical contributions
-                earth_spects_mg = np.zeros(
-                    (len(Asrcs_mg), NRs)
-                )
-                src_spects = np.zeros(
-                    (len(Asrcs_mg), NRs)
-                )
+                mg_lidx, mg_uidx = self.mass_group_idxlims[img]
 
                 # computing the source and earth spectrum from prince 
                 for ims in range(len(self.massids)):
@@ -337,17 +334,21 @@ class CompositionMatrixContainer:
                     # we still store it for all arrival masses to
                     # verify if our production efficiency produces 
                     # MG3 particles well later
-                    earth_spect_mg = np.zeros(NRs)
+                    earth_spect_tmp = np.zeros(NRs)
                     for ime, mid in enumerate(self.massids):
                         self.propa_matrix[id, ims, ime, :] = res.get_solution(mid)[1] / src_spect
 
                         # evaluate the earth spectrum only within the mass group
                         if ime >= mg_lidx and ime <= mg_uidx:
-                            earth_spect_mg += res.get_solution(mid)[1]
+                            earth_spect_tmp += res.get_solution(mid)[1]
 
                     # shifted index since the spectra are stored with [mg_uidx:]
-                    earth_spects_mg[ims - mg_lidx, :] = earth_spect_mg
-                    src_spects[ims - mg_lidx, :] = src_spect
+                    earth_spects_mg[ims, :, img] = earth_spect_tmp
+                    src_spects[ims, :] = src_spect
+
+            for img in range(4):
+
+                mg_lidx, mg_uidx = self.mass_group_idxlims[img]
 
                 # yield the injection efficiency factors per rigidity bin per distance bin
                 # store into full injection efficiency matrix, which is defined for 
@@ -355,21 +356,12 @@ class CompositionMatrixContainer:
                 self.inj_eff_matrix[id, mg_lidx:, img, :] = np.array([
                     minimize(
                         cost_function,
-                        x0=np.ones_like(Asrcs_mg) / len(Asrcs_mg),
-                        args=(earth_spects_mg[:, iR], src_spects[:, iR]),
+                        x0=np.ones(len(self.massids[mg_lidx:])),
+                        args=(earth_spects_mg[mg_lidx:, iR,:], src_spects[mg_lidx:, iR], img),
                         bounds=Bounds(0,1),
                     ).x
                     for iR in range(NRs)
                 ]).T
-
-                # for iR in range(NRs):
-                    
-                #     self.inj_eff_matrix[id, mg_lidx:, img, iR] = minimize(
-                #         cost_function,
-                #         x0=np.ones_like(Asrcs_mg) / len(Asrcs_mg),
-                #         args=(earth_spects_mg[:, iR], src_spects[:, iR]),
-                #         bounds=Bounds(0,1),
-                #     ).x
 
     def save(self, outfile : str):
         """Save data into h5py format"""
@@ -586,7 +578,12 @@ class NoInjection(CosmicRaySource):
 
 
 
-def cost_function(wAs: np.ndarray, *args) -> np.ndarray:
-    """Cost function to minimise weights per distance per rigidity for each mass group."""
-    earth_spect, src_spect = args
-    return np.log(np.sum(earth_spect / (src_spect * wAs)))
+def cost_function(wAs : np.ndarray, *args):
+    """Cost function to minimise weights per distance per rigidity for each mass group"""
+    earth_spect_mg, src_spect, img = args
+
+    Lsrc = (src_spect * wAs)
+    Lmg = earth_spect_mg[...,img]
+    Lmg_ex = np.sum(np.delete(earth_spect_mg, img, axis=-1), axis=-1)
+
+    return np.log10(np.sum((Lsrc * Lmg_ex) / Lmg**2))

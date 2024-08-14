@@ -13,16 +13,16 @@ from fancy.physics.energy_loss.energy_loss import EnergyLoss
 
 
 class NucleiEnergyLoss(EnergyLoss):
-    """
-    Class to determine the arrival spectrum of nuclei at Earth using a rigidity conservation approximation.
-    """
+    """Class to determine the arrival spectrum of nuclei at Earth using a rigidity conservation approximation."""
 
-    def __init__(self, data: Data, verbose=False):
+    def __init__(self, data: Data, verbose=False) -> None:
         """
         Class to determine the arrival spectrum of nuclei at Earth using a rigidity conservation approximation.
 
-        :param data: Data object from fancy
-
+        data : Data
+            the Data object as defined from fancy.Data. must contain detector information.
+        verbose : bool, default=False
+            flag to allow verbosity or not
         """
         super().__init__(data, verbose)
 
@@ -34,17 +34,24 @@ class NucleiEnergyLoss(EnergyLoss):
 
     def initialise_grid(
         self,
-        matrix_dir: str = "./resources/composition_weights_PSB.h5",
-        alpha_min=-3,
-        alpha_max=10,
-        Nalphas=50,
-    ):
+        matrix_dir: str = "",
+        alpha_min : float=-3,
+        alpha_max : float=10,
+        Nalphas : int=50,
+    ) -> None:
         """
-        Initalise our grid using composition weights
+        Initalise our grid using composition weights.
 
-        :param matrix_dir: directory to composition weights
-        :param alpha_min, alpha_max, Nalphas: the min / max and density of spectral index grid
-        :param Emax, NEs: the maximum energy (in EeV) and density of the log-spaced source energy grid
+        Parameters
+        ----------
+        matrix_dir: str
+            directory to composition weights
+        alpha_min : float, default=-3
+            the minimum source spectral index for the grid
+        alpha_max : float, default=10
+            the maximum source spectral index for the grid
+        Nalphas : int, default=50
+            number of elements for the source spectral index grid
         """
         super().initialise_grid(matrix_dir, alpha_min, alpha_max, Nalphas)
 
@@ -69,14 +76,22 @@ class NucleiEnergyLoss(EnergyLoss):
         )
 
         # truncate the weights also
+
+        # propagation matrix in shape of DIS x Asrc x RIG
         self.propagation_matrix = CubicSpline(
-            x=rigidities.to_value(u.EV), y=propagation_matrix, axis=-1, bc_type='natural',
+            x=rigidities.to_value(u.EV),
+            y=np.sum(propagation_matrix[..., self.mg_lidx : self.mg_uidx + 1, :], axis=2),
+            axis=-1,
+            bc_type="natural",
         )(self.rigidities_grid)
+
+
+        # injection efficiency matrix in shape of DIS x Asrc x RIG
         self.inj_eff_matrix = CubicSpline(
             x=rigidities.to_value(u.EV),
             y=inj_eff_matrix[..., self.mass_group_idx, :],
             axis=-1,
-            bc_type='natural',
+            bc_type="natural",
         )(self.rigidities_grid)
 
         if self.verbose:
@@ -109,8 +124,8 @@ class NucleiEnergyLoss(EnergyLoss):
                 f"\ndimensions relevant for MG{self.mass_group}: Ndmax = {self.Ndistances}, Nrigidites_mg = {self.NRs}, NAsrcs = {self.NAsrcs}, NAearths = {self.NAearths}, Nalphas={self.Nalphas}"
             )
 
-    def _compute_source_PDF(self):
-        """Compute source composition PDF for injection efficiency"""
+    def _compute_source_PDF(self) -> None:
+        """Compute source composition PDF for injection efficiency."""
         self.Asrc_pdfs = np.zeros(
             (self.Ndistances, self.NAsrcs, self.NRs)
         )  # shape of (distances, source masses, rigidities)
@@ -120,9 +135,12 @@ class NucleiEnergyLoss(EnergyLoss):
             self.Asrc_pdfs[id, :, ir] = self.inj_eff_matrix[id, :, ir] / np.sum(
                 self.inj_eff_matrix[id, :, ir]
             )
+        # remove unnecessary NaNs in PDF where 
+        self.Asrc_pdfs[np.isnan(self.Asrc_pdfs)] = 0.0
+        
 
-    def compute_source_spectrum(self):
-        """Computation of the source & arrival spectrum & mean energy"""
+    def compute_source_spectrum(self) -> None:
+        """Compute the source spectrum."""
         self.src_spects_full = np.zeros(
             (self.Ndistances, self.NAsrcs, self.NRs, self.Nalphas)
         ) * (1 / u.EV)  # since its for all source compositions
@@ -137,7 +155,7 @@ class NucleiEnergyLoss(EnergyLoss):
             src_spect_unnormed = np.zeros((self.NAsrcs, self.NRs))  # [ e EeV^-alpha ]
 
             for im in range(self.NAsrcs):
-                src_spect_unnormed = (
+                src_spect_unnormed[im,:] = (
                     self.Asrc_pdfs[id, im, :]
                     * self.Zs[im] ** (1.0 - self.alpha_grid[ia])
                     * self.rigidities_grid.to_value(u.EV) ** (-self.alpha_grid[ia])
@@ -145,7 +163,7 @@ class NucleiEnergyLoss(EnergyLoss):
 
                 # zeroths moment, in (EeV)^(1-alpha)
                 src_norm += np.trapz(
-                    y=src_spect_unnormed, x=self.rigidities_grid.to_value(u.EV)
+                    y=src_spect_unnormed[im,:], x=self.rigidities_grid.to_value(u.EV)
                 )
 
             # normalisation is carried by contribution over all masses at the source
@@ -158,28 +176,36 @@ class NucleiEnergyLoss(EnergyLoss):
             self.src_spects_full, axis=1
         )  # distances x rigidities x alphas
 
-    def compute_arrival_spectrum(self):
-        """Computation of the arrival spectrum"""
-        self.arr_spects_full = np.zeros(
-            (self.Ndistances, self.NAearths, self.NRs, self.Nalphas)
-        ) * (1 / u.EV)  # here NAearths is for the *arrival composition*
+    def compute_arrival_spectrum(self) -> None:
+        """Compute the arrival spectrum by multiplying it with the propagation matrix."""
+        # self.arr_spects_full = np.zeros(
+        #     (self.Ndistances, self.NAearths, self.NRs, self.Nalphas)
+        # ) * (1 / u.EV)  # here NAearths is for the *arrival composition*
 
-        for ime, ir, ia in np.ndindex(self.NAearths, self.NRs, self.Nalphas):
-            self.arr_spects_full[:, ime, ir, ia] = np.sum(
-                self.propagation_matrix[:, :, ime, ir] * self.src_spects_full[:, :, ir, ia], axis=1
-            )
+        # for ime, ir, ia in np.ndindex(self.NAearths, self.NRs, self.Nalphas):
+        #     self.arr_spects_full[:, ime, ir, ia] = np.sum(
+        #         self.propagation_matrix[:, :, ime, ir] * self.src_spects_full[:, :, ir, ia], axis=1
+        #     )
 
         # sum over arrival masses within the mass group only
-        self.arr_spects = np.sum(
-            self.arr_spects_full[:, self.mg_lidx : self.mg_uidx + 1, ...], axis=1
-        )  # distances x arrival masses x rigidities x alphas
+        # self.arr_spects = np.sum(
+        #     self.arr_spects_full[:, self.mg_lidx : self.mg_uidx + 1, ...], axis=1
+        # )  # distances x MG x rigidities x alphas
 
-        # apply some absolute minimum
+        # arrival spectrum is propagation matrix in MG multiplied by
+        # source spectrum, summed over all sources > min(Amg)
+        self.arr_spects = np.sum(
+            self.propagation_matrix[:, self.mg_lidx:, : ,None] * self.src_spects_full[:, self.mg_lidx:, ...],
+            axis=1
+        )
+
+        # # apply some absolute minimum
         self.arr_spects[self.arr_spects < 1e-200 * (1 / u.EV)] = 1e-200 * (
             1 / u.EV
         )  # distances x rigidities x alphas
 
-    def compute_Eexs(self):
+    def compute_Eexs(self) -> None:
+        """Compute the mean source energy using the first moment of the source spectrum."""
         for id, ia in np.ndindex(self.Ndistances, self.Nalphas):
             # temporary arrays that store the normaliseation per alpha per distance
             # alsostore the unnormalised source spectrum here
@@ -188,7 +214,7 @@ class NucleiEnergyLoss(EnergyLoss):
             src_spect_unnormed = np.zeros((self.NAsrcs, self.NRs))  # [ e EeV^-alpha ]
 
             for im in range(self.NAsrcs):
-                src_spect_unnormed = (
+                src_spect_unnormed[im,:] = (
                     self.Asrc_pdfs[id, im, :]
                     * self.Zs[im] ** (1.0 - self.alpha_grid[ia])
                     * self.rigidities_grid.to_value(u.EV) ** (-self.alpha_grid[ia])
@@ -196,12 +222,12 @@ class NucleiEnergyLoss(EnergyLoss):
 
                 # zeroths and first moment
                 src_norm += np.trapz(
-                    y=src_spect_unnormed, x=self.rigidities_grid.to_value(u.EV)
+                    y=src_spect_unnormed[im,:], x=self.rigidities_grid.to_value(u.EV)
                 )
                 src_Enorm += np.trapz(
                     y=self.Zs[im]
                     * self.rigidities_grid.to_value(u.EV)
-                    * src_spect_unnormed,
+                    * src_spect_unnormed[im,:],
                     x=self.rigidities_grid.to_value(u.EV),
                 )
 
@@ -211,28 +237,41 @@ class NucleiEnergyLoss(EnergyLoss):
         # apply some absolute minimum
         self.Eexs[self.Eexs < 1e-10 * u.EeV] = 1e-10 * u.EeV
 
-    def compute_arrival_PDF(self):
-        """Compute arrival composition PDF"""
-        self.Aearth_pdfs = np.zeros_like(self.arr_spects_full)
+    def compute_arrival_PDF(self) -> None:
+        """Compute arrival composition PDF."""
+        pass
+        # self.Aearth_pdfs = np.zeros_like(self.arr_spects_full)
 
-        for ime in range(self.NAearths):
-            self.Aearth_pdfs[:,ime,...] = self.Zs[ime] * self.arr_spects_full[:,ime,...]
-        
-        self.Aearth_pdfs /= np.sum( self.Aearth_pdfs, axis=1)[:,None,...]
+        # for ime in range(self.NAearths):
+        #     self.Aearth_pdfs[:, ime, ...] = (
+        #         self.Zs[ime] * self.arr_spects_full[:, ime, ...]
+        #     )
 
-    def p_gt_Rth(self, delta=None):
+        # self.Aearth_pdfs /= np.sum(self.Aearth_pdfs, axis=1)[:, None, ...]
+
+    def p_gt_Rth(self, delta=None) -> None:
         """
-        Probability that rigidity is anove threshold. For MG1, this is the arrival energy
+        Probability that rigidity is anove threshold. For MG1, this is the arrival energy.
 
-        :param delta: Uncertainty in energy reconstruction (%)
+        Parameters
+        ----------
+        delta: float | None, default None
+            Uncertainty in energy reconstruction (%)
         """
-        delta = self.delta if delta == None else delta
+        delta = self.delta if delta is None else delta
         return 1 - np.array(
             [stats.norm.cdf(self.Rth, R, delta * R) for R in self.rigidities_grid.value]
         )
 
-    def save(self, outfile):
-        """Save outputs to h5py file"""
+    def save(self, outfile) -> None:
+        """
+        Save outputs to h5py file.
+        
+        Parameters
+        ----------
+        outfile : str
+            the filepath to the output file.
+        """
         with h5py.File(outfile, "a") as f:
             config_label = f"{self.detector_type}_mg{self.mass_group}"
             if config_label in f.keys():
@@ -254,10 +293,10 @@ class NucleiEnergyLoss(EnergyLoss):
             )
 
             # stored for plotting sake
-            config_gr.create_dataset("src_spects_full", data=self.src_spects_full.value)
-            config_gr.create_dataset("arr_spects_full", data=self.arr_spects_full.value)
+            config_gr.create_dataset("src_spects", data=self.src_spects.value)
+            # config_gr.create_dataset("arr_spects_full", data=self.arr_spects_full.value)
             config_gr.create_dataset("Asrc_pdf", data=self.Asrc_pdfs)
-            config_gr.create_dataset("Aearth_pdf", data=self.Aearth_pdfs)
+            # config_gr.create_dataset("Aearth_pdf", data=self.Aearth_pdfs)
             config_gr.create_dataset("As", data=self.As)
             config_gr.create_dataset("Zs", data=self.Zs)
             config_gr.create_dataset(

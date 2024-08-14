@@ -294,13 +294,15 @@ class EffectiveExposure:
                             x=self.rigidities_grid,
                         )
                     else:
-                        # compute expected energy and find index in rigidity grid corresponding to it (we parametrize energy as rigidity for MG1)
+                        # compute expected energy and find index in rigidity grid 
+                        # corresponding to it (we parametrize energy as rigidity for MG1)
                         Rex = self.Eexs_grid[d_idx, ia]
                         Rex_idx = np.digitize(
-                            Rex.value, self.rigidities_grid.value, right=True
+                            Rex.value, self.rigidities_grid.value, right=False
                         )
 
-                        # weighting factor calculated by analytical integral of source & arrival distribution, see CM19 for details
+                        # weighting factor calculated by analytical integral of source 
+                        # & arrival distribution, see CM19 for details
                         # TODO: update this for bounded energy spectrum
                         w_factor = (
                             self.Rth_srcs[d_idx].value / self.data.detector.Rth

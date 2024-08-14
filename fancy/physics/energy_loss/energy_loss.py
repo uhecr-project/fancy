@@ -66,19 +66,33 @@ class EnergyLoss(ABC):
 
         with h5py.File(matrix_dir, "r") as f:
             self.distances = f["distances"][()] * u.Mpc
+            rigidities_grid = (f["rigidities"][()] * u.GV).to(u.EV)
+            dRs_grid = (f["rigidities_widths"][()] * u.GV).to(u.EV)
+
+        Rmin_idx = np.digitize(self.Rmin, rigidities_grid, right=True)
+        Rmax_idx = np.digitize(self.Rmax, rigidities_grid, right=True)
+
+        # reset the Rmin and Rmax to those from this grid
+        self.Rmin = rigidities_grid[Rmin_idx]
+        self.Rmax = rigidities_grid[Rmax_idx]
+
+        # truncate the rigidity grid & dR grid to Rmin and Rmax
+        self.rigidities_grid = rigidities_grid[Rmin_idx:Rmax_idx+1]
+        self.dRs_grid = dRs_grid[Rmin_idx:Rmax_idx+1]
 
         self.Ndistances = len(self.distances)
+        self.NRs = len(self.rigidities_grid)
 
         ## setting up the rigidity grid
-        dlR = 0.05
-        lRbins = np.arange(
-            np.log10(self.Rmin.to_value(u.EV)) - 0.5 * dlR,
-            np.log10(self.Rmax.to_value(u.EV)) + 1.5 * dlR,
-            dlR,
-        )  # 1.5 to include endpoint
-        self.dRs_grid = (10 ** lRbins[1:] - 10 ** lRbins[:-1]) * u.EV
-        self.rigidities_grid = 10 ** (0.5 * (lRbins[1:] + lRbins[:-1])) * u.EV
-        self.NRs = len(self.rigidities_grid)
+        # dlR = 0.05
+        # lRbins = np.arange(
+        #     np.log10(self.Rmin.to_value(u.EV)) - 0.5 * dlR,
+        #     np.log10(self.Rmax.to_value(u.EV)) + 1.5 * dlR,
+        #     dlR,
+        # )  # 1.5 to include endpoint
+        # self.dRs_grid = (10 ** lRbins[1:] - 10 ** lRbins[:-1]) * u.EV
+        # self.rigidities_grid = 10 ** (0.5 * (lRbins[1:] + lRbins[:-1])) * u.EV
+        # self.NRs = len(self.rigidities_grid)
 
         self.Eexs = np.zeros((self.Ndistances, self.Nalphas)) * u.EeV
 
