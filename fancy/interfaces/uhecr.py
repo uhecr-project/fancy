@@ -9,7 +9,7 @@ import h5py
 # from tqdm import tqdm as progress_bar
 from multiprocessing import Pool, cpu_count
 
-from fancy.interfaces.stan import coord_to_uv, uv_to_coord
+from fancy.interfaces.model import coord_to_uv, uv_to_coord
 
 from fancy.plotting import AllSkyMap
 

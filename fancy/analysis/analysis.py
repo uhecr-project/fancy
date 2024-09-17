@@ -1,137 +1,85 @@
-import os
-import pickle
+"""Container to manage the inputs and outputs of the fits."""
 
+import pickle
+from typing import Union
+
+import cmdstanpy
 import h5py
 import numpy as np
+from typing_extensions import Self  # change to typing for py>3.11
 
 from fancy.interfaces.data import Data
-from fancy.interfaces.integration import ExposureIntegralTable
-from fancy.interfaces.stan import Model
+from fancy.interfaces.model import Model
 from fancy.utils.package_data import get_path_to_kappa_theta
 
 
 class Analysis:
-    """
-    To manage the running of simulations and fits based on Data and Model objects.
-    """
+    """Container to manage the inputs and outputs of the fits."""
+
+    # pre-defined analysis types
+    arr_dir_type = "arrival_direction"
+    joint_type = "joint"
+    gmf_type = "joint_gmf"
+    composition_type = "joint_composition"
+    gmf_composition_type = "joint_gmf_composition"
 
     def __init__(
-        self,
+        self: Self,
         data: Data,
         model: Model,
-        analysis_type=None,
-        filename=None,
-        summary=b"",
-        energy_loss_approx: str = "loss_length",
-    ):
-        """
-        To manage the running of simulations and fits based on Data and Model objects.
-
-        :param data: a Data object
-        :param model: a Model object
-        :param analysis_type: type of analysis
-        :param energy_loss_approx: Method used for energy loss approx,
-            only relevant for ptype!="p". Can be "loss_length" or
-            "mean_sim_energy"
-        """
-
-        self.data = data
-        self.model = model
-        # self.filename = filename
-
-        #  # Initialise file
-        # if self.filename:
-
-        #     with h5py.File(self.filename, "w") as f:
-        #         desc = f.create_group("description")
-        #         desc.attrs["summary"] = summary
-
-        self.simulation_input = None
-        self.fit_input = None
-
-        self.simulation = None
-        self.fit = None
-
-        # if not model.ptype:
-
-        #     raise ValueError("No particle type is defined!")
-
-        # # Energy loss calculations
-        # if model.ptype == "p":
-
-        #     self.energy_loss = ProtonApproxEnergyLoss()
-
-        # else:
-
-        #     self.energy_loss = CRPropaApproxEnergyLoss(
-        #         ptype=model.ptype,
-        #         method=energy_loss_approx,
-        #     )
-
-        # Simulation outputs
-        self.source_labels = None
-        self.E = None
-        self.Earr = None
-        self.Edet = None
-        self.defl_plotvars = None
-
-        self.arr_dir_type = "arrival_direction"
-        self.joint_type = "joint"
-        self.gmf_type = "joint_gmf"
-        self.composition_type = "joint_composition"
-        self.gmf_composition_type = "joint_gmf_composition"
-
-        if analysis_type == None:
-            analysis_type = self.arr_dir_type
-
-        self.analysis_type = analysis_type
-
-        # if self.analysis_type == self.joint_type or self.analysis_type == self.gmf_type:
-
-        #     # find lower energy threshold for the simulation, given Eth and Eerr
-        #     self.model.Eth_sim = self.energy_loss.get_Eth_sim(
-        #         self.data.detector.energy_uncertainty, self.model.Eth
-        #     )
-
-        #     # find correspsonding Eth_src
-        #     self.Eth_src = self.energy_loss.get_Eth_src(
-        #         self.model.Eth_sim, self.data.source.distance
-        #     )
-
-        # if self.analysis_type == self.gmf_type or self.analysis_type == self.gmf_composition_type:
-
-        #     # Set up gmf deflections
-        #     self.gmf_deflections = GMFDeflections()
-
-        # # Set up integral tables
-        # params = self.data.detector.params
-        # varpi = self.data.source.unit_vector
-        # self.tables = ExposureIntegralTable(varpi=varpi, params=params)
-
-        # table containing (A, Z) of each element
-        # self.nuc_table = get_nucleartable()
-
-    def use_tables(
-        self,
-        exposure_table_file: str,
-        energy_loss_table_file: str = "",
-        gmf_model: str = "None",
-        main_only=True,
-        kappa_theta_filename : str = "kappa_theta_map.pkl"
+        analysis_type: str = "joint_gmf_composition",
     ) -> None:
         """
-        Pass in names of integral tables that have already been made.
-        Only the main table is read in by default, the simulation table
-        must be recalculated every time the simulation parameters are
-        changed.
-        """
+        Container to manage the inputs and outputs of the fits.
 
-        if (
-            self.analysis_type == self.composition_type
-            or self.analysis_type == self.gmf_composition_type
+        data: fancy.interfaces.data.Data
+            Container that handles the source, uhecr, and detector information.
+            All such information should already be initialised (see relevant class for
+            more information.)
+        model: fancy.interfaces.model.Model
+            Container that handles the stan Model
+        analysis_type: str, default=joint_gmf_composition
+            The analysis type to consider.
+        """
+        self.data = data
+        self.model = model
+        self.analysis_type = analysis_type
+
+        self.fit_input = None
+        self.fit = None
+
+    def use_tables(
+        self: Self,
+        exposure_table_file: str,
+        energy_table_file: str,
+        gmf_model: str = "None",
+        kappa_theta_filename: str = "kappa_theta_map.pkl",
+    ) -> None:
+        """
+        Pass in effective exposure & energy loss tables that have been pre-generated.
+
+        Parameter:
+        ---------
+        exposure_table_file : str
+            The table containing the information about the effective exposure
+            of each configuration (source, detector, MG).
+        energy_table_file : str
+            The table containing information of the energy loss processes for
+            each configuration (detector, MG)
+        gmf_model : str, default=None
+            The GMF model considered in the analysis.
+            Used to read in the effective exposure information.
+            Default is None, which considers no deflections from GMF
+        kappa_theta_filename : str, default='kappa_theta_map.pkl'
+            the file name for the map that converts the vMF parameter `kappa`
+            to the RMS angular scale.
+            Default is the default name saved in `fancy.utils.resources`
+        """
+        if self.analysis_type in set(
+            [self.composition_type, self.gmf_composition_type]
         ):
             """Read from energy loss tables"""
-            with h5py.File(energy_loss_table_file, "r") as file:
+            with h5py.File(energy_table_file, "r") as file:
                 config_label = (
                     f"{self.data.detector.label}_mg{self.data.detector.mass_group}"
                 )
@@ -168,101 +116,39 @@ class Analysis:
             (self.thetas_interp_arr, self.log10_kappas_interp_arr, _) = pickle.load(
                 open(kappa_theta_file, "rb")
             )
-
         else:
-            if main_only:
-                input_table = ExposureIntegralTable(input_filename=exposure_table_file)
-                self.tables.table = input_table.table
-                self.tables.kappa = input_table.kappa
-                self.tables.alphas = input_table.alphas
+            raise DeprecationWarning(
+                f"Handles for analysis type {self.analysis_type} is deprecated."
+            )
 
-                # uncomment once we figure out bug for single source case
-                # with h5py.File(input_filename, "r") as f:
-                #     self.E_grid = f["energy/E_grid"][()]
-                #     self.Earr_grid = f["energy/Earr_grid"][()]
-
-            else:
-                self.tables = ExposureIntegralTable(input_filename=exposure_table_file)
-
-    def _prepare_fit_inputs(self):
-        """
-        Gather inputs from Model, Data and IntegrationTables.
-        """
-
-        # convert scale for sampling
-        D = self.data.source.distance
-        alpha_T = self.data.detector.alpha_T
-        # if self.analysis_type != self.composition_type:
-        #     D, alpha_T, eps_fit = convert_scale(D, alpha_T, eps_fit)
+    def _prepare_fit_inputs(self: Self) -> None:
+        """Gather inputs from Model, Data and IntegrationTables."""
 
         # prepare fit inputs
         self.fit_input = {
             "Ns": self.data.source.N,
             "varpi": self.data.source.coord.cartesian.xyz.value.T,
-            "D": D,
+            "D": self.data.source.distance,
             "N": self.data.uhecr.N,
             "A": self.data.uhecr.A,
             "zenith_angle": self.data.uhecr.zenith_angle,
-            "alpha_T": alpha_T,
+            "alpha_T": self.data.detector.alpha_T,
         }
 
-        if (
-            self.analysis_type == self.arr_dir_type
-            or self.analysis_type == self.joint_type
-            or self.analysis_type == self.gmf_type
-        ):
-            eps_fit = self.tables.table
-            kappa_grid = self.tables.kappa
-            E_grid = self.E_grid
-            Earr_grid = list(self.Earr_grid)
-
-            # KW: due to multiprocessing appending,
-            # collapse dimension from (1, 23, 50) -> (23, 50)
-            eps_fit.resize(self.Earr_grid.shape)
-
-            # handle selected sources
-            if self.data.source.N < eps_fit.shape[1]:
-                eps_fit = [eps_fit[i] for i in self.data.source.selection]
-                Earr_grid = [Earr_grid[i] for i in self.data.source.selection]
-
-            # add E interpolation for background component (possible extension with Dbg)
-            Earr_grid.append([0 for e in E_grid])
-
-            self.fit_input["arrival_direction"] = self.data.uhecr.unit_vector
-            self.fit_input["eps"] = eps_fit
-            self.fit_input["Ngrid"] = len(kappa_grid)
-            self.fit_input["kappa_grid"] = kappa_grid
-
-            if (
-                self.analysis_type == self.joint_type
-                or self.analysis_type == self.gmf_type
-            ):
-                self.fit_input["Edet"] = self.data.uhecr.energy
-                self.fit_input["Eth"] = self.data.detector.Eth
-                self.fit_input["Eerr"] = self.data.detector.energy_uncertainty
-                self.fit_input["E_grid"] = E_grid
-                self.fit_input["Earr_grid"] = Earr_grid
-                self.fit_input["kappa_d"] = self.data.detector.kappa_d
-
-                if self.analysis_type == self.gmf_type:
-                    ptype = str(self.model.ptype)
-                    _, self.fit_input["Z"] = self.nuc_table[ptype]
-                    self.fit_input["kappa_gmfs"] = self.data.uhecr.kappa_gmfs
-
-        elif (
-            self.analysis_type == self.composition_type
-            or self.analysis_type == self.gmf_composition_type
+        if self.analysis_type in set(
+            [self.composition_type, self.gmf_composition_type]
         ):
             # arrival direction parameters
-            if self.analysis_type == self.gmf_composition_type:
+            if self.analysis_type == self.gmf_composition_type:  # coordinates at GB
                 self.fit_input["arrival_direction"] = self.data.uhecr.unit_vector_gb
                 self.fit_input["kappa_ds"] = self.data.uhecr.kappa_gmfs
-            else:
+            elif self.analysis_type == self.composition_type:  # coordinates at Earth
                 self.fit_input["arrival_direction"] = self.data.uhecr.unit_vector
                 self.fit_input["kappa_ds"] = np.full(
                     self.data.uhecr.N, self.data.detector.kappa_d
                 )
 
+            # direction parameters
             self.fit_input["Nkappas"] = len(self.log10_kappas_interp_arr)
             self.fit_input["log10_kappas_grid"] = self.log10_kappas_interp_arr
             self.fit_input["Nthetas"] = len(self.thetas_interp_arr)
@@ -271,8 +157,10 @@ class Analysis:
             # UHECR parameters
             # if we find rigidity in dataset, then use that, otherwise divide by meanZ of mass group
             if len(self.data.uhecr.rigidity) > 0:
+                print("Using available rigidity data for analysis.")
                 self.fit_input["Rdet"] = self.data.uhecr.rigidity
             else:
+                print(f"Using mean charge {self.data.detector.meanZ} for rigidity.")
                 self.fit_input["Rdet"] = (
                     self.data.uhecr.energy / self.data.detector.meanZ
                 )
@@ -305,24 +193,53 @@ class Analysis:
             self.fit_input["log10_wexp_src_grid"] = self.log10_wexp_src_grid
             self.fit_input["log10_wexp_bg_grid"] = self.log10_wexp_bg_grid
 
+        else:
+            raise DeprecationWarning(
+                f"Handles for analysis type {self.analysis_type} is deprecated."
+            )
+
     def fit_model(
-        self,
-        iterations=1000,
-        chains=4,
-        seed=None,
-        output_dir=None,
-        warmup=None,
-        show_progress=True,
+        self: Self,
+        iterations: int = 1000,
+        chains: int = 4,
+        seed: Union[int, None] = None,
+        warmup: Union[int, None] = None,
+        show_progress: bool = True,
         **kwargs,
-    ):
+    ) -> cmdstanpy.stanfit.mcmc.CmdStanMCMC:
         """
         Fit a model.
 
-        :param iterations: number of iterations
-        :param chains: number of chains
-        :param seed: seed for RNG
-        """
+        Parameter:
+        ----------
+        iterations: int, default=1000
+            number of iterations
+        chains: int, default=4
+            number of chains
+        seed: int, default=None
+            seed for RNG
+        output_dir: str, default=None
+            output directory for raw stan outputs
+        warmup : int, default=None
+            number of iterations used for warmup
+        show_progress: bool, default=True
+            to show the progress of the fits in a tqdm progress
+            bar or not.
 
+        Return:
+        -------
+        fit : cmdstanpy.stanfit.mcmc.CmdStanMCMC
+            The fit output from stan that contains the samples
+            as well as other diagnostic information.
+
+            See https://cmdstanpy.readthedocs.io/en/v1.2.0/api.html#cmdstanpy.CmdStanMCMC
+            for more information on what can be accessed
+
+        Additional arguments that match the keyword arguments
+        in cmdstanpy.model.model.sample can also be passed.
+        See https://cmdstanpy.readthedocs.io/en/v1.2.0/api.html#cmdstanpy.CmdStanModel.sample
+        for more details.
+        """
         # Prepare fit inputs
         self._prepare_fit_inputs()
 
@@ -334,7 +251,6 @@ class Analysis:
             chains=chains,
             seed=seed,
             show_progress=show_progress,
-            output_dir=output_dir,
             iter_warmup=warmup,
             **kwargs,
         )
@@ -347,10 +263,19 @@ class Analysis:
         print("Done!")
         return self.fit
 
-    def save(self, outfile):
+    def save(self: Self, outfile: str) -> None:
         """
-        Write the analysis to file.
+        Write the analysis output to an output file.
+
+        Parameter:
+        ----------
+        outfile : str
+            the path to the output file where the
+            analysis outputs are to be stored.
+            Must be a .h5 format.
         """
+        # ensure that the file is a h5 format
+        assert outfile.find(".h5"), f"Output file {outfile} must have a .h5 extension!"
 
         with h5py.File(outfile, "w") as f:
             source_handle = f.create_group("source")
@@ -369,24 +294,18 @@ class Analysis:
             if self.model:
                 self.model.save(model_handle)
 
+            if self.fit is None:
+                raise ValueError("Run `fit_model` first!")
             fit_handle = f.create_group("fit")
-            if self.fit:
-                # fit inputs
-                fit_input_handle = fit_handle.create_group("input")
-                for key, value in self.fit_input.items():
-                    fit_input_handle.create_dataset(key, data=value)
+            # fit inputs
+            fit_input_handle = fit_handle.create_group("input")
+            for key, value in self.fit_input.items():
+                fit_input_handle.create_dataset(key, data=value)
 
-                # samples
-                samples = fit_handle.create_group("samples")
-                for key, value in self.chain.items():
-                    samples.create_dataset(key, data=value)
-
-            else:
-                plotvars_handle = f.create_group("plotvars")
-
-                if self.analysis_type == self.gmf_type:
-                    for key, value in list(self.defl_plotvars.items()):
-                        plotvars_handle.create_dataset(key, data=value)
+            # samples
+            samples = fit_handle.create_group("samples")
+            for key, value in self.chain.items():
+                samples.create_dataset(key, data=value)
 
     # KW: 12.06.24: I have shifted the table calculation to EffectiveExposure & EnergyLoss modules since I want to make the Analysis object only used for performing fits and not as a general container.
     # Similar for the simulation, however I do not port this to the Simulation module since this requires the use of stan when there are more simpler ways to forwards simulate the events.

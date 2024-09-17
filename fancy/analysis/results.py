@@ -6,7 +6,7 @@ from matplotlib import pyplot as plt
 from tqdm import tqdm as progress_bar
 from cmdstanpy import CmdStanModel
 
-from ..interfaces.stan import Direction, Mpc_to_km, convert_scale
+from ..interfaces.model import Direction, Mpc_to_km, convert_scale
 from ..detector.exposure import m_integrand
 from ..interfaces.integration import ExposureIntegralTable
 
