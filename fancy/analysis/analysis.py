@@ -1,11 +1,13 @@
-import numpy as np
-import h5py
-import pickle
 import os
+import pickle
+
+import h5py
+import numpy as np
 
 from fancy.interfaces.data import Data
-from fancy.interfaces.stan import Model
 from fancy.interfaces.integration import ExposureIntegralTable
+from fancy.interfaces.stan import Model
+from fancy.utils.package_data import get_path_to_kappa_theta
 
 
 class Analysis:
@@ -114,9 +116,9 @@ class Analysis:
         exposure_table_file: str,
         energy_loss_table_file: str = "",
         gmf_model: str = "None",
-        kappa_theta_file: str = "",
         main_only=True,
-    ):
+        kappa_theta_filename : str = "kappa_theta_map.pkl"
+    ) -> None:
         """
         Pass in names of integral tables that have already been made.
         Only the main table is read in by default, the simulation table
@@ -161,14 +163,8 @@ class Analysis:
                     ()
                 ]  # km^2 yr
 
-            if len(kappa_theta_file) == 0:
-                kappa_theta_file = os.path.join(
-                    os.path.dirname(os.path.realpath(__file__)),
-                    "..",
-                    "utils/resources/kappa_theta_map.pkl",
-                )
-
             """Read from kappa_theta map"""
+            kappa_theta_file = str(get_path_to_kappa_theta(kappa_theta_filename))
             (self.thetas_interp_arr, self.log10_kappas_interp_arr, _) = pickle.load(
                 open(kappa_theta_file, "rb")
             )

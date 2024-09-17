@@ -43,3 +43,10 @@ def get_path_to_lens(lens_name: str) -> Path:
     )
 
     return Path(lens_path)
+
+def get_path_to_kappa_theta(file_name : str = "kappa_theta_map.pkl") -> Path:
+
+    kappa_theta_path = resource_filename(
+        "fancy", "utils/resources/{0:s}".format(file_name)
+    )
+    return Path(kappa_theta_path)

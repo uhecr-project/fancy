@@ -1,29 +1,25 @@
-"""Class that calculates effective exposure"""
+"""Class that calculates effective exposure."""
 
 import os
-import numpy as np
-import healpy
+import pickle
+
+import astropy.units as u
 import h5py
-import pickle as pickle
+import healpy
+import numpy as np
+from astropy.coordinates import SkyCoord
 from scipy.interpolate import CubicSpline
 from scipy.stats import norm
-
-from astropy.coordinates import SkyCoord
-import astropy.units as u
+from tqdm import tqdm
 
 from fancy import Data
-from tqdm import tqdm
-import h5py
-
 from fancy.detector.exposure import m_dec
 from fancy.physics.gmf import GMFLensing
+from fancy.utils.package_data import get_path_to_kappa_theta
 
 
 class EffectiveExposure:
-    """
-    Class to manage calculation of the effective exposure from given source(s).
-    Also constructs tables that will be passed to stan for interpolation.
-    """
+    """Class to manage calculation of the effective exposure from given source(s), and constructs tables that will be passed to stan for interpolation."""
 
     def __init__(self, data: Data, gmf_model: str = "JF12", verbose=False):
         """
@@ -59,7 +55,7 @@ class EffectiveExposure:
     def initialise_grids(
         self,
         energy_loss_table_file: str,
-        kappa_theta_file : str = "",
+        kappa_theta_filename : str = "kappa_theta_map.pkl",
         Bigmf_min: float = 0.001,
         Bigmf_max: float = 10,
         NBigmfs: int = 50,
@@ -143,12 +139,7 @@ class EffectiveExposure:
                 self.Rth_srcs = f[config_label]["Rth_src_grid"][()] * u.EV
 
         # read in the theta <-> kappa interpolated file
-        if len(kappa_theta_file) == 0:
-            kappa_theta_file = os.path.join(
-                os.path.dirname(os.path.realpath(__file__)),
-                "..", "..",
-                "utils/resources/kappa_theta_map.pkl",
-            )
+        kappa_theta_file = str(get_path_to_kappa_theta(kappa_theta_filename))
         (_, _, self.f_log10_kappa) = pickle.load(open(kappa_theta_file, "rb"))
 
     def _compute_exposure(self):
