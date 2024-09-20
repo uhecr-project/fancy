@@ -20,7 +20,7 @@ import healpy
 class GMFLensing:
     """Class that handles forward simulations of GMF deflections (lensing / weighted vMF maps)."""
 
-    __lens_names = {"JF12": "JF12full_Gamale", "UF23":"UF23_all"}  # noqa: RUF012
+    __lens_names = {"JF12": "JF12full_Gamale", "UF23":"UF23_all", "UF23Turb" : "UF23Turb_base"}  # noqa: RUF012
 
     def __init__(self, gmf_model: str = "JF12") -> None:
         """
@@ -35,11 +35,7 @@ class GMFLensing:
         self.gmf_model = gmf_model
 
         # read in GMF lens if we have GMF enabled
-        if gmf_model == "JF12":
-            path_to_lens = str(get_path_to_lens(self.__lens_names[self.gmf_model]))
-            self.gmf_lens = crpropa.MagneticLens(path_to_lens)
-            self.disable_gmf = False
-        elif gmf_model == "UF23":
+        if gmf_model in list(self.__lens_names.keys()):
             path_to_lens = str(get_path_to_lens(self.__lens_names[self.gmf_model]))
             self.gmf_lens = crpropa.MagneticLens(path_to_lens)
             self.disable_gmf = False

@@ -11,6 +11,7 @@ from astropy.coordinates import SkyCoord
 from scipy.interpolate import CubicSpline
 from scipy.stats import norm
 from tqdm import tqdm
+from typing_extensions import Self
 
 from fancy import Data
 from fancy.detector.exposure import m_dec
@@ -21,13 +22,18 @@ from fancy.utils.package_data import get_path_to_kappa_theta
 class EffectiveExposure:
     """Class to manage calculation of the effective exposure from given source(s), and constructs tables that will be passed to stan for interpolation."""
 
-    def __init__(self, data: Data, gmf_model: str = "JF12", verbose=False):
+    def __init__(self : Self, data: Data, gmf_model: str = "None", verbose : bool=False) -> None:
         """
         Class to manage calculation of the effective exposure from given source(s).
+
         Also constructs tables that will be passed to stan for interpolation.
 
-        :param data: Data object from fancy
-        :param verbose: enable verbosity
+        data : fancy.interfaces.Data
+            Container object that tracks the source, UHECR, and detector information
+        gmf_model : str, default="None"
+            the GMF model to consider. Default is None, which ignores GMF effects
+        verbose : bool, default=False
+            to print out additional statements for debugging or not.
         """
         self.data = data
         self.gmf_model = gmf_model
@@ -53,20 +59,39 @@ class EffectiveExposure:
             print(f"Coordinates: {self.coords_src}")
 
     def initialise_grids(
-        self,
+        self: Self,
         energy_loss_table_file: str,
-        kappa_theta_filename : str = "kappa_theta_map.pkl",
         Bigmf_min: float = 0.001,
         Bigmf_max: float = 10,
         NBigmfs: int = 50,
         Npixels: int = 49152,
-    ):
+        kappa_theta_filename: str = "kappa_theta_map.pkl",
+    ) -> None:
         """
         Initialise grids used for effective exposure calculation.
 
-        :param energy_loss_table_file: table for energy losses
-        :param Bigmf_min, Bigmf_max, NBigmfs: min / max and density of log-spaced magnetic field grid in nG
-        :param Npixels: number of pixels used for healpy grid. DO NOT CHANGE UNLESS CRPROPA DOES SO
+        The grids used are based on the energy loss tables that are generated from running
+        the ProtonEnergyLoss or NucleiEnergyLoss model. Please ensure that the energy loss
+        tables are generated for the particular configuration considered.
+
+        Parameter:
+        ----------
+        energy_loss_table_file : str
+            path to the table for energy losses.
+        Bigmf_min : float, default=0.001
+            the minimum value of the IGMF strength used when generating the grid (in log space)
+        Bigmf_max : float, default=10
+            same as Bigmf_min, but maximum value instead
+        NBigmfs : int, default=50
+            the number of points in the Bigmf grid
+        Npixels : int, default=49152
+            the number of pixels used to describe the healpy grid.
+            Default is 49152, which is the default value used when generating the
+            lens in CRPropa.
+            DO NOT CHANGE UNLESS CRPROPA DOES SO!
+        kappa_theta_filename : str, default=kappa_theta_map.pkl
+            the path to the mapping from kappa <-> theta in the vMF distribution.
+            The default name uses the file that exists in `fancy/utils/resources`
         """
         # generate logarithmically spaced magnetic field grid
         self.Bigmf_grid = (
@@ -102,7 +127,7 @@ class EffectiveExposure:
         # read out relevant parameters from energy loss tables
         if not os.path.exists(energy_loss_table_file):
             raise FileNotFoundError(
-                f"Energy loss tables have not been generated. Construct them first!"
+                "Energy loss tables have not been generated. Construct them first!"
             )
 
         with h5py.File(energy_loss_table_file, "r") as f:
@@ -142,8 +167,8 @@ class EffectiveExposure:
         kappa_theta_file = str(get_path_to_kappa_theta(kappa_theta_filename))
         (_, _, self.f_log10_kappa) = pickle.load(open(kappa_theta_file, "rb"))
 
-    def _compute_exposure(self):
-        """Compute the exposure as a function of declination in healpy"""
+    def _compute_exposure(self: Self) -> None:
+        """Compute the exposure as a function of declination in healpy."""
         # first transform coordianates to declination
         self.coords_healpy.representation_type = "unitspherical"
         self.coords_healpy.transform_to("icrs")
@@ -157,15 +182,22 @@ class EffectiveExposure:
         self.coords_healpy.transform_to("galactic")
 
     def compute_effective_exposure(
-        self, gmflens: GMFLensing, kappa_max=1e6, exposure_min=1e-30 * u.km**2 * u.yr
-    ):
+        self: Self,
+        gmflens: GMFLensing,
+        kappa_max: float = 1e6,
+        exposure_min: float = 1e-30,
+    ) -> None:
         """
-        Computation of the effective exposure.
+        Compute the effective exposure.
 
-        :param gmflens: GMFLensing object that will map the lens back to Earth
-        :param disable_gmf: force disabling of GMF
-        :param kappa_max: maximum threshold value for kappa computation
-        :param exposure_min: minimum threshold value for exposure
+        Parameter:
+        ----------
+        gmflens: fancy.physics.gmf.gmflens.GMFLensing
+            Container for the GMF lens that will map the lens back to Earth
+        kappa_max : float, default=1e6
+            maximum threshold value for kappa computation
+        exposure_min: float, default=1e-30
+            minimum threshold value for exposure in km^2 yr
         """
         # calculate effective exposure
         self.eff_exposure_grid = np.zeros((self.Nsrcs + 1, self.NRs, self.NBigmfs)) * (
@@ -176,11 +208,10 @@ class EffectiveExposure:
         self._compute_exposure()
 
         for id in range(self.Nsrcs + 1):
-            # print if we are running source case or background case
-            if id < self.Nsrcs:
+            if id < self.Nsrcs:  # sources
                 Dsrc = self.Dsrcs[id]
                 src_uv = self.coords_src[id].cartesian.xyz.value
-            else:
+            elif id == self.Nsrcs:  # background
                 src_uv = np.array([1, 0, 0])  # some random unit vector
 
             for ir in tqdm(
@@ -191,10 +222,12 @@ class EffectiveExposure:
                 R = self.rigidities_grid[ir]
 
                 # if source model, then iterate for each magnetic field and compute individual kappas
-                if id < self.Nsrcs:
+                if id < self.Nsrcs:   
                     for ib, Bigmf in enumerate(self.Bigmf_grid):
-                        kigmf = 10**self.f_log10_kappa(theta_igmf(R, Bigmf, Dsrc).to_value(u.deg))
-                        kigmf = kappa_max if kigmf > kappa_max else kigmf
+                        kigmf = 10 ** self.f_log10_kappa(
+                            theta_igmf(R, Bigmf, Dsrc).to_value(u.deg)
+                        )
+                        kigmf = min(kigmf, kappa_max)
 
                         self.coords_healpy.representation_type = "cartesian"
                         weighted_map = (
@@ -207,7 +240,7 @@ class EffectiveExposure:
                             weighted_map
                         )  # some numerical error in normalisation, so we force normalisation here
 
-                        # lens the map
+                        # lens the map only if we want to include GMF
                         if self.gmf_model != "None":
                             lensed_map = gmflens.apply_lens_to_map(
                                 weighted_map, R.to_value(u.EV)
@@ -218,9 +251,11 @@ class EffectiveExposure:
                             eff_exp = np.dot(self.exposures, weighted_map)
 
                         # set some limit incase the effective exposure is so small
-                        eff_exp = exposure_min if eff_exp < exposure_min else eff_exp
+                        eff_exp = max(eff_exp, exposure_min * u.km**2 * u.yr)
                         self.eff_exposure_grid[id, ir, ib] = eff_exp
 
+                # background model, we do the same but without Bigmf since we dont have a kappa
+                # i.e. we fix kappa = 0
                 else:
                     self.coords_healpy.representation_type = "cartesian"
                     weighted_map = (
@@ -231,7 +266,7 @@ class EffectiveExposure:
                         weighted_map
                     )  # some numerical error in normalisation, so we force normalisation here
 
-                    # lens the map
+                    # lens the map only if we want to include GMF
                     if self.gmf_model != "None":
                         lensed_map = gmflens.apply_lens_to_map(
                             weighted_map, R.to_value(u.EV)
@@ -244,10 +279,8 @@ class EffectiveExposure:
                     # compute effective exposure
                     self.eff_exposure_grid[id, ir, :] = eff_exp
 
-    def get_weighted_exposure(self):
-        """
-        Compute the weighted exposure
-        """
+    def get_weighted_exposure(self: Self) -> None:
+        """Apply weights to the effective exposure to get the weighted exposure."""
         self.wexp_src_grid = np.zeros((self.Nsrcs, self.Nalphas, self.NBigmfs)) * (
             u.km**2 * u.yr
         )
@@ -278,6 +311,7 @@ class EffectiveExposure:
                 for ib in range(self.NBigmfs):
                     if self.mass_group != 1:
                         # integrate over all rigidities including detection effects
+                        # TODO: update this function to np.trapezoid for numpy >=2.0
                         self.wexp_src_grid[id, ia, ib] = np.trapz(
                             y=self.arrspects_grid[d_idx, :, ia]
                             * self.eff_exposure_grid[id, :, ib]
@@ -285,14 +319,14 @@ class EffectiveExposure:
                             x=self.rigidities_grid,
                         )
                     else:
-                        # compute expected energy and find index in rigidity grid 
+                        # compute expected energy and find index in rigidity grid
                         # corresponding to it (we parametrize energy as rigidity for MG1)
                         Rex = self.Eexs_grid[d_idx, ia]
-                        Rex_idx = np.digitize(
+                        Rex_idx = min(np.digitize(
                             Rex.value, self.rigidities_grid.value, right=False
-                        )
+                        ), self.NRs-1)
 
-                        # weighting factor calculated by analytical integral of source 
+                        # weighting factor calculated by analytical integral of source
                         # & arrival distribution, see CM19 for details
                         # TODO: update this for bounded energy spectrum
                         w_factor = (
@@ -323,8 +357,18 @@ class EffectiveExposure:
                     self.data.detector.alpha_T / (4 * np.pi) * (u.km**2 * u.yr)
                 )
 
-    def save(self, outfile):
-        """Save tabulated results to h5py File"""
+    def save(self: Self, outfile: str):
+        """
+        Save tabulated results to h5py File.
+
+        Parameter:
+        ----------
+        outfile : str
+            the path to the output file. must be in .h5 format.
+        """
+        assert (
+            outfile.find(".h5") > 0
+        ), f"Output file {outfile} needs to have a .h5 extension."
         with h5py.File(outfile, "a") as f:
             config_label = f"{self.source_type}_{self.detector_type}_mg{self.mass_group}_{self.gmf_model}"
             if config_label in f.keys():
@@ -348,7 +392,7 @@ class EffectiveExposure:
                 data=np.log10(self.wexp_bg_grid.to_value(u.km**2 * u.yr)),
             )
 
-    def vMF(self, x, mu, kappa):
+    def vMF(self: Self, x: np.array, mu: np.array, kappa: float):
         """
         vMF distribution given mean direction mu, spread parameter kappa
         NB: shape of x must be (N, 3)
@@ -385,20 +429,6 @@ def theta_igmf(R, Bigmf, D, lc=1):
         * np.sqrt(D / (10 * u.Mpc))
         * np.sqrt(lc)
     ) * u.deg
-
-
-# def kappa_igmf(R, Bigmf, D, lc=1, kappa_max=1e6):
-#     """
-#     Deflection parameter for IGMF. Calculated using the approximate formula (for k >> 1)
-
-#     :param R: rigidity in EV
-#     :param Bigmf: IGMF magnetic field strength in nG
-#     :param D: distance of the source in Mpc
-#     :param lc: coherence length in Mpc (default 1 Mpc)
-#     :param kappa_max: some maximum threshold value for high kappa (== super small angles)
-#     """
-#     k = (7552 * (theta_igmf(R, Bigmf, D, lc) / (1 * u.deg)) ** -2).value
-#     return k if k < kappa_max else kappa_max
 
 
 def bounded_power_law(R, alpha_b, Rmin, Rmax):

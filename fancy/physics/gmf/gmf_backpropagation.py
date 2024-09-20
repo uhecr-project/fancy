@@ -17,13 +17,8 @@ except ImportError:
 
 
 class GMFBackPropagation:
-    """
-    Class to simulate back propagation of UHECRs within a given dataset (simulated or real data) and obtain the deflected events and their individual kappa values.
-
-    :param data : Data object generated from fancy.interfaces.data
-    :param gmf_model : the GMF model considered for backpropagation.
-
-    """
+    """Class to simulate back propagation of UHECRs within a given dataset (simulated or real data) and obtain the deflected events and their individual kappa values."""
+    
     __gmf_models = ["JF12", "UF23", "UF23Turb", "PT11", "TF17"]
     __Nmodels_UF23 = 8
 

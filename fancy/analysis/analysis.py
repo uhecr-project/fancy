@@ -160,7 +160,7 @@ class Analysis:
                 print("Using available rigidity data for analysis.")
                 self.fit_input["Rdet"] = self.data.uhecr.rigidity
             else:
-                print(f"Using mean charge {self.data.detector.meanZ} for rigidity.")
+                print(f"Dividing energy data by mean charge {self.data.detector.meanZ} for rigidity.")
                 self.fit_input["Rdet"] = (
                     self.data.uhecr.energy / self.data.detector.meanZ
                 )
