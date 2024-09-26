@@ -20,7 +20,7 @@ import healpy
 class GMFLensing:
     """Class that handles forward simulations of GMF deflections (lensing / weighted vMF maps)."""
 
-    __lens_names = {"JF12": "JF12full_Gamale", "UF23":"UF23_all", "UF23Turb" : "UF23Turb_base"}  # noqa: RUF012
+    __lens_names = {"JF12": "JF12full_Gamale", "UF23":"UF23_all", "UF23Turb" : "UF23Turb_all"}  # noqa: RUF012
 
     def __init__(self, gmf_model: str = "JF12") -> None:
         """
