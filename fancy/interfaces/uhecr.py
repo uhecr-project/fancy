@@ -415,7 +415,7 @@ class Uhecr:
 
             for y, d in np.nditer([self.year, self.day]):
                 d = int(d)
-                test_date = date(y, 1, 1) + timedelta(d)
+                test_date = date(y, period_1_start.month, period_1_start.day) + timedelta(d)
 
                 if period_1_start <= test_date <= period_1_end:
                     period.append(1)

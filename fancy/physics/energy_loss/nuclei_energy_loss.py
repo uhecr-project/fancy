@@ -139,7 +139,7 @@ class NucleiEnergyLoss(EnergyLoss):
         self.Asrc_pdfs[np.isnan(self.Asrc_pdfs)] = 0.0
         
 
-    def compute_source_spectrum(self) -> None:
+    def compute_source_spectrum(self, R_cutoff=20 * u.EV) -> None:
         """Compute the source spectrum."""
         self.src_spects_full = np.zeros(
             (self.Ndistances, self.NAsrcs, self.NRs, self.Nalphas)
@@ -159,6 +159,7 @@ class NucleiEnergyLoss(EnergyLoss):
                     self.Asrc_pdfs[id, im, :]
                     * self.Zs[im] ** (1.0 - self.alpha_grid[ia])
                     * self.rigidities_grid.to_value(u.EV) ** (-self.alpha_grid[ia])
+                    * np.exp(-(self.rigidities_grid / R_cutoff).value)
                 )
 
                 # zeroths moment, in (EeV)^(1-alpha)

@@ -24,7 +24,7 @@ class Simulation:
     Handles the generation of simulation samples
     """
 
-    truth_input_keys = ["f", "alpha_s", "alpha_b", "log10_L", "Bigmf", "Nex"]
+    truth_input_keys = ["f", "alpha_s", "alpha_b", "log10_L", "Bigmf", "Nex", "F0"]
 
     def __init__(
         self,
@@ -132,6 +132,46 @@ class Simulation:
 
         self.NBigmfs = len(self.log10_Bigmf_grid)
 
+    def set_parameters_from_inputs(self, input_dict : dict, truth_outfile: str):
+        """
+        Set parameters from fit inputs from posteriors.
+
+        Parameter:
+        ----------
+        input_dict : dict
+            dictionary of input parameters that contain all values
+        truth_outfile : str
+            output file for truths
+        """
+        # create dictionaryu of truths
+        self.truth_dict = {
+            "alpha_s": input_dict["alpha_s"],
+            "f": input_dict["f"],
+            "L": 10**input_dict["log10_L"],
+            "log10_L": input_dict["log10_L"],
+            "Bigmf": input_dict["Bigmf"],
+            "F0": 10**input_dict["log10_F0"],
+            "log10_F0": 10**input_dict["log10_F0"],
+            "Nex": input_dict["Nex"],
+            "Nsrc": input_dict["Nex"] * input_dict["f"],
+            "Nbg": input_dict["Nex"] * (1 - input_dict["f"]),
+        }
+
+         # convert to integer using np.round (TODO: strictly should be Poisson, edit later)
+        # store as object since we need to use this for sampling
+        self.Nuhecrs_arr = np.zeros(self.Nsrcs + 1, dtype=int)  # type: ignore
+        self.Nuhecrs_arr[: self.Nsrcs] = int(np.round(input_dict["Nex"] * input_dict["f"]))
+        self.Nuhecrs_arr[self.Nsrcs] = int(np.round(input_dict["Nex"] * (1 - input_dict["f"])))
+
+        self.Nuhecrs = np.sum(self.Nuhecrs_arr)
+
+        if self.mass_group != 1:
+            self.truth_dict["alpha_b"] = input_dict["alpha_b"]
+
+        print(f"Storing truths to {truth_outfile}")
+        with open(truth_outfile, "wb") as file:
+            pickle.dump(self.truth_dict, file, protocol=-1)
+
     def set_truths(self, input_dict: dict, truth_outfile: str):
         """
         Set & compute simulation truths based on truths
@@ -178,6 +218,10 @@ class Simulation:
             Eex = 10.0 ** f_log10_Eexs(alpha_s) * u.EeV
             Fs_per_Ls[id] = 1 / (4 * np.pi * Dsrc.to(u.km) ** 2) / Eex
 
+        # if "log10_L" in input_dict:
+        #     L = 10**input_dict["log10_L"] * (u.EeV / u.yr)
+        # else:
+        #     L = Nex_src / (np.sum(wexps_src * Fs_per_Ls)) / self.Nsrcs
         L = Nex_src / (np.sum(wexps_src * Fs_per_Ls)) / self.Nsrcs
         print(f"Luminosity per source: {L:.4e}")
 
@@ -613,7 +657,7 @@ class Simulation:
             za = 99
             i = 0
             while za > self.data.detector.threshold_zenith_angle.rad:
-                dt = np.random.exponential(1 / self.Nuhecrs)
+                dt = np.random.exponential(1.0 / self.Nuhecrs)
                 if first:
                     t = self._year_fraction(self.data.detector.period_start) + dt
                 else:

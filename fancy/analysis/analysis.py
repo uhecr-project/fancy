@@ -307,6 +307,10 @@ class Analysis:
             for key, value in self.chain.items():
                 samples.create_dataset(key, data=value)
 
+            # log posterior
+            samples.create_dataset("log_post", data=self.fit.method_variables()["lp__"])
+
+
     # KW: 12.06.24: I have shifted the table calculation to EffectiveExposure & EnergyLoss modules since I want to make the Analysis object only used for performing fits and not as a general container.
     # Similar for the simulation, however I do not port this to the Simulation module since this requires the use of stan when there are more simpler ways to forwards simulate the events.
     # I comment out additional routines that are not used at the moment as well.
