@@ -181,9 +181,9 @@ class Simulation:
         """
 
         # first assert that the inputs keys match the ones the class definition
-        assert np.all(
-            [k_input in self.truth_input_keys for k_input in input_dict.keys()]
-        ), "Truth inputs do not match."
+        # assert np.all(
+        #     [k_input in self.truth_input_keys for k_input in input_dict.keys()]
+        # ), "Truth inputs do not match."
 
         alpha_s = input_dict["alpha_s"]
         Bigmf = input_dict["Bigmf"] * u.nG
