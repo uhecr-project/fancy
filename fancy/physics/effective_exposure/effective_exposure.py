@@ -211,6 +211,7 @@ class EffectiveExposure:
             if id < self.Nsrcs:  # sources
                 Dsrc = self.Dsrcs[id]
                 src_uv = self.coords_src[id].cartesian.xyz.value
+                print(f"Dsrc = {Dsrc:.2f}")
             elif id == self.Nsrcs:  # background
                 src_uv = np.array([1, 0, 0])  # some random unit vector
 

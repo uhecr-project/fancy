@@ -117,7 +117,7 @@ class GMFLensing:
             crpropa.nucleusId(1, 1), R * crpropa.EeV
         )
         if np.any(np.isnan(lensed_weighted_map)):
-            print(weighted_map[weighted_map > 0])
+            print(R, weighted_map[weighted_map > 0])
             print(len(np.isnan(lensed_weighted_map) == True))
             raise ValueError("NaN values in lensed weighted map!")
 

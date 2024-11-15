@@ -345,7 +345,7 @@ class Uhecr:
                 if self.zenith_angle[i] > 60:
                     area.append(possible_areas_incl[p - 1] * exp_factor)
 
-        elif self.label == "auger2022":
+        elif "auger2022" in self.label:
             from ..detector.auger2022 import M, period_start, A
             
             # get period for each event - in years, taking into account days
@@ -359,7 +359,7 @@ class Uhecr:
             #     area = np.tile(A, self.N)
             area = np.tile(A, self.N)
 
-        elif self.label == "TA2015":
+        elif "TA2015" in self.label:
             from ..detector.TA2015 import A1, A2
 
             possible_areas = [A1, A2]

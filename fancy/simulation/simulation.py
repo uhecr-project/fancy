@@ -172,14 +172,116 @@ class Simulation:
         with open(truth_outfile, "wb") as file:
             pickle.dump(self.truth_dict, file, protocol=-1)
 
+    def set_truths_from_priors(self, input_dict : dict, truth_outfile : str):
+        """
+        Set truths based on the priors.
+
+        Parameter:
+        ----------
+        input_dict : dict
+            dictionary of input parameters that contain all values
+        truth_outfile : str
+            output file for truths
+        """
+        alpha_s = input_dict["alpha_s"]
+        Bigmf = input_dict["Bigmf"] * u.nG
+        L = 10**input_dict["log10_L"] * u.EeV / u.yr
+        F0 = 10**input_dict["log10_F0"] * u.km**-2 * u.yr**-1
+
+        if self.mass_group != 1:
+            alpha_b = input_dict["alpha_b"]
+
+        # calculate the number of expected events from all sources using weighted exposure * total flux
+        wexps_src = np.zeros(self.Nsrcs) * (u.km**2 * u.yr)
+        Fs_per_Ls = np.zeros(self.Nsrcs) * (u.km**-2 * u.EeV**-1)
+
+        for id, Dsrc in enumerate(self.Dsrcs):
+            dmax_idx = np.digitize(Dsrc, self.distances_grid, right=True)
+
+            f_log10_wexp_src = RegularGridInterpolator(
+                (self.alpha_grid, self.log10_Bigmf_grid),
+                self.log10_wexp_src_grid[id, ...],
+            )
+            log10_wexp_src = f_log10_wexp_src((alpha_s, np.log10(Bigmf.value)))
+            wexps_src[id] = 10.0**log10_wexp_src * (u.km**2 * u.yr)
+
+            f_log10_Eexs = CubicSpline(
+                x=self.alpha_grid, y=self.log10_Eexs_grid[dmax_idx, :]
+            )
+            Eex = 10.0 ** f_log10_Eexs(alpha_s) * u.EeV
+            Fs_per_Ls[id] = 1 / (4 * np.pi * Dsrc.to(u.km) ** 2) / Eex
+
+        # calculate expected events from source
+        Nex_src = (np.sum(wexps_src * Fs_per_Ls)) / self.Nsrcs * L
+        print(f"Luminosity per source: {L:.4e}")
+
+        # now calculate the flux & Nex_BG
+        Fs = np.sum(Fs_per_Ls) * L
+        # for background flux, interpolate weighted exposure and calculate using Nex_bg
+        f_log10_wexp_bg = CubicSpline(
+            x=self.alpha_grid, y=self.log10_wexp_bg_grid
+        )  # NB: take any index for Bigmf since no dependence on it
+        if self.mass_group != 1:
+            Nex_bg = F0 * (10.0 ** f_log10_wexp_bg(alpha_b) * (u.km**2 * u.yr))
+        else:
+            Nex_bg = F0 * (10.0 ** f_log10_wexp_bg(alpha_s) * (u.km**2 * u.yr))
+        FT = Fs + F0  # total flux
+        f1 = Fs / FT  # source fraction before detection
+        print(f"FT: {FT:.3e}, Fs: {Fs:.3e}, F0: {F0:.3e}, f1 = Fs / FT: {f1:.3e}")
+
+        Nex = Nex_bg + Nex_src
+        print(f"Nex: {Nex:.3f}, Nex_src: {Nex_src:.3f}, Nex_bg: {Nex_bg:.3f}")
+
+        # convert to integer using np.round (TODO: strictly should be Poisson, edit later)
+        # store as object since we need to use this for sampling
+
+        # artificially add one event for each so that we at least have 1 event per source / BG to simulate
+        self.Nuhecrs_arr = np.zeros(self.Nsrcs + 1, dtype=int)  # type: ignore
+        self.Nuhecrs_arr[: self.Nsrcs] = int(np.round(Nex_src) + 1)
+        self.Nuhecrs_arr[self.Nsrcs] = int(np.round(Nex_bg) + 1)
+        print(
+            f"Nuhecrs: {np.sum(self.Nuhecrs_arr):d}, Nuhecrs_src: {np.sum(self.Nuhecrs_arr[:-1]):d}, Nuhecrs_bg: {self.Nuhecrs_arr[-1]:d}"
+        )
+        self.Nuhecrs = np.sum(self.Nuhecrs_arr)
+
+        f = Nex_src / Nex
+        print(f"f = {f}")
+
+        # create dictionaryu of truths
+        self.truth_dict = {
+            "alpha_s": alpha_s,
+            "f": f,
+            "f1": f1.value,
+            "L": L.value,
+            "log10_L": np.log10(L.value),
+            "Bigmf": Bigmf.value,
+            "F0": F0,
+            "log10_F0": np.log10(F0.value),
+            "Fs": Fs.value,
+            "FT": FT.value,
+            "Nex": Nex,
+            "Nsrc": Nex_src,
+            "Nbg": Nex_bg,
+        }
+        if self.mass_group != 1:
+            self.truth_dict["alpha_b"] = alpha_b
+
+        print(f"Storing truths to {truth_outfile}")
+        with open(truth_outfile, "wb") as file:
+            pickle.dump(self.truth_dict, file, protocol=-1)
+        
+
     def set_truths(self, input_dict: dict, truth_outfile: str):
         """
-        Set & compute simulation truths based on truths
+        Set simulation truths based on truths. 
 
-        :param input_dict: dictionary containing truth of [alpha_s, alpha_b, log10_L, f, Bigmf]
-        :param truth_outfile: output file for truths
+        Parameter:
+        ----------
+        input_dict : dict
+            dictionary of input parameters that contain all values
+        truth_outfile : str
+            output file for truths
         """
-
         # first assert that the inputs keys match the ones the class definition
         # assert np.all(
         #     [k_input in self.truth_input_keys for k_input in input_dict.keys()]
@@ -218,18 +320,18 @@ class Simulation:
             Eex = 10.0 ** f_log10_Eexs(alpha_s) * u.EeV
             Fs_per_Ls[id] = 1 / (4 * np.pi * Dsrc.to(u.km) ** 2) / Eex
 
-        # if "log10_L" in input_dict:
-        #     L = 10**input_dict["log10_L"] * (u.EeV / u.yr)
-        # else:
-        #     L = Nex_src / (np.sum(wexps_src * Fs_per_Ls)) / self.Nsrcs
         L = Nex_src / (np.sum(wexps_src * Fs_per_Ls)) / self.Nsrcs
         print(f"Luminosity per source: {L:.4e}")
+
+        print((L * wexps_src * Fs_per_Ls) * self.Nsrcs, np.sum((wexps_src * Fs_per_Ls) * self.Nsrcs * L))
+
+        # raise Exception()
 
         # convert to integer using np.round (TODO: strictly should be Poisson, edit later)
         # store as object since we need to use this for sampling
         self.Nuhecrs_arr = np.zeros(self.Nsrcs + 1, dtype=int)  # type: ignore
-        self.Nuhecrs_arr[: self.Nsrcs] = int(np.round(L * wexps_src * Fs_per_Ls))
-        self.Nuhecrs_arr[self.Nsrcs] = int(np.round(Nex_bg))
+        self.Nuhecrs_arr[: self.Nsrcs] = np.round(L * wexps_src * Fs_per_Ls * self.Nsrcs).astype(int)
+        self.Nuhecrs_arr[self.Nsrcs] = np.round(Nex_bg).astype(int)
         print(
             f"Nuhecrs: {np.sum(self.Nuhecrs_arr):d}, Nuhecrs_src: {np.sum(self.Nuhecrs_arr[:-1]):d}, Nuhecrs_bg: {self.Nuhecrs_arr[-1]:d}"
         )
