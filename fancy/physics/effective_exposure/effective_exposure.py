@@ -225,9 +225,10 @@ class EffectiveExposure:
                 # if source model, then iterate for each magnetic field and compute individual kappas
                 if id < self.Nsrcs:   
                     for ib, Bigmf in enumerate(self.Bigmf_grid):
-                        kigmf = 10 ** self.f_log10_kappa(
-                            theta_igmf(R, Bigmf, Dsrc).to_value(u.deg)
-                        )
+                        # kigmf = 10 ** self.f_log10_kappa(
+                        #     theta_igmf(R, Bigmf, Dsrc).to_value(u.deg)
+                        # )
+                        kigmf = 7552 * (theta_igmf(R, Bigmf, Dsrc) / (1 * u.deg)).value**-2
                         kigmf = min(kigmf, kappa_max)
 
                         self.coords_healpy.representation_type = "cartesian"

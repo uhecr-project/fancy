@@ -5,6 +5,7 @@ import numpy as np
 import pickle as pickle
 import h5py
 import datetime
+from typing import Union
 
 from scipy.interpolate import RegularGridInterpolator, CubicSpline
 
@@ -17,6 +18,7 @@ from fancy.physics.gmf import GMFBackPropagation, GMFLensing
 from fancy.detector.exposure import m_dec
 from vMF import sample_vMF
 import tempfile
+from fancy.utils.package_data import get_path_to_kappa_theta
 
 
 class Simulation:
@@ -31,7 +33,9 @@ class Simulation:
         data: Data,
         energy_loss_table_file: str,
         exposure_table_file: str,
+        kappa_theta_filename: str = "kappa_theta_map.pkl",
         gmf_model: str = "None",
+        verbose : bool = False
     ):
         """
         Handles the generation of simulation samples
@@ -51,23 +55,24 @@ class Simulation:
         self.Nsrcs = data.source.N
 
         self.data = data
+        self.verbose = verbose
 
         # make sure files do exist
         if not os.path.exists(energy_loss_table_file):
             raise FileNotFoundError(
-                f"Energy loss tables have not been generated. Construct them first!"
+                "Energy loss tables have not been generated. Construct them first!"
             )
 
         if not os.path.exists(exposure_table_file):
             raise FileNotFoundError(
-                f"Exposure tables have not been generated. Construct them first!"
+                "Exposure tables have not been generated. Construct them first!"
             )
 
         # initialise the grids
-        self._initialise_grids(energy_loss_table_file, exposure_table_file)
+        self._initialise_grids(energy_loss_table_file, exposure_table_file, kappa_theta_filename)
 
     def _initialise_grids(
-        self, energy_loss_table_file: str, exposure_table_file: str, dlR=0.001
+        self, energy_loss_table_file: str, exposure_table_file: str, kappa_theta_filename : str = "kappa_theta_map.pkl", dlR=0.001
     ):
         """
         Initialise grids used for simulation
@@ -131,6 +136,10 @@ class Simulation:
             )
 
         self.NBigmfs = len(self.log10_Bigmf_grid)
+
+        # read in the theta <-> kappa interpolated file
+        kappa_theta_file = str(get_path_to_kappa_theta(kappa_theta_filename))
+        (_, _, self.f_log10_kappa) = pickle.load(open(kappa_theta_file, "rb"))
 
     def set_parameters_from_inputs(self, input_dict : dict, truth_outfile: str):
         """
@@ -213,7 +222,6 @@ class Simulation:
 
         # calculate expected events from source
         Nex_src = (np.sum(wexps_src * Fs_per_Ls)) / self.Nsrcs * L
-        print(f"Luminosity per source: {L:.4e}")
 
         # now calculate the flux & Nex_BG
         Fs = np.sum(Fs_per_Ls) * L
@@ -227,10 +235,8 @@ class Simulation:
             Nex_bg = F0 * (10.0 ** f_log10_wexp_bg(alpha_s) * (u.km**2 * u.yr))
         FT = Fs + F0  # total flux
         f1 = Fs / FT  # source fraction before detection
-        print(f"FT: {FT:.3e}, Fs: {Fs:.3e}, F0: {F0:.3e}, f1 = Fs / FT: {f1:.3e}")
 
         Nex = Nex_bg + Nex_src
-        print(f"Nex: {Nex:.3f}, Nex_src: {Nex_src:.3f}, Nex_bg: {Nex_bg:.3f}")
 
         # convert to integer using np.round (TODO: strictly should be Poisson, edit later)
         # store as object since we need to use this for sampling
@@ -239,13 +245,20 @@ class Simulation:
         self.Nuhecrs_arr = np.zeros(self.Nsrcs + 1, dtype=int)  # type: ignore
         self.Nuhecrs_arr[: self.Nsrcs] = int(np.round(Nex_src) + 1)
         self.Nuhecrs_arr[self.Nsrcs] = int(np.round(Nex_bg) + 1)
-        print(
-            f"Nuhecrs: {np.sum(self.Nuhecrs_arr):d}, Nuhecrs_src: {np.sum(self.Nuhecrs_arr[:-1]):d}, Nuhecrs_bg: {self.Nuhecrs_arr[-1]:d}"
-        )
         self.Nuhecrs = np.sum(self.Nuhecrs_arr)
 
         f = Nex_src / Nex
-        print(f"f = {f}")
+
+        if self.verbose:
+            print("Computed parameters from inputs: ")
+            print(f"Luminosity per source: {L:.4e}")
+            print(f"FT: {FT:.3e}, Fs: {Fs:.3e}, F0: {F0:.3e}, f1 = Fs / FT: {f1:.3e}")
+            print(f"f = {f}")
+            print(f"Nex: {Nex:.3f}, Nex_src: {Nex_src:.3f}, Nex_bg: {Nex_bg:.3f}")
+            print(
+                f"Nuhecrs: {np.sum(self.Nuhecrs_arr):d}, Nuhecrs_src: {np.sum(self.Nuhecrs_arr[:-1]):d}, Nuhecrs_bg: {self.Nuhecrs_arr[-1]:d}"
+            )
+            print(f"Storing truths to {truth_outfile}")
 
         # create dictionaryu of truths
         self.truth_dict = {
@@ -266,7 +279,6 @@ class Simulation:
         if self.mass_group != 1:
             self.truth_dict["alpha_b"] = alpha_b
 
-        print(f"Storing truths to {truth_outfile}")
         with open(truth_outfile, "wb") as file:
             pickle.dump(self.truth_dict, file, protocol=-1)
         
@@ -298,7 +310,6 @@ class Simulation:
         # calculate expected events from background using source fraction
         Nex_src = Nex * f
         Nex_bg = Nex * (1 - f)
-        print(f"Nex: {Nex:.3f}, Nex_src: {Nex_src:.3f}, Nex_bg: {Nex_bg:.3f}")
 
         # calculate the number of expected events from all sources using weighted exposure * total flux
         wexps_src = np.zeros(self.Nsrcs) * (u.km**2 * u.yr)
@@ -321,7 +332,6 @@ class Simulation:
             Fs_per_Ls[id] = 1 / (4 * np.pi * Dsrc.to(u.km) ** 2) / Eex
 
         L = Nex_src / (np.sum(wexps_src * Fs_per_Ls)) / self.Nsrcs
-        print(f"Luminosity per source: {L:.4e}")
 
         print((L * wexps_src * Fs_per_Ls) * self.Nsrcs, np.sum((wexps_src * Fs_per_Ls) * self.Nsrcs * L))
 
@@ -332,9 +342,6 @@ class Simulation:
         self.Nuhecrs_arr = np.zeros(self.Nsrcs + 1, dtype=int)  # type: ignore
         self.Nuhecrs_arr[: self.Nsrcs] = np.round(L * wexps_src * Fs_per_Ls * self.Nsrcs).astype(int)
         self.Nuhecrs_arr[self.Nsrcs] = np.round(Nex_bg).astype(int)
-        print(
-            f"Nuhecrs: {np.sum(self.Nuhecrs_arr):d}, Nuhecrs_src: {np.sum(self.Nuhecrs_arr[:-1]):d}, Nuhecrs_bg: {self.Nuhecrs_arr[-1]:d}"
-        )
         self.Nuhecrs = np.sum(self.Nuhecrs_arr)
 
         # now calculate the flux
@@ -349,7 +356,17 @@ class Simulation:
             F0 = Nex_bg / (10.0 ** f_log10_wexp_bg(alpha_s) * (u.km**2 * u.yr))
         FT = Fs + F0  # total flux
         f1 = Fs / FT  # source fraction before detection
-        print(f"FT: {FT:.3e}, Fs: {Fs:.3e}, F0: {F0:.3e}, f1 = Fs / FT: {f1:.3e}")
+
+        if self.verbose:
+            print("Computed parameters from inputs: ")
+            print(f"Luminosity per source: {L:.4e}")
+            print(f"FT: {FT:.3e}, Fs: {Fs:.3e}, F0: {F0:.3e}, f1 = Fs / FT: {f1:.3e}")
+            print(f"f = {f}")
+            print(f"Nex: {Nex:.3f}, Nex_src: {Nex_src:.3f}, Nex_bg: {Nex_bg:.3f}")
+            print(
+                f"Nuhecrs: {np.sum(self.Nuhecrs_arr):d}, Nuhecrs_src: {np.sum(self.Nuhecrs_arr[:-1]):d}, Nuhecrs_bg: {self.Nuhecrs_arr[-1]:d}"
+            )
+            print(f"Storing truths to {truth_outfile}")
 
         # create dictionaryu of truths
         self.truth_dict = {
@@ -370,7 +387,6 @@ class Simulation:
         if self.mass_group != 1:
             self.truth_dict["alpha_b"] = alpha_b
 
-        print(f"Storing truths to {truth_outfile}")
         with open(truth_outfile, "wb") as file:
             pickle.dump(self.truth_dict, file, protocol=-1)
 
@@ -478,11 +494,17 @@ class Simulation:
 
             if id < self.Nsrcs:
                 # compute kappa_igmf
-                kappa_igmfs = kappa_igmf_vec(
+                # kappa_igmfs = 10 ** self.f_log10_kappa(
+                #     theta_igmf_vec(
+                #     sampled_rigidities[id] * u.EV,
+                #     self.truth_dict["Bigmf"] * u.nG,
+                #     self.Dsrcs[id],
+                # ))
+                kappa_igmfs = 7552 * (theta_igmf_vec(
                     sampled_rigidities[id] * u.EV,
-                    self.truth_dict["Bigmf"],
+                    self.truth_dict["Bigmf"] * u.nG,
                     self.Dsrcs[id],
-                )
+                    ) / (1 * u.deg)).value**-2
 
                 sampled_vectors_src = np.zeros((Nsamples, 3))
                 for i in range(Nsamples):
@@ -830,19 +852,5 @@ def theta_igmf(R, Bigmf, D, lc=1):
     ) * u.deg
 
 
-def kappa_igmf(R, Bigmf, D, lc=1, kappa_max=1e6):
-    """
-    Deflection parameter for IGMF. Calculated using the approximate formula (for k >> 1)
-
-    :param R: rigidity in EV
-    :param Bigmf: IGMF magnetic field strength in nG
-    :param D: distance of the source in Mpc
-    :param lc: coherence length in Mpc (default 1 Mpc)
-    :param kappa_max: some maximum threshold value for high kappa (== super small angles)
-    """
-    k = (7552 * (theta_igmf(R, Bigmf, D, lc) / (1 * u.deg)) ** -2).value
-    return k if k < kappa_max else kappa_max
-
-
-def kappa_igmf_vec(Rs, Bigmf, D, lc=1, kappa_max=1e6):
-    return np.array([kappa_igmf(R, Bigmf, D, lc, kappa_max) for R in Rs])
+def theta_igmf_vec(Rs, Bigmf, D, lc=1):
+    return np.array([theta_igmf(R, Bigmf, D, lc).to_value(u.deg) for R in Rs])

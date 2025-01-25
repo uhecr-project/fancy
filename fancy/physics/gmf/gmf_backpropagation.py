@@ -164,6 +164,11 @@ class GMFBackPropagation:
                 [uhecr_defl_v3d.x, uhecr_defl_v3d.y, uhecr_defl_v3d.z]
             )
 
+            # simply ignore any vector that is nan so that the mean
+            # would not include any nans
+            if np.any(np.isnan(uhecr_defl_v3d)):
+                continue
+
             # for calculation of arithmetic mean
             uhecr_mean_defl_v3d += uhecr_defl_v3d
 
@@ -242,6 +247,18 @@ class GMFBackPropagation:
             self.defl_sampled_uvs[uhecr_idx, ...] = dls
             self.defl_mean_uvs[uhecr_idx, :] = dlm
             self.time_delays[uhecr_idx, :] = td
+
+        # take care of nans
+        for uhecr_idx in range(self.Nuhecrs):
+            defl_sample_uv = self.defl_sampled_uvs[uhecr_idx,...]
+            # find a sample vector that is not nan so that we can assign it to a nan vector
+            # since the array is collapsed, we just take the first three elements, which would be one 
+            # vector that doesnt have nans
+            a_sample_with_nonans = defl_sample_uv[~np.isnan(defl_sample_uv)][0:3]  
+            # assign the deflected unit vectors such that if it is nan, we set it to 
+            # a non-NaN vector. Since these are anyways rare and are sampled over for kappa_GMF
+            # setting one to another should not make too much difference
+            self.defl_sampled_uvs[uhecr_idx,...] = np.where(np.isnan(defl_sample_uv), a_sample_with_nonans, defl_sample_uv)
 
         self.uhecr_coords_gb = SkyCoord(
             self.defl_mean_uvs, frame="galactic", representation_type="cartesian"
