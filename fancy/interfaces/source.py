@@ -4,7 +4,7 @@ from astropy import units as u
 from astropy.coordinates import SkyCoord
 import h5py
 
-from fancy.interfaces.stan import coord_to_uv, uv_to_coord
+from fancy.interfaces.model import coord_to_uv, uv_to_coord
 
 from fancy.plotting import AllSkyMap
 

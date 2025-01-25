@@ -9,6 +9,17 @@ from ..detector.exposure import *
 
 from multiprocessing import Pool, cpu_count
 
+'''
+
+KW (20.06.24): This class is no longer in use in the current framework except in analysis.use_tables 
+when the model type is not joint_composition or joint_gmf_composition. But in any case we are not in 
+either of these categories so it will not be called.
+
+This is also called in PPC in results, but we also do not use it in the current framework.
+As such, this class now only exists for compatibility sake and can be removed if appropriately taken care of.
+
+'''
+
 __all__ = ["ExposureIntegralTable"]
 
 

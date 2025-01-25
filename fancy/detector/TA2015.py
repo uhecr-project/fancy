@@ -36,7 +36,7 @@ For reference:
 lat = np.deg2rad(39.3)  # +39.3 deg N
 lon = np.deg2rad(-112.91)  # 112.91 deg W
 height = 1400. # [m]
-auger_location = EarthLocation(lat = lat * u.rad, lon = lon * u.rad,
+ta_location = EarthLocation(lat = lat * u.rad, lon = lon * u.rad,
                                height = height * u.m)
 
 # threshold incidence angle [rad]
@@ -105,3 +105,4 @@ detector_properties['A'] = A
 detector_properties['alpha_T'] = alpha_T
 detector_properties['Eth'] = Eth
 detector_properties["start_year"] = start_year
+detector_properties["period_start"] = period_start
