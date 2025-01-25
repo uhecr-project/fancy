@@ -16,6 +16,11 @@ class Detector:
     UHECR observatory information and instrument response.
     """
 
+    __hadr_models = {
+        "EPOS-LHC" : 0,
+        "SIBYLL2.3" : 1
+    }
+
     def __init__(self, detector_properties, deltaR=None):
         """
         UHECR observatory information and instrument response.
@@ -51,7 +56,7 @@ class Detector:
         self.coord_uncertainty = np.sqrt(7552.0 / self.kappa_d)
 
         self.energy_uncertainty = detector_properties["f_E"]
-        self.rigidity_uncertainty = detector_properties["f_E"] if deltaR == None else deltaR
+        self.lnA_params = None
 
         self.num_points = 500
 
@@ -104,16 +109,13 @@ class Detector:
         declim_index = -1 if self.label.find("TA") != -1 else 0
         self.limiting_dec = Angle((self.declination[m == 0])[declim_index], "rad")
 
-    def get_rigidity_data(self, ZGSF_file, mass_group=1, Rth_max=250):
+    def set_lnA_params(self, meanlnA_file, hadr_model="EPOS-LHC"):
+        """get the fit parameters that fit mean lnA with logE."""
+        self.lnA_params = np.zeros((2, 2))  # ((mean/sigma), (slope & intercept))
 
-        # get mean charge to compute Rth
-        gsf_fit_vals = np.genfromtxt(ZGSF_file, skip_header=1, dtype=np.float64)
-        self.meanZ = gsf_fit_vals[int(mass_group - 1),1]
+        self.lnA_params[0,:] = np.genfromtxt(meanlnA_file, usecols=(1,2))[self.__hadr_models[hadr_model],:]
+        self.lnA_params[1,:] = np.array([0,0.5]) # set it constant for now. TODO: We can also optionally read them from the resutls
 
-        self.Rth = self.Eth / self.meanZ
-        self.Rth_max = Rth_max  # (relatively arbitrary) maximum that we set in arrival spectrum calculation
-
-        self.mass_group = mass_group
         
 
     def show(

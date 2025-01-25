@@ -50,3 +50,10 @@ def get_path_to_kappa_theta(file_name : str = "kappa_theta_map.pkl") -> Path:
         "fancy", "utils/resources/{0:s}".format(file_name)
     )
     return Path(kappa_theta_path)
+
+def get_path_to_meanlnA(file_name : str = "meanlnA_logE_fit") -> Path:
+
+    meanlnA_path = resource_filename(
+        "fancy", "utils/resources/{0:s}".format(file_name)
+    )
+    return Path(meanlnA_path)

@@ -8,6 +8,7 @@ from .uhecr import Uhecr
 from .source import Source
 from ..detector.detector import Detector
 from fancy.plotting import AllSkyMap
+from fancy.utils.package_data import get_path_to_meanlnA
 
 
 class Data:
@@ -60,15 +61,15 @@ class Data:
         # define uhecr object
         self.uhecr = new_uhecr
 
-    def add_detector(self, detector_properties, ZGSF_file, mass_group=1, deltaR=None, Rth_max = 250):
+    def add_detector(self, detector_properties, hadr_model="EPOS-LHC", mean_lnA_file : str = "meanlnA_logE_fit.txt"):
         """
         Add a detector object to complement the data.
 
         :param detector_properties: dict of properties.
         """
 
-        new_detector = Detector(detector_properties, deltaR)
-        new_detector.get_rigidity_data(ZGSF_file, mass_group, Rth_max)
+        new_detector = Detector(detector_properties)
+        new_detector.set_lnA_params(meanlnA_file=get_path_to_meanlnA(mean_lnA_file), hadr_model=hadr_model)
 
         # define detector
         self.detector = new_detector

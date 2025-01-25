@@ -2,6 +2,7 @@
 
 import os
 import numpy as np
+from scipy.stats import norm
 from astropy.coordinates import SkyCoord
 from fancy import Data
 
@@ -47,16 +48,13 @@ class GMFBackPropagation:
         )
         self.uhecr_coords_earth.representation_type = "unitspherical"
 
-        # uhecr rigidity properties
-        self.uhecr_rigidity = (
-            data.uhecr.rigidity
-            if len(data.uhecr.rigidity) > 0
-            else data.uhecr.energy / data.detector.meanZ
-        )
-        self.Nuhecrs = len(self.uhecr_rigidity)
+        # uhecr energy properties
+        self.uhecr_energy = data.uhecr.energy
+        self.Nuhecrs = len(self.uhecr_energy)
 
         # detector properties
-        self.deltaR = data.detector.rigidity_uncertainty
+        self.fE = data.detector.energy_uncertainty
+        self.lnA_params = data.detector.lnA_params
         self.deltaAng = data.detector.coord_uncertainty
         self.kappa_d = data.detector.kappa_d
 
@@ -199,15 +197,20 @@ class GMFBackPropagation:
             )
 
             # sample rigidity via normal distribution
-            # rigidity uncertainty == energy uncertainty (TODO: add composition uncertainty too)
-            uhecr_sampled_Rs = (
-                np.random.normal(
-                    loc=self.uhecr_rigidity[i],
-                    scale=self.deltaR * self.uhecr_rigidity[i],
+
+            # to do this, we sample over all energies first with truncated gaussian
+            E_samples = norm.rvs(
+                    loc=self.uhecr_energy[i],
+                    scale=self.fE * self.uhecr_energy[i],
                     size=Nsamples,
-                )
-                * cr.EeV
-            )
+                ) # in EeV
+
+            # now compute mean lnA, as a function of log10(E / EeV)
+            mu_sigma_lnAs = self.lnA_params[:,0,np.newaxis] * np.log10(E_samples)[np.newaxis,:] + self.lnA_params[:,1,np.newaxis]
+            lnA_samples = norm.rvs(loc=mu_sigma_lnAs[0,:], scale=mu_sigma_lnAs[1,:])  
+
+            # now compute the rigidities using R = (E / Z) * (Z /A) * (A / (exp(lnA)))
+            uhecr_sampled_Rs = E_samples / (0.5 * np.exp(lnA_samples)) * cr.EeV # in EV
 
             bt_args.append((i, uhecr_sampled_uvs, uhecr_sampled_Rs))
         return bt_args
@@ -320,7 +323,6 @@ class GMFBackPropagation:
                 self.time_delays,
                 self.deltaAng,
                 self.kappa_d,
-                self.deltaR,
             ),
             open(outfile, "wb"),
             protocol=-1,
