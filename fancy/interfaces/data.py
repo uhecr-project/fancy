@@ -61,7 +61,12 @@ class Data:
         # define uhecr object
         self.uhecr = new_uhecr
 
-    def add_detector(self, detector_properties, hadr_model="EPOS-LHC", mean_lnA_file : str = "meanlnA_logE_fit.txt"):
+    def add_detector(
+        self,
+        detector_properties: dict,
+        hadr_model: str = "EPOS-LHC",
+        mean_lnA_file: str = "meanlnA_logE_fit.txt",
+    ):
         """
         Add a detector object to complement the data.
 
@@ -69,7 +74,9 @@ class Data:
         """
 
         new_detector = Detector(detector_properties)
-        new_detector.set_lnA_params(meanlnA_file=get_path_to_meanlnA(mean_lnA_file), hadr_model=hadr_model)
+        new_detector.set_lnA_params(
+            meanlnA_file=get_path_to_meanlnA(mean_lnA_file), hadr_model=hadr_model
+        )
 
         # define detector
         self.detector = new_detector
@@ -168,7 +175,6 @@ class Data:
         source_properties = {}
         detector_properties = {}
         with h5py.File(filename, "r") as f:
-
             uhecr = f["uhecr"]
 
             for key in uhecr:

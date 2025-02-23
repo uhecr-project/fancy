@@ -11,6 +11,7 @@ from joblib import Parallel, delayed
 from scipy.interpolate import UnivariateSpline
 from scipy.optimize import Bounds, minimize
 from tqdm import tqdm
+from typing_extensions import Self  # change to typing for py>3.11
 
 try:
     import prince_cr as pcr
@@ -33,7 +34,7 @@ class CompositionMatrixContainer:
     prince_cr.config.tau_dec_threshold = np.inf
     prince_cr.config.linear_algebra_backend = "MKL"
     prince_cr.config.secondaries = False
-    prince_cr.config.ignore_particles = [
+    prince_cr.config.ignore_particles = [  # noqa: RUF012
         0,
         11,
         12,
@@ -52,7 +53,7 @@ class CompositionMatrixContainer:
     )
 
     # ID of nuclei used for injection, use all available mass ids possible
-    massids = [
+    massids = [  # noqa: RUF012
         101,
         201,
         301,
@@ -116,28 +117,38 @@ class CompositionMatrixContainer:
     ]
 
     def __init__(
-        self,
-        css="PSB",
-        dmin=0.8,
-        dmax=110,
-        Nds=100,
+        self : Self,
+        css: str = "PSB",
+        dmin: float = 0.8,
+        dmax: float = 110,
+        Nds: int = 100,
         resources_path: str = os.path.dirname(os.path.realpath(__file__)),
-        nthreads=8,
-    ):
+        nthreads: int = 8,
+    ) -> None:
         """
         Container to handle all composition loss computation performed by Prince. In principle this only needs to be accessed if one wants to re-compute the composition weights.
 
-        :param css: cross section model used for prince computation. Valid models are ["TALYS", "PSB"]
-        :param dmin,dmax,Nds: minimum / maximum distance and density for distance grid in Mpc
-        :param resources_path: path where resources (kernel, redshift_distance interpolator) is stored
-        :param nthreads: number of threads used for solver
+        Parameter
+        ---------
+        css: str
+            cross section model used for prince computation. Valid models are ["TALYS", "PSB"]
+        dmin : float
+            minimum distance for distance grid in Mpc
+        dmax : float
+            maximum distance for distance grid in Mpc
+        NDs : int
+            number of grid points for distance grid
+        resources_path: str
+            path where resources (kernel, redshift_distance interpolator) is stored
+        nthreads: int
+            number of threads used for solver
         """
         self.css = css
         self.dmax = dmax
         self.distances = np.linspace(dmin, dmax, Nds)
         self.resources_path = resources_path
 
-        if pcr == None:
+        if pcr is None:
             raise ImportError("Prince-CR needs to be installed for using this module!")
 
         # create directory if it doesnt exist yet
@@ -182,10 +193,13 @@ class CompositionMatrixContainer:
         self.As = np.array([self.fA(massid) for massid in self.massids])
         self.Zs = np.array([self.fZ(massid) for massid in self.massids])
 
-    def run_injection_solver(self, reset=False):
+    def run_injection_solver(self, reset: bool = False):
         """Run injection solver. It will try to find the `sol_injection_solver.pkl` and load from it. Otherwise it will compute it.
 
-        :param reset: to reset the pre-computation or not
+        Parameter
+        ----------
+        reset: bool
+            flag to reset the pre-computation or not
         """
         solver_res_path = os.path.join(self.resources_path, "injection_solver")
         if not os.path.exists(solver_res_path):
@@ -229,9 +243,9 @@ class CompositionMatrixContainer:
             print(
                 "Using pre-computed solver results. Set reset == True to re-run the injection solver."
             )
-            assert all(
-                [os.path.exists(f) for f in solver_res_files]
-            ), "Files dont exist. Please run injection solver with reset=True."
+            assert all([os.path.exists(f) for f in solver_res_files]), (
+                "Files dont exist. Please run injection solver with reset=True."
+            )
 
         solver_res = [pickle.load(open(f, "rb")) for f in solver_res_files]
         # solver_res = []
@@ -239,7 +253,7 @@ class CompositionMatrixContainer:
         return solver_res
 
     def determine_mass_groups(self):
-        """Determine the masses within each mass group"""
+        """Determine the masses within each mass group."""
 
         # first define the masses within each mass group
         mass_groups = [1, 2, 3, 4]
@@ -269,13 +283,18 @@ class CompositionMatrixContainer:
             print(f"Masses (A) contained in mass group {lnA_upper}: ")
             print([self.fA(mid) for mid in id_per_mg])
 
-    def compute_weights(self, solver_res):
+    def compute_weights(self : Self, solver_res) -> None:
         """
-        Compute composition weights, both the full version and also summed over each mass group
+        Compute propagation matrices (weights) from the results from prince.
 
-        :param solver_res: results from the solver
+        Returns the fraction of UHECRs at Earth for each rigidity, source mass,
+        distance, and arrival mass.
+
+        Parameter
+        ---------
+
+        solver_res: results from the solver
         """
-
         # first determine the mass groups
         self.determine_mass_groups()
 
@@ -294,76 +313,28 @@ class CompositionMatrixContainer:
             )
         )
 
-        # efficiency matrix for injection
-        # shape is DIS x ASRC x MG x RIGIDITY
-        self.inj_eff_matrix = np.zeros(
-            (
-                len(self.distances),
-                len(self.massids),
-                4,
-                NRs,
-            )
-        )
-
         # iterate for each distance & source mass
-        for id in tqdm(range(len(self.distances)), desc="Iterating over all distances: ", total=len(self.distances)):
+        for id in tqdm(
+            range(len(self.distances)),
+            desc="Iterating over all distances: ",
+            total=len(self.distances),
+        ):
             solver_res_per_d = solver_res[id]
 
-             # temporary arrays to store results per distance bin
-            earth_spects_mg = np.zeros(
-                (len(self.massids), NRs, 4)
-            )
-            src_spects = np.zeros(
-                (len(self.massids), NRs)
-            )
+            # computing the source and earth spectrum from prince
+            for ims in range(len(self.massids)):
+                res, src_spect = solver_res_per_d[ims]
 
-            for img in range(4):
+                # get the earth spectrum.
+                # we still store it for all arrival masses to
+                # verify if our production efficiency produces
+                # MG3 particles well later
+                for ime, mid in enumerate(self.massids):
+                    self.propa_matrix[id, ims, ime, :] = (
+                        res.get_solution(mid)[1] / src_spect
+                    )
 
-                mg_lidx, mg_uidx = self.mass_group_idxlims[img]
-
-                # computing the source and earth spectrum from prince 
-                for ims in range(len(self.massids)):
-                    # ignore all source compositions below the minimum
-                    # from the mass group
-                    if ims < mg_lidx:
-                        continue
-
-                    res, src_spect = solver_res_per_d[ims]
-
-                    # get the earth spectrum.
-                    # we still store it for all arrival masses to
-                    # verify if our production efficiency produces 
-                    # MG3 particles well later
-                    earth_spect_tmp = np.zeros(NRs)
-                    for ime, mid in enumerate(self.massids):
-                        self.propa_matrix[id, ims, ime, :] = res.get_solution(mid)[1] / src_spect
-
-                        # evaluate the earth spectrum only within the mass group
-                        if ime >= mg_lidx and ime <= mg_uidx:
-                            earth_spect_tmp += res.get_solution(mid)[1]
-
-                    # shifted index since the spectra are stored with [mg_uidx:]
-                    earth_spects_mg[ims, :, img] = earth_spect_tmp
-                    src_spects[ims, :] = src_spect
-
-            for img in range(4):
-
-                mg_lidx, mg_uidx = self.mass_group_idxlims[img]
-
-                # yield the injection efficiency factors per rigidity bin per distance bin
-                # store into full injection efficiency matrix, which is defined for 
-                # all source masses (==0 where unphysical)
-                self.inj_eff_matrix[id, mg_lidx:, img, :] = np.array([
-                    minimize(
-                        cost_function,
-                        x0=np.ones(len(self.massids[mg_lidx:])),
-                        args=(earth_spects_mg[mg_lidx:, iR,:], src_spects[mg_lidx:, iR], img),
-                        bounds=Bounds(0,1),
-                    ).x
-                    for iR in range(NRs)
-                ]).T
-
-    def save(self, outfile : str):
+    def save(self : Self, outfile: str):
         """Save data into h5py format"""
 
         # compute rigidity grid, assuming constant mass-to-charge ratio
@@ -380,17 +351,10 @@ class CompositionMatrixContainer:
             f.create_dataset("en_per_nucs", data=self.prince_run.cr_grid.grid)
             f.create_dataset("rigidities", data=rigidities)
             f.create_dataset("rigidities_widths", data=rigidities_widths)
-
-            f.create_dataset("mass_groups", data=[1, 2, 3, 4])
-            f.create_dataset(
-                "mass_group_idxlims", data=np.array(self.mass_group_idxlims, dtype=int)
-            )
-            f.create_dataset("inj_eff_matrix", data=self.inj_eff_matrix)
             f.create_dataset("propa_matrix", data=self.propa_matrix)
 
-    def __create_kernel(self):
-        """Create kernel and save the results if not yet done so"""
-
+    def __create_kernel(self : Self) -> None:
+        """Create kernel and save the results if not yet done so."""
         if os.path.exists(self.prince_run_datapath):
             print("File already exists, no need for re-computation")
             return
@@ -411,7 +375,7 @@ class CompositionMatrixContainer:
         # pickle dump the results
         pickle.dump(prince_run, open(self.prince_run_datapath, "wb"), protocol=-1)
 
-    def __create_distance_tables(self):
+    def __create_distance_tables(self : Self):
         """Create conversion table from redshift to Mpc if not yet done so"""
         if os.path.exists(self.redshift_distance_datapath):
             print("File already exists, no need for re-computation")
@@ -453,7 +417,7 @@ class CompositionMatrixContainer:
 
 
 class InjectionSolverRunContainer:
-    """Helper class to instantiate and generate a single run for each distance"""
+    """Helper class to instantiate and generate a single run for each distance."""
 
     def __init__(
         self, dinit: float, zinit: float, massids: list, prince_run: core.PriNCeRun
@@ -471,7 +435,7 @@ class InjectionSolverRunContainer:
         self.prince_run = prince_run
 
     def run(self):
-        """Wrapper for paralleilisation of injection solver"""
+        """Wrapper for paralleilisation of injection solver."""
         print(f"solving for dinit={self.dinit:.3f} Mpc")
         results_per_dinit = []
 
@@ -577,13 +541,12 @@ class NoInjection(CosmicRaySource):
         return np.zeros_like(energy)
 
 
-
-def cost_function(wAs : np.ndarray, *args):
+def cost_function(wAs: np.ndarray, *args):
     """Cost function to minimise weights per distance per rigidity for each mass group"""
     earth_spect_mg, src_spect, img = args
 
-    Lsrc = (src_spect * wAs)
-    Lmg = earth_spect_mg[...,img]
+    Lsrc = src_spect * wAs
+    Lmg = earth_spect_mg[..., img]
     Lmg_ex = np.sum(np.delete(earth_spect_mg, img, axis=-1), axis=-1)
 
     return np.log10(np.sum((Lsrc * Lmg_ex) / Lmg**2))

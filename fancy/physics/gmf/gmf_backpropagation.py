@@ -20,23 +20,27 @@ except ImportError:
 class GMFBackPropagation:
     """Class to simulate back propagation of UHECRs within a given dataset (simulated or real data) and obtain the deflected events and their individual kappa values."""
     
-    __gmf_models = ["JF12", "UF23", "UF23Turb", "PT11", "TF17"]
+    __gmf_models = ["JF12", "UF23", "UF23Turb", "PT11", "TF17"]  # noqa: RUF012
     __Nmodels_UF23 = 8
 
-    def __init__(self, data: Data, gmf_model="JF12"):
+    def __init__(self, data: Data, gmf_model : str="JF12"):
         """
         Class to simulate back propagation of UHECRs within a given dataset (simulated or real data) and obtain the deflected events and their individual kappa values.
 
-        :param data : Data object generated from fancy.interfaces.data
-        :param gmf_model : the GMF model considered for backpropagation.
+        Parameter
+        ----------
 
+        data : Data 
+            object generated from fancy.interfaces.data
+        gmf_model : str
+            the GMF model considered for backpropagation.
         """
         self.gmf_model = gmf_model
 
         assert gmf_model in self.__gmf_models, f"GMF model {gmf_model} is not an available GMF model."
 
         # raise exception if CRPropa is not installed, since it requires CRPropa
-        if cr == None:
+        if cr is None:
             raise ImportError(
                 "CRPropa is not installed and is required for using this module."
             )
@@ -62,6 +66,7 @@ class GMFBackPropagation:
         self._compile_vMFmodel()
 
     def _compile_vMFmodel(self):
+        """Compile the vMF fitting function used in stan."""
         # model to fit vMF with
         stan_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "stan")
         fit_filename = os.path.join(stan_path, "fit_from_vMF.stan")

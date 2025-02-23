@@ -19,38 +19,42 @@ class EnergyLoss(ABC):
         """
         Abstract base class for energy loss calculations.
         """
-        self.mass_group = data.detector.mass_group
-        self.mass_group_idx = int(self.mass_group) - 1
+        self.lnA_params = data.detector.lnA_params
         self.detector_type = data.detector.label
+        self.hadr_model = data.detector.hadr_model
         self.Eth = data.detector.Eth
-        self.Rth = data.detector.Rth
-        self.Rth_max = data.detector.Rth_max
         self.verbose = verbose
-
-        # minimum and maximum rigidity threshold
-        self.Rmin = data.detector.Rth * u.EV
-        self.Rmax = data.detector.Rth_max * u.EV
-
-        print(
-            f"Minimum rigidity for {self.detector_type}, mg{self.mass_group}: {self.Rmin:.2f}"
-        )
-        print(
-            f"Maximum rigidity for {self.detector_type}, mg{self.mass_group}: {self.Rmax:.2f}\n"
-        )
 
     @abstractmethod
     def initialise_grid(
         self,
         matrix_dir: str = "./resources/composition_weights_PSB.h5",
-        alpha_min=-3,
-        alpha_max=10,
-        Nalphas=50,
-    ):
+        alpha_min : float=-3,
+        alpha_max : float=10,
+        Nalphas : int=50,
+        Eemin : float = 1,
+        Eemax : float = 400,
+        NEes : int = 200
+    ) -> None:
         """
-        Initalise our grid using composition weights
-
-        :param matrix_dir: directory to composition weights
-        :param alpha_min, alpha_max, Nalphas: the min / max and density of spectral index grid
+        Initalise our grid using composition weights.
+        
+        Parameter:
+        ----------
+        matrix_dir: str
+            directory to composition weights
+        alpha_min : float, default=-3
+            the minimum source spectral index for the grid
+        alpha_max : float, default=10
+            the maximum source spectral index for the grid
+        Nalphas : int, default=50
+            number of elements for the source spectral index grid
+        Eemin : float, default=1
+            the minimum energy at Earth for the grid
+        Eemax : float, default=10
+            the maximum energy at Earth for the grid
+        NEes : int, default=50
+            number of elements for the energy at Earth grid
         """
         # set grid for spectral index
         self.alpha_grid = np.linspace(alpha_min, alpha_max, Nalphas)
@@ -65,34 +69,40 @@ class EnergyLoss(ABC):
             )
 
         with h5py.File(matrix_dir, "r") as f:
+            massids = f["massids"][()]
             self.distances = f["distances"][()] * u.Mpc
-            rigidities_grid = (f["rigidities"][()] * u.GV).to(u.EV)
-            dRs_grid = (f["rigidities_widths"][()] * u.GV).to(u.EV)
+            self.As = f["As"][()]
+            self.Zs = f["Zs"][()]
 
-        Rmin_idx = np.digitize(self.Rmin, rigidities_grid, right=True)
-        Rmax_idx = np.digitize(self.Rmax, rigidities_grid, right=True)
+        # set up dimensions
+        self.NAsrcs = len(massids)
+        self.NAearths = len(massids)
 
-        # reset the Rmin and Rmax to those from this grid
-        self.Rmin = rigidities_grid[Rmin_idx]
-        self.Rmax = rigidities_grid[Rmax_idx]
+        # generate energy grid for Earth
+        self.Ee_grid = np.logspace(
+            np.log10(Eemin),
+            np.log10(Eemax),
+            NEes
+        ) * u.EeV
 
-        # truncate the rigidity grid & dR grid to Rmin and Rmax
-        self.rigidities_grid = rigidities_grid[Rmin_idx:Rmax_idx+1]
-        self.dRs_grid = dRs_grid[Rmin_idx:Rmax_idx+1]
+        # the mean and sigma of the lnA read from the data.detector.lnA object
+        mu_sigma_lnAs = self.lnA_params[:,0,np.newaxis] * np.log10(self.Ee_grid.value)[np.newaxis,:] + self.lnA_params[:,1,np.newaxis]
+
+        # for each energy bin, we take some number of samples and take the mean value as the lnA
+        self.lnA_grid = np.zeros_like(self.Ee_grid.value)
+        Nsamples = 1000
+
+        for ie in range(len(self.Ee_grid)):
+            mu_lnA, sigma_lnA = mu_sigma_lnAs[:,ie]
+            lnA_samples = stats.norm.rvs(loc=mu_lnA, scale=sigma_lnA, size=Nsamples)  
+            self.lnA_grid[ie] = np.mean(lnA_samples)
+
+        self.rigidities_grid = (self.Ee_grid.value  / (0.5 * np.exp(self.lnA_grid))) * u.EV # in EV
+        self.Rmax = np.min(self.rigidities_grid)
+        self.Rmin = np.max(self.rigidities_grid)
 
         self.Ndistances = len(self.distances)
         self.NRs = len(self.rigidities_grid)
-
-        ## setting up the rigidity grid
-        # dlR = 0.05
-        # lRbins = np.arange(
-        #     np.log10(self.Rmin.to_value(u.EV)) - 0.5 * dlR,
-        #     np.log10(self.Rmax.to_value(u.EV)) + 1.5 * dlR,
-        #     dlR,
-        # )  # 1.5 to include endpoint
-        # self.dRs_grid = (10 ** lRbins[1:] - 10 ** lRbins[:-1]) * u.EV
-        # self.rigidities_grid = 10 ** (0.5 * (lRbins[1:] + lRbins[:-1])) * u.EV
-        # self.NRs = len(self.rigidities_grid)
 
         self.Eexs = np.zeros((self.Ndistances, self.Nalphas)) * u.EeV
 

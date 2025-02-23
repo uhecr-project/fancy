@@ -12,23 +12,22 @@ __all__ = ["Detector", "Angle"]
 
 
 class Detector:
-    """
-    UHECR observatory information and instrument response.
-    """
+    """UHECR observatory information and instrument response."""
 
-    __hadr_models = {
-        "EPOS-LHC" : 0,
-        "SIBYLL2.3" : 1
+    __hadr_models = {  # noqa: RUF012
+        "EPOS-LHC": 0,
+        "SIBYLL2.3": 1,
     }
 
-    def __init__(self, detector_properties, deltaR=None):
+    def __init__(self, detector_properties: dict):
         """
         UHECR observatory information and instrument response.
 
-        :param detector_properties: dict of properties.
-        :param deltaR: manually configure the rigidity uncertainty if not None
+        detector_properties: dict
+            dict of properties of detector.
+        deltaR: float
+            manually configure the rigidity uncertainty if not None
         """
-
         self.properties = detector_properties
 
         self.label = detector_properties["label"]
@@ -81,15 +80,10 @@ class Detector:
         self.period_start = detector_properties["period_start"]
 
         self.Eth = detector_properties["Eth"]
-
-        self.mass_group = 1  # default value of 1
+        self.hadr_model = "EPOS-LHC"  # default hadronic interaction model
 
     def exposure(self):
-        """
-        Calculate and plot the exposure for a given detector
-        location.
-        """
-
+        """Calculate the exposure for a given detector location."""
         # define a range of declination to evaluate the
         # exposure at
         self.declination = np.linspace(-np.pi / 2, np.pi / 2, self.num_points)
@@ -109,14 +103,17 @@ class Detector:
         declim_index = -1 if self.label.find("TA") != -1 else 0
         self.limiting_dec = Angle((self.declination[m == 0])[declim_index], "rad")
 
-    def set_lnA_params(self, meanlnA_file, hadr_model="EPOS-LHC"):
-        """get the fit parameters that fit mean lnA with logE."""
+    def set_lnA_params(self, meanlnA_file: str, hadr_model: str = "EPOS-LHC"):
+        """Set the fit parameters that fit mean lnA with logE."""
+        self.hadr_model = hadr_model  # set this as the object
         self.lnA_params = np.zeros((2, 2))  # ((mean/sigma), (slope & intercept))
 
-        self.lnA_params[0,:] = np.genfromtxt(meanlnA_file, usecols=(1,2))[self.__hadr_models[hadr_model],:]
-        self.lnA_params[1,:] = np.array([0,0.5]) # set it constant for now. TODO: We can also optionally read them from the resutls
-
-        
+        self.lnA_params[0, :] = np.genfromtxt(meanlnA_file, usecols=(1, 2))[
+            self.__hadr_models[hadr_model], :
+        ]
+        self.lnA_params[1, :] = np.array(
+            [0, 0.5]
+        )  # set it constant for now. TODO: We can also optionally read them from the resutls
 
     def show(
         self,
@@ -150,7 +147,6 @@ class Detector:
 
         # sky map
         if view == self._view_options[0]:
-
             # skymap
             skymap = AllSkyMap()
             skymap.fig.set_size_inches(12, 6)
@@ -197,7 +193,6 @@ class Detector:
 
         # decplot
         elif view == self._view_options[1]:
-
             # plot for all decs
 
             fig, ax = plt.subplots()

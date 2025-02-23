@@ -32,6 +32,8 @@ class Analysis:
         """
         Container to manage the inputs and outputs of the fits.
 
+        Parameter
+        ---------
         data: fancy.interfaces.data.Data
             Container that handles the source, uhecr, and detector information.
             All such information should already be initialised (see relevant class for
@@ -123,7 +125,6 @@ class Analysis:
 
     def _prepare_fit_inputs(self: Self) -> None:
         """Gather inputs from Model, Data and IntegrationTables."""
-
         # prepare fit inputs
         self.fit_input = {
             "Ns": self.data.source.N,

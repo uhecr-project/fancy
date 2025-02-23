@@ -1,37 +1,47 @@
-import h5py
 from math import ceil
-import numpy as np
-from scipy import integrate
-from matplotlib import pyplot as plt
-from tqdm import tqdm as progress_bar
-from cmdstanpy import CmdStanModel
 
-from ..interfaces.model import Direction, Mpc_to_km, convert_scale
-from ..detector.exposure import m_integrand
-from ..interfaces.integration import ExposureIntegralTable
+import h5py
+import numpy as np
+from cmdstanpy import CmdStanModel
+from matplotlib import pyplot as plt
+from scipy import integrate
+from tqdm import tqdm as progress_bar
+from typing_extensions import Self  # change to typing for py>3.11
 
 from fancy.plotting import AllSkyMap
+
+from ..detector.exposure import m_integrand
+from ..interfaces.integration import ExposureIntegralTable
+from ..interfaces.model import Direction, Mpc_to_km, convert_scale
 
 __all__ = ["Results", "PPC"]
 
 
 class Results:
-    """
-    Manage the output of Analysis object.
-    """
+    """Manage the output of Analysis object."""
 
-    def __init__(self, filename):
+    def __init__(self : Self, filename : str) -> None:
         """
         Manage the output of Analysis object.
+
         Reads in a HDF5 file containting fit/simulation
         results for further plotting, analysis and PPC.
-        """
 
+        Parameter:
+        ----------
+        filename : str
+            The path to the file where the results of the fit lie.
+        """
         self.filename = filename
 
-    def get_chain(self, list_of_keys):
+    def get_chain(self : Self, list_of_keys : dict):
         """
         Returns chain of desired parameters specified by list_of_keys.
+
+        Parameter:
+        ----------
+        list_of_keys : dict[str]
+            a dictionary of the 
         """
 
         chain = {}
