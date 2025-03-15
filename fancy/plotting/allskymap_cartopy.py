@@ -6,8 +6,6 @@ from fancy.plotting.colours import lightgrey, grey, white
 from astropy.coordinates import SkyCoord
 import astropy.units as u
 
-from ..detector.exposure import m_dec
-
 try:
 
     import cartopy.crs as ccrs
@@ -34,6 +32,7 @@ class AllSkyMapCartopy:
     - Since cartopy only supports Mollweide projections, this is used instead.
     - Since we work with lon / lat coordinates, ccrs.PlateCarree coordinates will be used for transformations
     """
+    
     def __init__(
             self,
             projection="moll",
@@ -263,64 +262,64 @@ class AllSkyMapCartopy:
 
         return self.ax.scatter(x, y, transform=self.transform, **kwargs)
 
-    def exposure_map(self,
-                     detector_params,
-                     coord="G",
-                     num_points=220,
-                     **kwargs):
-        """
-        Plot exposure of given observatory as contour map
+    # def exposure_map(self,
+    #                  detector_params,
+    #                  coord="G",
+    #                  num_points=220,
+    #                  **kwargs):
+    #     """
+    #     Plot exposure of given observatory as contour map
 
-        :param detector_params: parameters used to evaluate exposure function
-        :param coord: the coordinate system to plot it in ("G" = galactic, "E"= equatorial).
-            - galactic coords in lon, lat \in [-180, 180], [-90, 90]
-            - equatorial coords in ra, dec \in [360, 0], [-90, 90] (like in TA paper)
-        :param num_points: number of points to plot with
-        """
-        rightascensions = np.linspace(-180, 180, num_points)
-        declinations = np.linspace(-np.pi / 2, np.pi / 2, num_points)
+    #     :param detector_params: parameters used to evaluate exposure function
+    #     :param coord: the coordinate system to plot it in ("G" = galactic, "E"= equatorial).
+    #         - galactic coords in lon, lat \in [-180, 180], [-90, 90]
+    #         - equatorial coords in ra, dec \in [360, 0], [-90, 90] (like in TA paper)
+    #     :param num_points: number of points to plot with
+    #     """
+    #     rightascensions = np.linspace(-180, 180, num_points)
+    #     declinations = np.linspace(-np.pi / 2, np.pi / 2, num_points)
 
-        # exposure function in full declination width
-        m_full = np.asarray([m_dec(d, detector_params) for d in declinations])
-        exposure_factor = m_full / np.max(m_full)
+    #     # exposure function in full declination width
+    #     m_full = np.asarray([m_dec(d, detector_params) for d in declinations])
+    #     exposure_factor = m_full / np.max(m_full)
 
-        exp_cmap = colors.LinearSegmentedColormap.from_list("custom",
-                                                            [lightgrey, grey],
-                                                            N=6)
-        norm_proj = colors.Normalize(exposure_factor.min(),
-                                     exposure_factor.max())
+    #     exp_cmap = colors.LinearSegmentedColormap.from_list("custom",
+    #                                                         [lightgrey, grey],
+    #                                                         N=6)
+    #     norm_proj = colors.Normalize(exposure_factor.min(),
+    #                                  exposure_factor.max())
 
-        for dec, proj in np.nditer([declinations, exposure_factor]):
-            decs = np.tile(dec, num_points)
-            c = SkyCoord(ra=rightascensions * u.rad,
-                         dec=decs * u.rad,
-                         frame="icrs")
+    #     for dec, proj in np.nditer([declinations, exposure_factor]):
+    #         decs = np.tile(dec, num_points)
+    #         c = SkyCoord(ra=rightascensions * u.rad,
+    #                      dec=decs * u.rad,
+    #                      frame="icrs")
 
-            if coord == "G":
-                x = c.galactic.l.deg
-                y = c.galactic.b.deg
-            elif coord == "E":
-                x = c.icrs.ra.deg
-                y = c.icrs.dec.deg
+    #         if coord == "G":
+    #             x = c.galactic.l.deg
+    #             y = c.galactic.b.deg
+    #         elif coord == "E":
+    #             x = c.icrs.ra.deg
+    #             y = c.icrs.dec.deg
 
-            if proj == 0:
-                self.ax.scatter(
-                    x,
-                    y,
-                    transform=self.transform,
-                    linewidth=3,
-                    color=white,
-                    alpha=1,
-                )
-            else:
-                self.ax.scatter(
-                    x,
-                    y,
-                    transform=self.transform,
-                    linewidth=3,
-                    color=exp_cmap(norm_proj(proj)),
-                    alpha=1,
-                )
+    #         if proj == 0:
+    #             self.ax.scatter(
+    #                 x,
+    #                 y,
+    #                 transform=self.transform,
+    #                 linewidth=3,
+    #                 color=white,
+    #                 alpha=1,
+    #             )
+    #         else:
+    #             self.ax.scatter(
+    #                 x,
+    #                 y,
+    #                 transform=self.transform,
+    #                 linewidth=3,
+    #                 color=exp_cmap(norm_proj(proj)),
+    #                 alpha=1,
+    #             )
 
     def save(self, filename, dpi=300, **kwargs):
         """

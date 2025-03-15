@@ -1,51 +1,46 @@
-import numpy as np
-import matplotlib
-from matplotlib import pyplot as plt
-from astropy import units as u
-from astropy.coordinates import SkyCoord
 from datetime import date, timedelta
+
 import h5py
+import matplotlib
+import numpy as np
+from matplotlib import pyplot as plt
+from typing_extensions import Self
 
-# from tqdm import tqdm as progress_bar
-from multiprocessing import Pool, cpu_count
-
-from fancy.interfaces.model import coord_to_uv, uv_to_coord
-
-from fancy.plotting import AllSkyMap
-
-try:
-
-    import crpropa
-
-except ImportError:
-
-    crpropa = None
+from fancy.plotting import AllSkyMapCartopy as AllSkyMap
+from fancy.utils.coordinates import get_coordinates, uv_to_coord
 
 __all__ = ["Uhecr"]
 
 
 class Uhecr:
-    """
-    Stores the data and parameters for UHECRs
-    """
+    """Stores the data and parameters for UHECRs."""
 
-    def __init__(self):
-        """
-        Initialise empty container.
-        """
-
+    def __init__(self: Self) -> None:
+        """Initialise empty container that contains the UHECR information."""
         self.properties = None
         self.source_labels = None
+        self.label = None
 
-        self.nthreads = int(0.75 * cpu_count())
+        # stubs for data
+        self.year = None
+        self.day = None
+        self.zenith_angle = None
+        self.energy = None
+        self.N = None
+        self.coord = None
+        self.exposure = None
+        self.unit_vector = None
+        self.period = None
+        self.A = None
 
-        # stubs for empty data
-        self.rigidity = []
-        self.kappa_ds = []
+        # stubs for gmf-related information
+        self.hadr_model = None
+        self.coords_gb = None
+        self.unit_vector_gb = None
+        self.kappa_gmfs = None
 
-    def _get_angerr(self):
-        """Get angular reconstruction uncertainty from label"""
-
+    def __get_angular_uncertainty(self: Self) -> float:
+        """Get angular reconstruction uncertainty from label."""
         if self.label == "TA2015":
             from fancy.detector.TA2015 import sig_omega
         elif self.label == "auger2014":
@@ -57,9 +52,13 @@ class Uhecr:
 
         return np.deg2rad(sig_omega)
 
-    def from_data_file(
-        self, filename, label, mass_group=1, gmf_model="JF12", exp_factor=1.0,
-    ):
+    def load_from_data_file(
+        self: Self,
+        filename: str,
+        label: str,
+        hadr_model: str = "EPOS-LHC",
+        gmf_model: str = "JF12",
+    ) -> None:
         """
         Define UHECR from data file of original information.
 
@@ -67,26 +66,38 @@ class Uhecr:
         effective areas assuming the UHECR are detected
         by the Pierre Auger Observatory or TA.
 
-        :param filename: name of the data file
-        :param label: reference label for the UHECR data set
-        """
+        filename: str
+            name of the data file
+        label: str
+            reference label for the UHECR data set
+        hadr_model: str
+            label for hadronic interaction model
+        gmf_model: str
+            label for GMF model
 
+        """
         self.label = label
 
         with h5py.File(filename, "r") as f:
-
             data = f[self.label]
 
+            # timing & angle information
             self.year = data["year"][()]
             self.day = data["day"][()]
             self.zenith_angle = np.deg2rad(data["theta"][()])
+
+            # energy information
             self.energy = data["energy"][()]
+
+            # read in rigidity if it exists (e.g. from simulation)
             if "rigidity" in data:
                 self.rigidity = data["rigidity"][()]
             self.N = len(self.energy)
+
+            # arrival directions, read from glon / glat
             glon = data["glon"][()]
             glat = data["glat"][()]
-            self.coord = self.get_coordinates(glon, glat)
+            self.coord = get_coordinates(glon, glat)  # convert to skycoord
 
             # check if we can extract exposure of UHECR (auger2022 dataset)
             if "exposure" in data:
@@ -94,55 +105,63 @@ class Uhecr:
             else:
                 self.exposure = np.ones(self.N)
 
+            # unit vector in cartesian coordinates
             self.unit_vector = self.coord.cartesian.xyz.value.T
-            self.period = self._find_period()
-            self.A = self._find_area(exp_factor)
 
-            self.mass_group = mass_group
-            # first check if 
-            if "gmf" in data and gmf_model != "None": 
-                
-                # only read if data exists for both GMF model key and MG key
-                config_key = f"{gmf_model}_mg{mass_group}"
-                if config_key not in list(data['gmf'].keys()):
-                    raise KeyError(f"GMF data for configuration {gmf_model}, MG{mass_group} is not found.")
+            # period & effective area for observation.
+            # kept only for backwards compatibility
+            self.period = self.__find_period()
+            self.A = self.__find_area()
+
+            self.hadr_model = hadr_model  # TODO: check why we need this
+            # reading in GMF information
+            # first check if
+            if "gmf" in data and gmf_model != "None":
+                # only read if data exists for both GMF model key and hadr model key
+                config_key = f"{gmf_model}_{hadr_model}"
+                if config_key not in list(data["gmf"].keys()):
+                    raise KeyError(
+                        f"GMF data for configuration {gmf_model}, {hadr_model} is not found."
+                    )
 
                 glons_gb = data["gmf"][config_key]["glons_gb"][()]
                 glats_gb = data["gmf"][config_key]["glats_gb"][()]
                 self.coords_gb = self.get_coordinates(glons_gb, glats_gb)
-                self.unit_vector_gb =  self.coords_gb.cartesian.xyz.value.T
-                self.kappa_gmfs = data["gmf"][config_key]["kappa_gmf"][()]  # deflection parameter
+                self.unit_vector_gb = self.coords_gb.cartesian.xyz.value.T
+                self.kappa_gmfs = data["gmf"][config_key]["kappa_gmf"][
+                    ()
+                ]  # deflection parameter
 
-    def _get_properties(self, analysis_type):
-        """
-        Convenience function to pack object into dict.
-        """
-
-        self.properties = {}
-        self.properties["label"] = self.label
-        self.properties["N"] = self.N
-        self.properties["unit_vector"] = self.unit_vector
-        self.properties["energy"] = self.energy
-        self.properties["A"] = self.A
-        self.properties["zenith_angle"] = self.zenith_angle
+    def __get_properties(self, analysis_type: str) -> dict:
+        """Pack all relevant UHECR object infomration to a dictionary."""
+        properties = {}
+        properties["label"] = self.label
+        properties["N"] = self.N
+        properties["unit_vector"] = self.unit_vector
+        properties["energy"] = self.energy
+        properties["A"] = self.A
+        properties["zenith_angle"] = self.zenith_angle
 
         if analysis_type == "joint_gmf_composition":
-            self.properties["mass_group"] = self.mass_group
-            self.properties["kappa_gmf"] = self.kappa_gmfs
-            self.properties["unit_vector_gb"] = self.unit_vector_gb
+            properties["hadr_model"] = self.hadr_model
+            properties["kappa_gmf"] = self.kappa_gmfs
+            properties["unit_vector_gb"] = self.unit_vector_gb
 
         # Only if simulated UHECRs
         # if isinstance(self.source_labels, (list, np.ndarray)):
         #     self.properties['source_labels'] = self.source_labels
 
-    def from_properties(self, uhecr_properties):
+        return properties
+
+    def load_from_properties(self: Self, uhecr_properties: dict) -> None:
         """
         Define UHECR from properties dict.
 
-        :param uhecr_properties: dict containing UHECR properties.
-        :param label: identifier
+        Parameters
+        ----------
+        uhecr_properties: dict
+            dict containing UHECR properties.
         """
-
         self.label = uhecr_properties["label"]
 
         # Read from input dict
@@ -153,14 +172,6 @@ class Uhecr:
         self.A = uhecr_properties["A"]
         self.kappa_gmf = uhecr_properties["kappa_gmf"]
 
-        # # decode byte string if uhecr_properties is read from h5 file
-        ptype_from_file = uhecr_properties["ptype"]
-        self.ptype = (
-            ptype_from_file.decode("UTF-8")
-            if isinstance(ptype_from_file, bytes)
-            else ptype_from_file
-        )
-
         # Only if simulated UHECRs
         # try:
         #     self.source_labels = uhecr_properties['source_labels']
@@ -170,59 +181,19 @@ class Uhecr:
         # Get SkyCoord from unit_vector
         self.coord = uv_to_coord(self.unit_vector)
 
-    def from_simulation(self, uhecr_properties):
-        """
-        Define UHECR from properties dict, evaluated from simulating
-        dataset.
-
-        Only real difference to from_properties() is in kappa_gmf,
-        since evaluation of it depends on the parameters initialized
-        for Uhecr().
-
-        :param uhecr_properties: dict containing UHECR properties.
-        :param label: identifier
-        """
-
-        self.label = uhecr_properties["label"]
-
-        # Read from input dict
-        self.N = uhecr_properties["N"]
-        self.unit_vector = uhecr_properties["unit_vector"]
-        self.energy = uhecr_properties["energy"]
-        self.zenith_angle = uhecr_properties["zenith_angle"]
-        self.A = uhecr_properties["A"]
-
-        # decode byte string if uhecr_properties is read from h5 file
-        ptype_from_file = uhecr_properties["ptype"]
-        self.ptype = (
-            ptype_from_file.decode("UTF-8")
-            if isinstance(ptype_from_file, bytes)
-            else ptype_from_file
-        )
-
-        # Only if simulated UHECRs
-        # try:
-        #     self.source_labels = uhecr_properties['source_labels']
-        # except:
-        #     pass
-
-        # Get SkyCoord from unit_vector
-        self.coord = uv_to_coord(self.unit_vector)
-        # kappa_gmf set to zero array by default, if joint+gmf then
-        # evaluated in analysis.simulate
-        self.kappa_gmf = np.zeros(self.N)
-
-    def plot(self, skymap: AllSkyMap, size=2):
+    def plot_skymap(self: Self, skymap: AllSkyMap, size: int = 2) -> None:
         """
         Plot the Uhecr instance on a skymap.
 
-        Called by Data.show()
+        Called by Data.plot_skymap()
 
-        :param skymap: the AllSkyMap
-        :param size: tissot radius
-        :param source_labels: source labels (int)
+        Parameters
+        ----------
+        skymap: AllSkyMapCartopy
+            the AllSkyMap
+        size: float
+            tissot radius
         """
-
         lons = self.coord.galactic.l.deg
         lats = self.coord.galactic.b.deg
 
@@ -231,7 +202,6 @@ class Uhecr:
         # If source labels are provided, plot with colour
         # indicating the source label.
         if isinstance(self.source_labels, (list, np.ndarray)):
-
             Nc = max(self.source_labels)
 
             # Use a continuous cmap
@@ -254,20 +224,20 @@ class Uhecr:
                     )
                     write_label = False
                 else:
-                    skymap.tissot(
-                        lon, lat, size, npts=30, color=color, lw=0, alpha=0.5
-                    ),
+                    (
+                        skymap.tissot(
+                            lon, lat, size, npts=30, color=color, lw=0, alpha=0.5
+                        ),
+                    )
 
         # Otherwise, use the cmap to show the UHECR energy.
         else:
-
             # use colormap for energy
             norm_E = matplotlib.colors.Normalize(min(self.energy), max(self.energy))
             cmap = plt.cm.get_cmap("viridis", len(self.energy))
 
             write_label = True
             for E, lon, lat in np.nditer([self.energy, lons, lats]):
-
                 color = cmap(norm_E(E))
 
                 if write_label:
@@ -293,29 +263,32 @@ class Uhecr:
                         alpha=alpha_level,
                     )
 
-    def save(self, file_handle, analysis_type):
+    def save(self: Self, file_handle: h5py.File, analysis_type: str) -> None:
         """
-        Save to the passed H5py file handle,
-        i.e. something that cna be used with
+        Save to the passed H5py file handle.
+
+        i.e. something that can be used with
         file_handle.create_dataset()
 
-        :param file_handle: file handle
+        Parameters
+        ----------
+        file_handle: h5py.File
+            h5py file handle to save data to.
+        analysis_type: str
+            type of analysis from Analysis object.
         """
+        properties = self.__get_properties(analysis_type)
 
-        self._get_properties(analysis_type)
-
-        for key, value in self.properties.items():
+        for key, value in properties.items():
             file_handle.create_dataset(key, data=value)
 
-    def _find_area(self, exp_factor):
+    def __find_area(self: Self, exp_factor: float = 1.0) -> list:
         """
-        Find the effective area of the observatory at
-        the time of detection.
+        Find the effective area of the observatory at the time of detection.
 
         Possible areas are calculated from the exposure reported
         in Abreu et al. (2010) or Collaboration et al. 2014.
         """
-
         if self.label == "auger2010":
             from ..detector.auger2010 import A1, A2, A3
 
@@ -346,17 +319,17 @@ class Uhecr:
                     area.append(possible_areas_incl[p - 1] * exp_factor)
 
         elif "auger2022" in self.label:
-            from ..detector.auger2022 import M, period_start, A
-            
+            from ..detector.auger2022 import A, M, period_start
+
             # get period for each event - in years, taking into account days
             start_julianyear = period_start.year + period_start.day / 365.25
             deltats = (self.year + self.day / 365.25) - start_julianyear
-            
+
             # very hacky, but only exists currently for backwards compatibility anyways
-            # if len(self.exposure) > 0:
-            #     area = self.exposure / (M * deltats)
-            # else:
-            #     area = np.tile(A, self.N)
+            if len(self.exposure) > 0:
+                area = self.exposure / (M * deltats)
+            else:
+                area = np.tile(A, self.N)
             area = np.tile(A, self.N)
 
         elif "TA2015" in self.label:
@@ -370,23 +343,21 @@ class Uhecr:
 
         return area
 
-    def _find_period(self):
+    def __find_period(self: Self) -> list:
         """
-        For a given year or day, find UHECR period based on dates
-        in table 1 in Abreu et al. (2010) or in Collaboration et al. 2014.
-        """
+        For a given year or day, find UHECR period.
 
+        Dates are based on dates in table 1 in Abreu et al. (2010) or in Collaboration et al. 2014.
+        """
         period = []
         if self.label == "auger2014":
             from ..detector.auger2014 import (
-                period_1_start,
                 period_1_end,
-                period_2_start,
+                period_1_start,
                 period_2_end,
-                period_3_start,
+                period_2_start,
                 period_3_end,
-                period_4_start,
-                period_4_end,
+                period_3_start,
             )
 
             # check dates
@@ -407,15 +378,17 @@ class Uhecr:
 
         elif self.label == "TA2015":
             from ..detector.TA2015 import (
-                period_1_start,
                 period_1_end,
-                period_2_start,
+                period_1_start,
                 period_2_end,
+                period_2_start,
             )
 
             for y, d in np.nditer([self.year, self.day]):
                 d = int(d)
-                test_date = date(y, period_1_start.month, period_1_start.day) + timedelta(d)
+                test_date = date(
+                    y, period_1_start.month, period_1_start.day
+                ) + timedelta(d)
 
                 if period_1_start <= test_date <= period_1_end:
                     period.append(1)
@@ -428,11 +401,8 @@ class Uhecr:
 
         return period
 
-    def select_period(self, period):
-        """
-        Select certain periods for analysis, other periods will be discarded.
-        """
-
+    def select_from_period(self: Self, period: list) -> None:
+        """Select certain periods for analysis, other periods will be discarded."""
         # find selected periods
         if len(period) == 1:
             selection = np.where(np.asarray(self.period) == period[0])
@@ -462,11 +432,8 @@ class Uhecr:
 
         self.coord = self.coord[selection]
 
-    def select_energy(self, Eth):
-        """
-        Select out only UHECRs above a certain energy.
-        """
-
+    def select_from_energy(self: Self, Eth: float) -> None:
+        """Select out only UHECRs above a certain energy."""
         selection = np.where(np.asarray(self.energy) >= Eth)
         selection = selection[0].tolist()
 
@@ -483,21 +450,3 @@ class Uhecr:
         self.year = [self.year[i] for i in selection]
 
         self.coord = self.coord[selection]
-
-    def get_coordinates(self, glon, glat, D=None):
-        """
-        Convert glon and glat to astropy SkyCoord
-        Add distance if possible (allows conversion to cartesian coords)
-
-        :return: astropy.coordinates.SkyCoord
-        """
-
-        if D:
-            return SkyCoord(
-                l=glon * u.degree,
-                b=glat * u.degree,
-                frame="galactic",
-                distance=D * u.mpc,
-            )
-        else:
-            return SkyCoord(l=glon * u.degree, b=glat * u.degree, frame="galactic")

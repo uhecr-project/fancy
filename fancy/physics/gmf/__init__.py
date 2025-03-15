@@ -6,7 +6,7 @@ from .gmf_lensing import GMFLensing
 from .gmf_backpropagation import GMFBackPropagation
 
 def install_gmflens():
-    '''Install GMFlens from CRPropa database'''
+    """Install GMFlens from CRPropa database."""
     dir_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "gmf_lens")
     if not os.path.exists(dir_path):
         os.mkdir(dir_path)

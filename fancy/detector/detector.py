@@ -1,92 +1,168 @@
-import numpy as np
+import typing
+
+import h5py
 import matplotlib
-from matplotlib import pyplot as plt
+import numpy as np
 from astropy import units as u
-from astropy.coordinates import SkyCoord, EarthLocation
+from astropy.coordinates import EarthLocation, SkyCoord
+from matplotlib import pyplot as plt
 from scipy import integrate
+from typing_extensions import Self
 
-from fancy.detector.exposure import *
-from fancy.plotting import AllSkyMap
+from fancy.detector.exposure import m_dec, m_integrand
+from fancy.plotting import AllSkyMapCartopy as AllSkyMap
 
-__all__ = ["Detector", "Angle"]
+__all__ = ["Detector"]
 
 
 class Detector:
     """UHECR observatory information and instrument response."""
 
-    __hadr_models = {  # noqa: RUF012
+    __detector_labels : typing.ClassVar[tuple] = (
+        "TA2015", "auger2022", "auger2014", "auger2010"
+    )
+
+    __hadr_models: typing.ClassVar[dict] = {
         "EPOS-LHC": 0,
         "SIBYLL2.3": 1,
     }
 
-    def __init__(self, detector_properties: dict):
+    __det_properties: typing.ClassVar[tuple] = (
+        "label",
+        "lat",
+        "lon",
+        "height",
+        "theta_m",
+        "kappa_d",
+        "f_E",
+        "A",
+        "alpha_T",
+        "start_year",
+        "period_start",
+        "Eth",
+    )
+
+    __view_options: typing.ClassVar[list] = ["map", "decplot"]
+
+    def __init__(self: Self, label : str) -> None:
         """
         UHECR observatory information and instrument response.
 
-        detector_properties: dict
-            dict of properties of detector.
-        deltaR: float
-            manually configure the rigidity uncertainty if not None
+        Parameters
+        ----------
+        label : str
+            label of the detector
         """
-        self.properties = detector_properties
+        self.label = label
+        self.properties = self.__get_detector_properties(label)
 
-        self.label = detector_properties["label"]
+        # assert all keys are present in detector properties
+        assert all(key in self.properties for key in self.__det_properties)
+
+        self.label = self.properties["label"]
 
         # if read from h5 file, convert bytestr to str
         if isinstance(self.label, bytes):
             self.label = self.label.decode("UTF-8")
 
-        lat = detector_properties["lat"]  # radians
-        lon = detector_properties["lon"]  # radians
-        height = detector_properties["height"]  # metres
+        # uncertainty information
+        # See Equation 9 in Capel & Mortlock (2019)
+        self.kappa_d = self.properties["kappa_d"]
+        self.coord_uncertainty = np.sqrt(7552.0 / self.kappa_d)
+
+        self.energy_uncertainty = self.properties["f_E"]
+        self.Eth = self.properties["Eth"]
+        self.hadr_model = None  # default hadronic interaction model
+        self.lnA_params = None  # parameters for lnA fit
+
+        # timing information
+        self.start_year = self.properties["start_year"]
+        self.period_start = self.properties["period_start"]
+
+        # store other variables as none
+        self.location = None
+        self.threshold_zenith_angle = None
+        self.area = None
+        self.alpha_T = None
+        self.params = None
+        self.M = None
+        self.declination = None
+        self.exposure_max = None
+        self.exposure_factor = None
+        self.limiting_dec = None
+
+
+    def __get_detector_properties(self : Self, label : str) -> dict:
+        """
+        Import the detector properties from the appropriate label.
+
+        Parameters
+        ----------
+        label : str
+            label of the detector
+
+        Returns
+        -------
+        dict of the detector properties
+        """
+        # assert that the labels are within the defined labels
+        assert label in self.__detector_labels, f"Detector label {label} not defined."
+
+        if label == "TA2015":
+            from fancy.detector.TA2015 import detector_properties
+        elif label == "auger2022":
+            from fancy.detector.auger2022 import detector_properties
+        elif label == "auger2014":
+            from fancy.detector.auger2014 import detector_properties
+        elif label == "auger2010":
+            from fancy.detector.auger2010 import detector_properties
+        
+        return detector_properties
+        
+
+    def get_exposure_properties(
+        self: Self, num_points: int = 500
+    ) -> None:
+        """
+        Calculate the exposure for a given detector location.
+
+        Parameters
+        ----------
+        detector_properties: dict
+            dictionary of detector properties
+        num_points: int
+            number of points to evaluate the exposure at
+        """
+        # location of detector
+        lat = self.properties["lat"]  # radians
+        lon = self.properties["lon"]  # radians
+        height = self.properties["height"]  # metres
 
         self.location = EarthLocation(
             lat=lat * u.rad, lon=lon * u.rad, height=height * u.m
         )
 
-        self.threshold_zenith_angle = Angle(
-            detector_properties["theta_m"], "rad"
-        )  # radians
+        # in radians
+        self.threshold_zenith_angle = self.properties["theta_m"] * u.rad
+        print( self.threshold_zenith_angle)
 
-        self._view_options = ["map", "decplot"]
-
-        # See Equation 9 in Capel & Mortlock (2019)
-        self.kappa_d = detector_properties["kappa_d"]
-        self.coord_uncertainty = np.sqrt(7552.0 / self.kappa_d)
-
-        self.energy_uncertainty = detector_properties["f_E"]
-        self.lnA_params = None
-
-        self.num_points = 500
+        self.area = self.properties["A"]  # km^2
+        self.alpha_T = self.properties["alpha_T"]  # km^2 sr yr
 
         self.params = [
             np.cos(self.location.lat.rad),
             np.sin(self.location.lat.rad),
-            np.cos(self.threshold_zenith_angle.rad),
+            np.cos(self.threshold_zenith_angle.to_value("rad")),
         ]
 
-        self.exposure()
-
-        self.area = detector_properties["A"]  # km^2
-
-        self.alpha_T = detector_properties["alpha_T"]  # km^2 sr yr
-
-        self.M, err = integrate.quad(m_integrand, 0, np.pi, args=self.params)
+        self.M, _ = integrate.quad(m_integrand, 0, np.pi, args=self.params)
 
         self.params.append(self.alpha_T)
         self.params.append(self.M)
 
-        self.start_year = detector_properties["start_year"]
-        self.period_start = detector_properties["period_start"]
-
-        self.Eth = detector_properties["Eth"]
-        self.hadr_model = "EPOS-LHC"  # default hadronic interaction model
-
-    def exposure(self):
-        """Calculate the exposure for a given detector location."""
         # define a range of declination to evaluate the
         # exposure at
-        self.declination = np.linspace(-np.pi / 2, np.pi / 2, self.num_points)
+        self.declination = np.linspace(-np.pi / 2, np.pi / 2, num_points)
 
         m = np.asarray([m_dec(d, self.params) for d in self.declination])
 
@@ -101,9 +177,11 @@ class Detector:
         # since TA only sees from dec ~ -10deg,
         # PAO only sees until dec ~ +45 deg
         declim_index = -1 if self.label.find("TA") != -1 else 0
-        self.limiting_dec = Angle((self.declination[m == 0])[declim_index], "rad")
+        self.limiting_dec = (self.declination[m == 0])[declim_index] * u.rad
 
-    def set_lnA_params(self, meanlnA_file: str, hadr_model: str = "EPOS-LHC"):
+    def set_lnA_params(
+        self: Self, meanlnA_file: str, hadr_model: str = "EPOS-LHC"
+    ) -> None:
         """Set the fit parameters that fit mean lnA with logE."""
         self.hadr_model = hadr_model  # set this as the object
         self.lnA_params = np.zeros((2, 2))  # ((mean/sigma), (slope & intercept))
@@ -115,44 +193,57 @@ class Detector:
             [0, 0.5]
         )  # set it constant for now. TODO: We can also optionally read them from the resutls
 
-    def show(
-        self,
-        view=None,
+
+    def save(self : Self, file_handle : h5py.File) -> None:
+        """
+        Save to the passed H5py file handle.
+
+        i.e. something that cna be used with
+        file_handle.create_dataset()
+
+        file_handle: h5py.File
+            file handle
+        """
+        for key, value in self.properties.items():
+            if key == "period_start":
+                continue
+            file_handle.create_dataset(key, data=value)
+
+
+    def plot_skymap(
+        self : Self,
+        view : str="map",
         coord: str = "gal",
         save: bool = False,
-        savename=None,
-        cmap=None,
-    ):
+        file_path: typing.Union[str, None] = None,
+        cmap: str = "viridis",
+    ) -> None:
         """
-        Make a plot of the detector's exposure
+        Make a plot of the detector's exposure.
 
-        :param view: a keyword describing how to show the plot
+        Parameters
+        ----------
+        view: a keyword describing how to show the plot
                      options are described by self._view_options
-        :param save: boolean input, if True, the figure is saved
-        :param savename: location to save to, required if save is
+        save: boolean input, if True, the figure is saved
+        savename: location to save to, required if save is
                          True
         """
+        # plot style
+        cm = plt.cm.get_cmap(cmap)
 
-        # define the style
-        if cmap is None:
-            cmap = plt.cm.get_cmap("viridis")
-
-        # default is skymap
-        if view is None:
-            view = self._view_options[0]
-        else:
-            if view not in self._view_options:
-                print("ERROR:", "view option", view, "is not defined")
-                return
+        if view not in self.__view_options:
+            print("ERROR:", "view option", view, "is not defined")
+            return
 
         # sky map
-        if view == self._view_options[0]:
+        if view == self.__view_options[0]:
             # skymap
             skymap = AllSkyMap()
             skymap.fig.set_size_inches(12, 6)
 
             # define RA and DEC over all coordinates
-            rightascensions = np.linspace(-np.pi, np.pi, self.num_points)
+            rightascensions = np.linspace(-np.pi, np.pi, 500)
             declinations = self.declination
 
             norm_proj = matplotlib.colors.Normalize(
@@ -162,7 +253,7 @@ class Detector:
             # plot the exposure map
             # NB: use scatter as plot and pcolormesh have bugs in shiftdata methods
             for dec, proj in np.nditer([declinations, self.exposure_factor]):
-                decs = np.tile(dec, self.num_points)
+                decs = np.tile(dec, 500)
                 c = SkyCoord(ra=rightascensions * u.rad, dec=decs * u.rad, frame="icrs")
 
                 if coord == "gal":
@@ -189,10 +280,10 @@ class Detector:
             skymap.draw_standard_labels()
 
             # add colorbar
-            self._exposure_colorbar(cmap)
+            self.__generate_exposure_colorbar(cm)
 
         # decplot
-        elif view == self._view_options[1]:
+        elif view == self.__view_options[1]:
             # plot for all decs
 
             fig, ax = plt.subplots()
@@ -201,29 +292,14 @@ class Detector:
             ax.set_ylabel("m($\delta$)")
 
         if save:
-            fig.savefig(savename, dpi=1000, bbox_inches="tight", pad_inches=0.5)
+            fig.savefig(file_path, dpi=1000, bbox_inches="tight", pad_inches=0.5)
 
-    def save(self, file_handle):
+    def __generate_exposure_colorbar(self : Self, cm : matplotlib.colors.Colormap) -> None:
         """
-        Save to the passed H5py file handle,
-        i.e. something that cna be used with
-        file_handle.create_dataset()
+        Plot a colorbar for the exposure map.
 
-        :param file_handle: file handle
+        cm: matplotlib cmap object
         """
-
-        for key, value in self.properties.items():
-            if key == "period_start":
-                continue
-            file_handle.create_dataset(key, data=value)
-
-    def _exposure_colorbar(self, cmap):
-        """
-        Plot a colorbar for the exposure map
-
-        :param cmap: matplotlib cmap object
-        """
-
         cb_ax = plt.axes([0.25, 0, 0.5, 0.03], frameon=False)
         vals = np.linspace(self.exposure_factor.min(), self.exposure_factor.max(), 100)
 
@@ -235,7 +311,7 @@ class Detector:
             cb_ax,
             values=vals,
             norm=norm_proj,
-            cmap=cmap,
+            cmap=cm,
             orientation="horizontal",
             drawedges=False,
             alpha=1,
@@ -244,14 +320,16 @@ class Detector:
         bar.ax.get_children()[1].set_linewidth(0)
         bar.set_label("Relative exposure")
 
-    def draw_exposure_lim(self, skymap: AllSkyMap, coord: str = "gal"):
+    def draw_exposure_lim(self : Self, skymap: AllSkyMap, coord: str = "gal") -> None:
         """
         Draw a line marking the edge of the detector's exposure.
 
-        :param skymap: an AllSkyMap instance.
-        :param label: a label for the limit.
+        Parameters
+        ----------
+        skymap: an AllSkyMap instance.
+        coord : str
+            coordinate system to plot in
         """
-
         rightascensions = np.linspace(-180, 180, self.num_points)
         limiting_dec = self.limiting_dec.deg
         boundary_decs = np.tile(limiting_dec, self.num_points)
@@ -278,44 +356,12 @@ class Detector:
         )
 
 
-class Angle:
-    """
-    Store angles as degree or radian for convenience.
-    """
+# if __name__ == "__main__":
+#     # import auger2014 data
+#     from fancy.detector.auger2014 import detector_properties
 
-    def __init__(self, angle, type=None):
-        """
-        Store angles as degree or radian for convenience.
+#     # create Detector object
+#     detector = Detector(detector_properties)
 
-        :param angle: a single angle or array of angles
-        """
-
-        self._defined_types = ["deg", "rad"]
-
-        # default: pass arguments in degrees
-        if type == None:
-            type = self._defined_types[0]
-
-        if type == self._defined_types[0]:
-            self.deg = angle
-            if np.isscalar(angle):
-                self.rad = np.deg2rad(angle)
-            else:
-                self.rad = [np.deg2rad(a) for a in angle]
-        elif type == self._defined_types[1]:
-            if np.isscalar(angle):
-                self.deg = np.rad2deg(angle)
-            else:
-                self.deg = [np.rad2deg(a) for a in angle]
-            self.rad = angle
-
-
-if __name__ == "__main__":
-    # import auger2014 data
-    from fancy.detector.auger2014 import detector_properties
-
-    # create Detector object
-    detector = Detector(detector_properties)
-
-    # show the exposure skymap
-    detector.show(view="map", coord="gal")
+#     # show the exposure skymap
+#     detector.show(view="map", coord="gal")

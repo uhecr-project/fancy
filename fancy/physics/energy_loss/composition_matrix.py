@@ -26,14 +26,16 @@ except ImportError:
 
 class CompositionMatrixContainer:
     """
-    Container to handle all composition loss computation performed by Prince. In principle this only needs to be accessed if one wants to re-compute the composition weights.
+    Container to handle all composition loss computation performed by Prince.
+
+    In principle this only needs to be accessed if one wants to re-compute the composition weights.
     """
 
     prince_cr.config.x_cut = 1e-4
     prince_cr.config.x_cut_proton = 1e-2
     prince_cr.config.tau_dec_threshold = np.inf
     prince_cr.config.linear_algebra_backend = "MKL"
-    prince_cr.config.secondaries = False
+    prince_cr.config.secondaries = False  # here we explicitly exclude secondaries
     prince_cr.config.ignore_particles = [  # noqa: RUF012
         0,
         11,
@@ -44,8 +46,8 @@ class CompositionMatrixContainer:
         16,
         20,
         21,
-    ]
-    prince_cr.config.cosmic_ray_grid = (8, 12, 40)
+    ]  # as well as ignoring all secondary particles
+    prince_cr.config.cosmic_ray_grid = (8, 12, 40)  # fixed to e/A from 1e8 to 1e12 eV
 
     # photon fields, combined CMB & EBL from Gilmore
     pf_gilmore = photonfields.CombinedPhotonField(
@@ -117,7 +119,7 @@ class CompositionMatrixContainer:
     ]
 
     def __init__(
-        self : Self,
+        self: Self,
         css: str = "PSB",
         dmin: float = 0.8,
         dmax: float = 110,
@@ -126,7 +128,9 @@ class CompositionMatrixContainer:
         nthreads: int = 8,
     ) -> None:
         """
-        Container to handle all composition loss computation performed by Prince. In principle this only needs to be accessed if one wants to re-compute the composition weights.
+        Container to handle all composition loss computation performed by Prince.
+
+        In principle this only needs to be accessed if one wants to re-compute the composition weights.
 
         Parameter
         ---------
@@ -193,13 +197,22 @@ class CompositionMatrixContainer:
         self.As = np.array([self.fA(massid) for massid in self.massids])
         self.Zs = np.array([self.fZ(massid) for massid in self.massids])
 
-    def run_injection_solver(self, reset: bool = False):
-        """Run injection solver. It will try to find the `sol_injection_solver.pkl` and load from it. Otherwise it will compute it.
+        # genearte objects that we store later
+        self.propa_matrix = None
+        self.inj_eff_matrix = None
+        self.source_mass_pdf = None
+
+    def run_injection_solver(self: Self, reset: bool = False):
+        """
+        Run the injection solver.
+
+        It will try to find the `sol_injection_solver.pkl` and load from it. Otherwise it will compute it.
 
         Parameter
         ----------
         reset: bool
-            flag to reset the pre-computation or not
+            flag to reset the pre-computation or not.
+            If True, then the matrix will be computed again.
         """
         solver_res_path = os.path.join(self.resources_path, "injection_solver")
         if not os.path.exists(solver_res_path):
@@ -237,6 +250,7 @@ class CompositionMatrixContainer:
 
             # currently parallelising over distances is not working too well, maybe because its contained within a class...
             # but using many threads can be as fast as parallelising over this so in principle its not necessary
+            # TODO: investigate this further if necessary?
             # solver_res = Parallel(n_jobs=njobs)(delayed(self.run_single_injection_solver)(arg) for arg in run_args)
 
         else:
@@ -248,13 +262,11 @@ class CompositionMatrixContainer:
             )
 
         solver_res = [pickle.load(open(f, "rb")) for f in solver_res_files]
-        # solver_res = []
 
         return solver_res
 
-    def determine_mass_groups(self):
+    def determine_mass_groups(self: Self) -> None:
         """Determine the masses within each mass group."""
-
         # first define the masses within each mass group
         mass_groups = [1, 2, 3, 4]
         mass_group_ids = []
@@ -283,7 +295,7 @@ class CompositionMatrixContainer:
             print(f"Masses (A) contained in mass group {lnA_upper}: ")
             print([self.fA(mid) for mid in id_per_mg])
 
-    def compute_weights(self : Self, solver_res) -> None:
+    def compute_propagation_matrices(self: Self, solver_res: list) -> None:
         """
         Compute propagation matrices (weights) from the results from prince.
 
@@ -292,12 +304,9 @@ class CompositionMatrixContainer:
 
         Parameter
         ---------
-
-        solver_res: results from the solver
+        solver_res: list
+            results from the solver
         """
-        # first determine the mass groups
-        self.determine_mass_groups()
-
         # define rigidity grid number here
         NRs = len(self.prince_run.cr_grid.grid)
 
@@ -334,9 +343,147 @@ class CompositionMatrixContainer:
                         res.get_solution(mid)[1] / src_spect
                     )
 
-    def save(self : Self, outfile: str):
-        """Save data into h5py format"""
+    def compute_injection_matrices(
+        self: Self,
+        solver_res: list,
+        damp_factor: float = 0.001,
+        njobs: int = 4,
+    ) -> None:
+        """
+        Compute injection matrices (weights) from the results from prince.
 
+        This is done by optimising the cost function that maximises the
+        production of each arrival mass from each source mass.
+
+        We iterate over each distance and rigidity for the computation.
+
+        Parameter
+        ---------
+        solver_res: list
+            results from the solver
+        damp_factor: float, default = 0.001
+            The dampening factor to diminish the strong over-fitting for
+            exclusion of other arrival masses, as this contribution is
+            much stronger than the inclusion of the particular arrival mass.
+            Default is 0.001, which is determined after playing around.
+        n_cores : int, defualt = os.cpu_count()
+            Number of cores used for parallelisation.
+        """
+        # prepare arguments to input in the parallelisation
+        opt_args = [
+            (idis, solver_res[idis], damp_factor) for idis in range(len(self.distances))
+        ]
+
+        # parallelise over each distance
+        opt_results = Parallel(n_jobs=njobs)(
+            delayed(self._run_single_optimisation)(arg) for arg in opt_args
+        )
+
+        # injection matrix resulting from optimisation of earth & source spectrum
+        # this is defined for each arrival mass as well
+        # shape is DIS x ASRC x AEARTH x RIGIDITY
+        self.inj_eff_matrix = np.zeros(
+            (
+                len(self.distances),
+                len(self.massids),
+                len(self.massids),
+                len(self.prince_run.cr_grid.grid),
+            )
+        )
+
+        for idis, opt_res in opt_results:
+            self.inj_eff_matrix[idis, ...] = opt_res
+
+    def _run_single_optimisation(self: Self, args: tuple) -> np.ndarray:
+        """
+        Run single optimisation step for the cost function.
+
+        Parameters
+        ----------
+        args: tuple
+            dis_idx: int
+                index of distance
+            solver_res_per_d: list
+                results from the solver for each source mass
+            damp_factor: float
+                dampening factor for the cost function
+        """
+        dis_idx, solver_res_per_d, damp_factor = args
+        print(f"Current distance index: {dis_idx}")
+
+        inj_eff_mat = np.zeros(
+            (
+                len(self.massids),
+                len(self.massids),
+                len(self.prince_run.cr_grid.grid),
+            )
+        )
+
+        for ime, me in enumerate(self.massids):
+            # store the earth spectrum & source spectrum to be used for optimisation
+            earth_spects = np.zeros(
+                (len(self.massids), len(self.prince_run.cr_grid.grid))
+            )
+            src_spects = np.zeros(
+                (len(self.massids), len(self.prince_run.cr_grid.grid))
+            )
+
+            for ims in range(len(self.massids)):
+                res, src_spect = solver_res_per_d[ims]
+                src_spects[ims, :] = src_spect
+                # get the earth spectrum at the mass group per source mass for all rigidity bins
+                earth_spects[ims, :] = res.get_solution(me)[1]
+
+            # set lower limit to avoid numerical issues
+            src_spects[src_spects < 1e-60] = 1e-60
+            earth_spects[earth_spects < 1e-60] = 1e-60
+
+            # now we optimise over source masses, so loop over rigidities
+            for iR in range(len(self.prince_run.cr_grid.grid)):
+                # initial guess
+                wA0s = np.ones(len(self.massids))
+
+                # optimisation
+                res = minimize(
+                    cost_function,
+                    x0=wA0s,
+                    args=(
+                        earth_spects[:, iR],
+                        src_spects[:, iR],
+                        ime,
+                        damp_factor,
+                        1.0,  # fixed for now, could be variable in future
+                    ),
+                    bounds=Bounds(0, 1),
+                    method="L-BFGS-B",
+                )
+
+                inj_eff_mat[ime, :, iR] = res.x
+
+        return dis_idx, inj_eff_mat
+
+    def compute_source_mass_PDF(self: Self) -> None:
+        """
+        Compute the source mass PDF.
+
+        This is done by normalising the injection efficiency matrix.
+        """
+        norma = np.sum(self.inj_eff_matrix, axis=1, keepdims=True)
+        self.source_mass_pdf = self.inj_eff_matrix / norma
+
+        # some limiters to avoid numerical issues
+        self.source_mass_pdf[np.isnan(self.source_mass_pdf)] = 1e-40
+        self.source_mass_pdf[self.source_mass_pdf < 1e-40] = 1e-40
+
+    def save(self: Self, outfile: str) -> None:
+        """
+        Save data into h5py format.
+
+        Parameters
+        ----------
+        outfile: str
+            output file name
+        """
         # compute rigidity grid, assuming constant mass-to-charge ratio
         # NB: rigidities are in GV!
         A_per_Z = 2  # assume constant A/Z ratio
@@ -352,8 +499,10 @@ class CompositionMatrixContainer:
             f.create_dataset("rigidities", data=rigidities)
             f.create_dataset("rigidities_widths", data=rigidities_widths)
             f.create_dataset("propa_matrix", data=self.propa_matrix)
+            f.create_dataset("inj_eff_matrix", data=self.inj_eff_matrix)
+            f.create_dataset("source_mass_pdf", data=self.source_mass_pdf)
 
-    def __create_kernel(self : Self) -> None:
+    def __create_kernel(self: Self) -> None:
         """Create kernel and save the results if not yet done so."""
         if os.path.exists(self.prince_run_datapath):
             print("File already exists, no need for re-computation")
@@ -375,8 +524,8 @@ class CompositionMatrixContainer:
         # pickle dump the results
         pickle.dump(prince_run, open(self.prince_run_datapath, "wb"), protocol=-1)
 
-    def __create_distance_tables(self : Self):
-        """Create conversion table from redshift to Mpc if not yet done so"""
+    def __create_distance_tables(self: Self) -> None:
+        """Create conversion table from redshift to Mpc if not yet done so."""
         if os.path.exists(self.redshift_distance_datapath):
             print("File already exists, no need for re-computation")
             return
@@ -541,12 +690,37 @@ class NoInjection(CosmicRaySource):
         return np.zeros_like(energy)
 
 
-def cost_function(wAs: np.ndarray, *args):
-    """Cost function to minimise weights per distance per rigidity for each mass group"""
-    earth_spect_mg, src_spect, img = args
+def cost_function(wAs: np.ndarray, *args: tuple) -> np.ndarray:
+    """
+    Cost function to minimise weights per distance per rigidity for each mass group.
+
+    The cost function is based on the MSE function in machine learning. But instead
+    of subtracting the two values, we minimise the weights that optimise the production
+    by multiplying by the weights with the exclusion of other arrival masses and
+    multiplying by (1 - weights) for the production of the arrival mass we want.
+
+    The logarithm is taken for stability.
+
+    Parameters
+    ----------
+    wAs: np.ndarray
+        weights that are optimised for maximal production for each arrival mass
+    args: tuple
+        earth_spect: np.ndarray
+            earth spectrum
+        src_spect: np.ndarray
+            source spectrum
+        ime: int
+            index of arrival mass
+        lmbda_1: float
+            weight for production
+        lmbda_2: float
+            weight for survival
+    """
+    earth_spect, src_spect, ime, lmbda_1, lmbda_2 = args
 
     Lsrc = src_spect * wAs
-    Lmg = earth_spect_mg[..., img]
-    Lmg_ex = np.sum(np.delete(earth_spect_mg, img, axis=-1), axis=-1)
+    Learth = earth_spect[..., ime]
+    Learth_ex = np.sum(np.delete(earth_spect, ime, axis=-1), axis=-1)
 
-    return np.log10(np.sum((Lsrc * Lmg_ex) / Lmg**2))
+    return np.log10(np.mean(lmbda_1 * Lsrc * Learth_ex + lmbda_2 * (1 - Lsrc) * Learth))

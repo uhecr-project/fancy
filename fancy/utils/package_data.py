@@ -22,18 +22,18 @@ def get_available_energy_approx_tables():
     return files
 
 
-def get_path_to_stan_file(file_name: str) -> Path:
+def get_path_to_stan_includes(model_type: str) -> Path:
 
-    file_path = resource_filename("fancy", "interfaces/stan/%s" % file_name)
-
-    return Path(file_path)
-
-
-def get_path_to_stan_includes() -> Path:
-
-    include_path = resource_filename("fancy", "interfaces/stan")
+    include_path = resource_filename("fancy", "interfaces/stan/%s" % model_type)
 
     return Path(include_path)
+
+
+def get_path_to_stan_file(model_type: str, file_name : str) -> Path:
+
+    file_path = resource_filename("fancy", "interfaces/stan/%s/%s" % (model_type, file_name))
+
+    return Path(file_path)
 
 
 def get_path_to_lens(lens_name: str) -> Path:

@@ -1,15 +1,20 @@
-"""Class to determine backpropagated events from a given distribution of UHECRs with a particular detector"""
+"""Class to determine backpropagated events from a given distribution of UHECRs with a particular detector."""
 
 import os
-import numpy as np
-from scipy.stats import norm
-from astropy.coordinates import SkyCoord
-from fancy import Data
+import pickle
+import typing
 
+import numpy as np
+from astropy.coordinates import SkyCoord
 from cmdstanpy import CmdStanModel
 from joblib import Parallel, delayed
+from scipy.stats import norm
+from typing_extensions import Self
 from vMF import sample_vMF
-import pickle
+
+from fancy.utils.package_data import get_path_to_stan_includes, get_path_to_stan_file
+
+from fancy import Data
 
 try:
     import crpropa as cr
@@ -19,25 +24,32 @@ except ImportError:
 
 class GMFBackPropagation:
     """Class to simulate back propagation of UHECRs within a given dataset (simulated or real data) and obtain the deflected events and their individual kappa values."""
-    
-    __gmf_models = ["JF12", "UF23", "UF23Turb", "PT11", "TF17"]  # noqa: RUF012
-    __Nmodels_UF23 = 8
 
-    def __init__(self, data: Data, gmf_model : str="JF12"):
+    __gmf_models: typing.ClassVar[list] = [
+        "JF12",
+        "UF23",
+        "UF23Turb",
+        "PT11",
+        "TF17",
+    ]  # type of GMF models
+    __Nmodels_UF23: int = 8  # number of models in UF23
+
+    def __init__(self: Self, data: Data, gmf_model: str = "JF12") -> None:
         """
-        Class to simulate back propagation of UHECRs within a given dataset (simulated or real data) and obtain the deflected events and their individual kappa values.
+        Class to simulate back propagation of UHECRs within a given dataset (simulated or real data).
 
-        Parameter
+        Parameters
         ----------
-
-        data : Data 
+        data : Data
             object generated from fancy.interfaces.data
         gmf_model : str
             the GMF model considered for backpropagation.
         """
         self.gmf_model = gmf_model
 
-        assert gmf_model in self.__gmf_models, f"GMF model {gmf_model} is not an available GMF model."
+        assert gmf_model in self.__gmf_models, (
+            f"GMF model {gmf_model} is not an available GMF model."
+        )
 
         # raise exception if CRPropa is not installed, since it requires CRPropa
         if cr is None:
@@ -63,47 +75,73 @@ class GMFBackPropagation:
         self.kappa_d = data.detector.kappa_d
 
         # compile vMF model
-        self._compile_vMFmodel()
+        self.__compile_vMFmodel()
 
-    def _compile_vMFmodel(self):
+    def __compile_vMFmodel(self: Self) -> None:
         """Compile the vMF fitting function used in stan."""
         # model to fit vMF with
-        stan_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "stan")
-        fit_filename = os.path.join(stan_path, "fit_from_vMF.stan")
-        stanc_options = {"include-paths": stan_path}
+        stanc_options = {"include-paths": str(get_path_to_stan_includes("vMF"))}
 
         self.vMF_model = CmdStanModel(
-            stan_file=fit_filename,
+            stan_file=str(get_path_to_stan_file("vMF", "fit_from_vMF.stan")),
             model_name="vMF",
             stanc_options=stanc_options,
         )
 
-    def _get_time_delay(self, c, pos_earth):
-        """Returns delay between entering the galactic disc
-        and arrival at Earth through magnetic field."""
+    def __get_time_delay(
+        self: Self, c: cr.Candidate, pos_earth: cr.Vector3d
+    ) -> np.ndarray:
+        """
+        Return delay between entering the galactic disc and arrival at Earth through magnetic field.
+
+        Parameters
+        ----------
+        c : cr.Candidate
+            CRPropa candidate object
+        pos_earth : cr.Vector3d
+            position of the Earth in galactic coordinates
+
+        Returns
+        -------
+        time delay in years
+        """
         return (
             (c.getTrajectoryLength() - c.current.getPosition().getDistanceTo(pos_earth))
             / cr.c_light
             / (60 * 60 * 24 * 365)
         )
 
-    def _setup_simulation(self, obs, mt_num):
-        """Setup crpropa backtracking simulation"""
+    def __setup_simulation(self: Self, obs: cr.Observer, mt_num: int) -> cr.ModuleList:
+        """
+        Prepare the crpropa backtracking simulation.
+
+        Parameters
+        ----------
+        obs : cr.Observer
+            CRPropa observer object
+        mt_num : int
+            the montel number for the UF23 model
+        
+        Returns
+        -------
+        cr.ModuleList
+            the simulation object containing the observer and propagation model
+        """
         sim = cr.ModuleList()
+        rng = np.random.default_rng()
 
         # setup magnetic field
         if self.gmf_model == "JF12":
-            seed = np.random.randint(10000000)
+            seed = int(rng.integers(low=0, high=10000000))
             gmf_cr = cr.JF12Field()
             gmf_cr.randomStriated(seed)
             gmf_cr.randomTurbulent(seed)
 
-            
         elif self.gmf_model == "UF23":
             gmf_cr = cr.UF23Field(mt_num)
 
         elif self.gmf_model == "UF23Turb":
-            seed = np.random.randint(10000000)
+            seed = int(rng.integers(low=0, high=10000000))
 
             gmf_cr = cr.UF23Field(mt_num)
             gmf_cr.randomStriated(seed)
@@ -119,9 +157,69 @@ class GMFBackPropagation:
         sim.add(obs)  # add observer at galactic boundary
         return sim
 
-    def run_single_backpropagation(self, bt_arg):
-        """Wrapper function for parallelising backtracking simulation"""
+    def __generate_backtracking_arguments(self: Self, Nsamples: int = 500) -> list:
+        """
+        Generate arguments used for backtracking.
 
+        Here we sample the arrival directions and rigidities for each UHECR.
+
+        The arrival directions is sampled via a vMF distribution using the angular
+        reconstruction uncertainty.
+        The energy is sampled via a normal distribution using the energy
+        uncertainty, which is then used to compute the mean lnA & sigma lnA.
+        The composition is sampled for each energy sample, which is then
+        combined to get rigidity samples.
+
+        Parameters
+        ----------
+        Nsamples : int
+            number of samples to generate for each UHECR.
+
+        Returns
+        -------
+        a list containing a tuple of arguments for each UHECR.
+        """
+        # generate arguments
+        bt_args = []
+        for i in range(self.Nuhecrs):
+            # sample arrival directions via vMF
+            uhecr_sampled_uvs = sample_vMF(
+                self.uhecr_uv[i], self.kappa_d, num_samples=Nsamples
+            )
+
+            # to do this, we sample over all energies first with truncated gaussian
+            E_samples = norm.rvs(
+                loc=self.uhecr_energy[i],
+                scale=self.fE * self.uhecr_energy[i],
+                size=Nsamples,
+            )  # in EeV
+
+            # now compute mean lnA, as a function of log10(E / EeV)
+            mu_sigma_lnAs = (
+                self.lnA_params[:, 0, np.newaxis] * np.log10(E_samples)[np.newaxis, :]
+                + self.lnA_params[:, 1, np.newaxis]
+            )
+            lnA_samples = norm.rvs(loc=mu_sigma_lnAs[0, :], scale=mu_sigma_lnAs[1, :])
+
+            # now compute the rigidities using R = (E / Z) * (Z /A) * (A / (exp(lnA)))
+            uhecr_sampled_Rs = E_samples / (0.5 * np.exp(lnA_samples)) * cr.EeV  # in EV
+
+            bt_args.append((i, uhecr_sampled_uvs, uhecr_sampled_Rs))
+        return bt_args
+
+    def run_single_backpropagation(self: Self, bt_arg: tuple) -> tuple:
+        """
+        Run a single back-propagation simulation for a given UHECR.
+
+        Parameters
+        ----------
+        bt_arg : tuple
+            tuple containing the UHECR index, sampled arrival directions and sampled rigidities.
+
+        Returns
+        -------
+        a tuple containing the UHECR index, sampled arrival directions, deflected directions, mean deflected direction and time delays.
+        """
         uhecr_idx, uhecr_uvs, uhecr_Rs = bt_arg
         uhecr_defl_uvs = np.zeros_like(uhecr_uvs)
         uhecr_time_delays = np.zeros(uhecr_uvs.shape[0])
@@ -149,7 +247,7 @@ class GMFBackPropagation:
                 # map the model number given the number of samples we dealt so far
                 # so that we cover all models
                 mt_num = int(np.floor(k / (len(uhecr_uvs) // self.__Nmodels_UF23)))
-                sim = self._setup_simulation(obs, mt_num)
+                sim = self.__setup_simulation(obs, mt_num)
 
             # get crropa Vector3D version of sampled arrival directions
             uhecr_vector3d = cr.Vector3d(*uhecr_uv)
@@ -159,7 +257,8 @@ class GMFBackPropagation:
             )
             sim.run(c)
 
-            uhecr_time_delays[k] = self._get_time_delay(c, pos_earth)
+            # compute time delay and direction
+            uhecr_time_delays[k] = self.__get_time_delay(c, pos_earth)
             uhecr_defl_v3d = c.current.getDirection()
 
             # store sampled deflected directions
@@ -190,41 +289,23 @@ class GMFBackPropagation:
             uhecr_time_delays,
         )
 
-    def _generate_backtracking_arguments(self, Nsamples=500):
-        """Generate arguments used for backtracking"""
-        # generate arguments
-        bt_args = []
-        for i in range(self.Nuhecrs):
-
-            # sample arrival directions via vMF
-            uhecr_sampled_uvs = sample_vMF(
-                self.uhecr_uv[i], self.kappa_d, num_samples=Nsamples
-            )
-
-            # sample rigidity via normal distribution
-
-            # to do this, we sample over all energies first with truncated gaussian
-            E_samples = norm.rvs(
-                    loc=self.uhecr_energy[i],
-                    scale=self.fE * self.uhecr_energy[i],
-                    size=Nsamples,
-                ) # in EeV
-
-            # now compute mean lnA, as a function of log10(E / EeV)
-            mu_sigma_lnAs = self.lnA_params[:,0,np.newaxis] * np.log10(E_samples)[np.newaxis,:] + self.lnA_params[:,1,np.newaxis]
-            lnA_samples = norm.rvs(loc=mu_sigma_lnAs[0,:], scale=mu_sigma_lnAs[1,:])  
-
-            # now compute the rigidities using R = (E / Z) * (Z /A) * (A / (exp(lnA)))
-            uhecr_sampled_Rs = E_samples / (0.5 * np.exp(lnA_samples)) * cr.EeV # in EV
-
-            bt_args.append((i, uhecr_sampled_uvs, uhecr_sampled_Rs))
-        return bt_args
-
     # parallelize for each UHECR
-    def run_backpropagation(self, Nsamples=500, njobs=4, parallel=True):
-        """Run backpropagation for all UHECRs"""
+    def run_backpropagation(
+        self: Self, Nsamples: int = 500, njobs: int = 4, parallel: bool = True
+    ) -> None:
+        """
+        Run backpropagation for all UHECRs.
 
-        # if UF23, make sure that number of samples are divisible by 
+        Parameters
+        ----------
+        Nsamples : int
+            number of samples to generate for each UHECR.
+        njobs : int, default=4
+            number of jobs to run in parallel. not used if parallel=False
+        parallel : bool
+            flag whether to run in parallel or not.
+        """
+        # if UF23, make sure that number of samples are divisible by
         # number of models in UF23 (8 models)
         # such that we have uniform number of samples per model
         # we just multiply the number of samples by 8
@@ -237,7 +318,7 @@ class GMFBackPropagation:
         self.time_delays = np.zeros((self.Nuhecrs, Nsamples))
 
         # generate backtrakcing arguments for all uhecrs
-        bt_args = self._generate_backtracking_arguments(Nsamples)
+        bt_args = self.__generate_backtracking_arguments(Nsamples)
 
         # use joblib to run parallel jobs otherwise use serial
         if parallel:
@@ -258,37 +339,52 @@ class GMFBackPropagation:
 
         # take care of nans
         for uhecr_idx in range(self.Nuhecrs):
-            defl_sample_uv = self.defl_sampled_uvs[uhecr_idx,...]
+            defl_sample_uv = self.defl_sampled_uvs[uhecr_idx, ...]
             # find a sample vector that is not nan so that we can assign it to a nan vector
-            # since the array is collapsed, we just take the first three elements, which would be one 
+            # since the array is collapsed, we just take the first three elements, which would be one
             # vector that doesnt have nans
-            a_sample_with_nonans = defl_sample_uv[~np.isnan(defl_sample_uv)][0:3]  
-            # assign the deflected unit vectors such that if it is nan, we set it to 
+            a_sample_with_nonans = defl_sample_uv[~np.isnan(defl_sample_uv)][0:3]
+            # assign the deflected unit vectors such that if it is nan, we set it to
             # a non-NaN vector. Since these are anyways rare and are sampled over for kappa_GMF
             # setting one to another should not make too much difference
-            self.defl_sampled_uvs[uhecr_idx,...] = np.where(np.isnan(defl_sample_uv), a_sample_with_nonans, defl_sample_uv)
+            self.defl_sampled_uvs[uhecr_idx, ...] = np.where(
+                np.isnan(defl_sample_uv), a_sample_with_nonans, defl_sample_uv
+            )
 
         self.uhecr_coords_gb = SkyCoord(
             self.defl_mean_uvs, frame="galactic", representation_type="cartesian"
         )
         self.uhecr_coords_gb.representation_type = "unitspherical"
 
-    def compute_kappa_gmf(self):
-        """Compute kappa gmf by fitting to vMF distribution"""
+    def compute_kappa_gmf(self: Self) -> None:
+        """Compute kappa gmf & theta by fitting to vMF distribution pre-computed via stan."""
         self.kappa_gmfs = Parallel(n_jobs=2)(
-            delayed(self._get_kappa_gmf)(uhecr_idx) for uhecr_idx in range(self.Nuhecrs)
+            delayed(self._get_kappa_gmf)(uhecr_idx)
+            for uhecr_idx in range(self.Nuhecrs)
         )
         self.thetaPs = self.f_theta(self.kappa_gmfs)  # for plotting purposes
 
-    def _get_kappa_gmf(self, uhecr_idx):
+    def _get_kappa_gmf(self: Self, uhecr_idx: int) -> float:
+        """
+        Get kappa_GMF for a given UHECR index.
+        
+        Parameters
+        ----------
+        uhecr_idx : int
+            the UHECR index
+        """
         # nested function for conviencience
         rng_kgmf = np.random.default_rng()
 
         fit = self.vMF_model.sample(
             data={
-                "n": self.defl_sampled_uvs[uhecr_idx, :, :],
-                "N": self.defl_sampled_uvs.shape[1],
-                "mu": self.defl_mean_uvs[uhecr_idx, :],
+                "n": self.defl_sampled_uvs[uhecr_idx, :, :],  # deflected unit vectors
+                "N": self.defl_sampled_uvs.shape[
+                    1
+                ],  # shape of the deflected unit vectors
+                "mu": self.defl_mean_uvs[
+                    uhecr_idx, :
+                ],  # mean direction of deflected vectors
             },
             iter_warmup=1000,
             iter_sampling=2000,
@@ -299,8 +395,17 @@ class GMFBackPropagation:
 
         return np.mean(fit.stan_variable("kappa"))
 
-    def _f_theta_scalar(self, kappa, P=0.683):
-        """Returns costheta"""
+    def __f_theta_scalar(self: Self, kappa: float, P: float = 0.683) -> float:
+        """
+        Compute the Pth containment angle for a given kappa value.
+
+        Parameters
+        ----------
+        kappa : float
+            the kappa value
+        P : float, default=0.683
+            the containment probability. Default to 1 sigma.
+        """
         if kappa <= 1e5 and kappa > 1e-3:
             return np.arccos(1 + np.log((1 - P * (1 - np.exp(-2 * kappa)))) / kappa)
         elif kappa > 1e5:
@@ -308,12 +413,29 @@ class GMFBackPropagation:
         elif kappa <= 1e-3:
             return np.arccos(1 + np.log(1 - 2 * P * kappa) / kappa)
 
-    def f_theta(self, kappa, P=0.683):
-        """vectorized version"""
-        return np.vectorize(self._f_theta_scalar)(kappa, P)
+    def f_theta(self: Self, kappa: np.ndarray, P: float = 0.683) -> np.ndarray:
+        """
+        Compute the Pth containment angle for a range of kappa values.
 
-    def save(self, outfile):
-        """Save the result"""
+        Parameters
+        ----------
+        kappa : np.ndarray
+            array of kappa values
+        P : float, default=0.683
+            the containment probability. Default to 1 sigma.
+        """
+        return np.vectorize(self.__f_theta_scalar)(kappa, P)
+
+    def save(self: Self, outfile: str) -> None:
+        """
+        Save the result as a pickle file.
+
+        Parameters
+        ----------
+        outfile : str
+            the output file to save the results.
+        """
+        print(f"Saving results to {outfile}")
         pickle.dump(
             (
                 self.kappa_gmfs,

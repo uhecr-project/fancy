@@ -1,26 +1,23 @@
-import pandas as pd
-import numpy as np
-import matplotlib
-from matplotlib import pyplot as plt
 import h5py
+import matplotlib
+import numpy as np
+import pandas as pd
+from matplotlib import pyplot as plt
+from typing_extensions import Self, Union
 
-from .uhecr import Uhecr
-from .source import Source
-from ..detector.detector import Detector
-from fancy.plotting import AllSkyMap
+from fancy.plotting import AllSkyMapCartopy as AllSkyMap
 from fancy.utils.package_data import get_path_to_meanlnA
+
+from ..detector.detector import Detector
+from .source import Source
+from .uhecr import Uhecr
 
 
 class Data:
-    """
-    A container for high level storage of data.
-    """
+    """A container for high level storage of data."""
 
-    def __init__(self):
-        """
-        A container for high level storage of data.
-        """
-
+    def __init__(self: Self) -> None:
+        """Contain high level storage of data."""
         self._filename = None
         self._data = None
 
@@ -29,51 +26,70 @@ class Data:
         self.source = None
         self.detector = None
 
-    def add_source(self, filename, label=None):
+    def add_source(self: Self, filename: str, label: str = "M82") -> None:
         """
         Add a source object to the data cotainer from file.
 
-        :param filename: name of the file containing the object's data
-        :param label: reference label for the source object
+        Parameters
+        ----------
+        filename: str
+            name of the file containing the object's data
+        label: str
+            reference label for the source object
         """
-
-        if label == None:
-            label = "VCV_AGN"
-
         new_source = Source()
-        new_source.from_data_file(filename, label)
+        new_source.load_from_data_file(filename, label)
 
         # define source object
         self.source = new_source
 
-    def add_uhecr(self, filename, label=None, mass_group=1, gmf_model="JF12"):
+    def add_uhecr(
+        self: Self,
+        filename: str,
+        label: str = "TA2015",
+        hadr_model: str = "EPOS-LHC",
+        gmf_model: str = "JF12",
+    ) -> None:
         """
         Add a uhecr object to the data container from file.
 
-        :param filename: name of the file containing the object's data
-        :param label: reference label for the uhecr dataset
-        :param ptype: composition type, this should be contained in the dataset itself
+        Parameters
+        ----------
+        filename: str
+            name of the file containing the object's data
+        label: str
+            reference label for the uhecr dataset
+        hadr_model : str
+            hadronic interaction model used to get the deflection information
+        gmf_model : str
+            GMF model used to get the deflection information
         """
-
         new_uhecr = Uhecr()
-        new_uhecr.from_data_file(filename, label, mass_group, gmf_model=gmf_model)
+        new_uhecr.load_from_data_file(filename, label, hadr_model, gmf_model=gmf_model)
 
         # define uhecr object
         self.uhecr = new_uhecr
 
     def add_detector(
-        self,
-        detector_properties: dict,
+        self: Self,
+        label: str = "TA2015",
         hadr_model: str = "EPOS-LHC",
         mean_lnA_file: str = "meanlnA_logE_fit.txt",
-    ):
+    ) -> None:
         """
         Add a detector object to complement the data.
 
-        :param detector_properties: dict of properties.
+        Parameters
+        ----------
+        label : str
+            label of detector
+        hadr_model : str
+            hadronic interaction model used to get the composition information
+        mean_lnA_file : str, default="meanlnA_logE_fit.txt"
+            the file containing the mean lnA values
         """
-
-        new_detector = Detector(detector_properties)
+        new_detector = Detector(label)
+        new_detector.get_exposure_properties()
         new_detector.set_lnA_params(
             meanlnA_file=get_path_to_meanlnA(mean_lnA_file), hadr_model=hadr_model
         )
@@ -81,13 +97,16 @@ class Data:
         # define detector
         self.detector = new_detector
 
-    def _uhecr_colorbar(self, cmap):
+    # TODO: move this to UHECR class
+    def __generate_uhecr_colorbar(self, cm: matplotlib.colors.Colormap) -> None:
         """
         Add a colorbar normalised over all the Uhecr energies.
 
-        :param cmap: matplotlib colorbar object
+        Parameters
+        ----------
+        cmap: matplotlib colorbar object
+            color map for the plot
         """
-
         max_energies = []
         min_energies = []
         # find the min and max uhecr energies
@@ -106,26 +125,40 @@ class Data:
             cb_ax,
             values=vals,
             norm=norm_E,
-            cmap=cmap,
+            cmap=cm,
             orientation="horizontal",
             drawedges=False,
             alpha=1,
         )
         # bar.ax.get_children()[1].set_linewidth(0)
-        bar.set_label("UHECR Energy [EeV]")
+        bar.set_label("UHECR Energy / EeV")
 
-    def show(self, save=False, savename=None, cmap=None):
+    def plot_skymap(
+        self: Self,
+        save: bool = False,
+        file_path: Union[str, None] = None,
+        cmap: str = "viridis",
+    ) -> AllSkyMap:
         """
         Plot the data on a map of the sky.
 
-        :param save: boolean input, saves figure if True
-        :param savename: location to save to, required if
-                         save == True
-        """
+        A quick way to check the data is loaded correctly.
 
+        Parameters
+        ----------
+        save: bool
+            flag to save figure or not
+        file_path: str, default=None
+            path to save the figure
+        cmap: str, default="viridis"
+            color map for the plot
+
+        Returns
+        -------
+        a skymap object that we can add more information to
+        """
         # plot style
-        if cmap == None:
-            cmap = plt.cm.get_cmap("viridis")
+        cm = plt.cm.get_cmap(cmap)
 
         # skymap
         skymap = AllSkyMap()
@@ -133,29 +166,29 @@ class Data:
 
         # uhecr object
         if self.uhecr:
-            self.uhecr.plot(skymap)
+            self.uhecr.plot_skymap(skymap)
 
         # source object
         if self.source:
-            self.source.plot(skymap)
+            self.source.plot_skymap(skymap)
 
         # detector object
-        # if self.detector:
-        #    self.detector.draw_exposure_lim(skymap)
+        if self.detector:
+           self.detector.draw_exposure_lim(skymap)
 
         # standard labels and background
-        skymap.draw_standard_labels()
+        skymap.set_gridlines()
 
         # legend
         leg = skymap.ax.legend(frameon=False, bbox_to_anchor=(0.85, 0.85))
 
         # add a colorbar if uhecr objects plotted
         if self.uhecr and self.uhecr.N != 1:
-            self._uhecr_colorbar(cmap)
+            self.__generate_uhecr_colorbar(cm)
 
         if save:
             skymap.fig.savefig(
-                savename,
+                file_path,
                 dpi=500,
                 bbox_extra_artists=[leg],
                 bbox_inches="tight",
@@ -164,12 +197,15 @@ class Data:
 
         return skymap
 
-    def from_file(self, filename):
+    def load_from_analysis_file(self: Self, filename: str) -> None:
         """
         Load data from an Analysis output file.
-        :param filename: file name
-        """
 
+        Parameters
+        ----------
+        filename: str
+            file name of the Analysis output file.
+        """
         # Read out information on data and detector
         uhecr_properties = {}
         source_properties = {}
@@ -191,10 +227,10 @@ class Data:
                 detector_properties[key] = detector[key][()]
 
         uhecr = Uhecr()
-        uhecr.from_properties(uhecr_properties)
+        uhecr.load_from_properties(uhecr_properties)
 
         source = Source()
-        source.from_properties(source_properties)
+        source.load_from_properties(source_properties)
 
         detector = Detector(detector_properties)
 
@@ -204,29 +240,33 @@ class Data:
         self.detector = detector
 
 
+'''Below function is not used, but kept for backwards compatibility'''
 class RawData:
-    """
-    Parses information for known data files in txt format.
-    """
+    """Parses information for known data files in txt format."""
 
-    def __init__(self, filename, filelayout):
+    def __init__(self, filename: str, filelayout: list) -> None:
         """
-        Parses information for known data files in txt format.
-        :filename: name of the file to parse
-        :filelayout: list of column names in file
-        """
+        Parse information for known data files in txt format.
 
+        Parameters
+        ----------
+        filename: str
+            name of the file to parse
+        filelayout: list
+            list of column names in file
+        """
         self._filename = filename
         self._filelayout = filelayout
         self._data = self._parse()
 
-    def _parse(self):
+    def _parse(self) -> dict:
         """
         Parse the data form the object's file.
 
-        :return: arrays for each column in the data file
+        Returns
+        -------
+        dictionary of array for each column in the data file
         """
-
         output = pd.read_csv(
             self._filename, comment="#", delim_whitespace=True, names=self._filelayout
         )
@@ -235,14 +275,19 @@ class RawData:
 
         return output_dict
 
-    def get_by_name(self, name):
+    def get_by_name(self, name: str) -> np.array:
         """
         Get data entries by name.
 
-        :param name: name of the data as in self._filelayout
-        :return: an array of data entries
-        """
+        Parameters
+        ----------
+        name: str
+            name of the data as in self._filelayout
 
+        Returns
+        -------
+        an array of data entries
+        """
         try:
             selected_data = np.array(list(self._data[name].values()))
 

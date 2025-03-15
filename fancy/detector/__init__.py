@@ -1,1 +1,1 @@
-from .detector import *
+from .detector import Detector

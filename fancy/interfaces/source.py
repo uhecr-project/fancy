@@ -3,32 +3,40 @@ from matplotlib import pyplot as plt
 from astropy import units as u
 from astropy.coordinates import SkyCoord
 import h5py
+from typing_extensions import Self, Union
 
-from fancy.interfaces.model import coord_to_uv, uv_to_coord
+from fancy.utils.coordinates import get_coordinates, uv_to_coord, coord_to_uv
 
-from fancy.plotting import AllSkyMap
+from fancy.plotting import AllSkyMapCartopy as AllSkyMap
 
 __all__ = ["Source"]
 
 
 class Source:
-    """
-    Stores the data and parameters for sources.
-    """
+    """Stores the data and parameters for sources."""
 
-    def __init__(self):
-        """
-        Initialise empty container.
-        """
+    def __init__(self: Self) -> None:
+        """Initialise empty container."""
+        self.label = None
 
-    def from_data_file(self, filename, label):
-        """
-        Stores the data and parameters for sources.
+        self.distance = None
+        self.N = None
+        self.coord = None
+        self.label = None
+        self.unit_vector = None
+        self.names = None
 
-        :param filename: file ocntaining source data
-        :param label: identifier
+    def load_from_data_file(self, filename: str, label: str = "M82") -> None:
         """
+        Store the data and parameters for sources.
 
+        Parameters
+        ----------
+        filename: str
+            file containing source data
+        label: str
+            identifier
+        """
         self.label = label
 
         with h5py.File(filename, "r") as f:
@@ -37,38 +45,29 @@ class Source:
             self.N = len(self.distance)
             glon = data["glon"][()]
             glat = data["glat"][()]
-            self.coord = self.get_coordinates(glon, glat)
-
-            if self.label != "cosmo_150" and self.label != "VCV_AGN":
-                # Get names
-                if self.N == 1:
-                    self.name = [data["name"][()]]
-                else:
-                    self.name = []
-                    for i in range(self.N):
-                        self.name.append(data["name"][i])
+            self.coord = get_coordinates(glon, glat)
+            self.names = data["name"][()]
 
         self.unit_vector = coord_to_uv(self.coord)
 
-    def _get_properties(self):
-        """
-        Convenience function to pack object into dict.
-        """
+    def __get_properties(self: Self) -> dict:
+        """Pack and return objects into dict."""
+        properties = {}
+        properties["label"] = self.label
+        properties["N"] = self.N
+        properties["unit_vector"] = self.unit_vector
+        properties["distance"] = self.distance
+        return properties
 
-        self.properties = {}
-        self.properties["label"] = self.label
-        self.properties["N"] = self.N
-        self.properties["unit_vector"] = self.unit_vector
-        self.properties["distance"] = self.distance
-
-    def from_properties(self, source_properties):
+    def load_from_properties(self: Self, source_properties: dict) -> None:
         """
         Define sources from properties dict.
 
-        :param source_properties: dict containing source properties.
-        :param label: identifier
+        Parameters
+        ----------
+        source_properties: dict
+            dict containing source properties.
         """
-
         self.label = source_properties["label"]
 
         self.N = source_properties["N"]
@@ -77,17 +76,21 @@ class Source:
 
         self.coord = uv_to_coord(self.unit_vector)
 
-    def plot(self, skymap: AllSkyMap, size=2.0, color="k"):
+    def plot_skymap(self, skymap: AllSkyMap, size : float=2.0, color : str="k") -> None:
         """
         Plot the sources on a map of the sky.
 
-        Called by Data.show()
+        Called by Data.plot_skymap()
 
-        :param skymap: the AllSkyMap
-        :param size: radius of tissots
-        :param color: colour of tissots
+        Parameters
+        ----------
+        skymap: AllSkyMapCartopy
+            the AllSkyMap
+        size: float
+            tissot radius
+        color : str
+            color of the tissot circles
         """
-
         alpha_level = 0.9
 
         # plot the source locations
@@ -109,25 +112,23 @@ class Source:
             else:
                 skymap.tissot(lon, lat, size, npts=30, color="k", alpha=alpha_level)
 
-    def save(self, file_handle):
+    def save(self: Self, file_handle: h5py.File) -> None:
         """
-        Save to the passed H5py file handle,
+        Save to the passed H5py file handle.
+
         i.e. something that cna be used with
         file_handle.create_dataset()
 
-        :param file_handle: file handle
+        file_handle: h5py.File
+            h5py File handle object
         """
+        properties = self.__get_properties()
 
-        self._get_properties()
-
-        for key, value in self.properties.items():
+        for key, value in properties.items():
             file_handle.create_dataset(key, data=value)
 
-    def select_sources(self, selection):
-        """
-        Select sources by providing certain indices from a list.
-        """
-
+    def select_sources(self : Self, selection : list) -> None:
+        """Select sources by providing certain indices from a list."""
         # store selection
         self.selection = selection
 
@@ -138,18 +139,13 @@ class Source:
         self.N = len(self.distance)
 
         self.coord = self.coord[selection]
-        try:
-            self.flux = self.flux[selection]
-            self.flux_weight = self.flux_weight[selection]
-        except:
-            pass
 
-    def select_distance(self, Dth):
+    def select_from_distance(self : Self, Dth : float) -> None:
         """
         Select sources with distance <= Dth.
+
         Dth should be eneterd in [Mpc].
         """
-
         selection = [i for i, d in enumerate(self.distance) if d <= Dth]
         self.selection = selection
 
@@ -159,28 +155,3 @@ class Source:
         self.N = len(self.distance)
 
         self.coord = self.coord[selection]
-        try:
-            self.flux = self.flux[selection]
-            self.flux_weight = self.flux_weight[selection]
-        except:
-            print("No fluxes to select on.")
-
-    # convenience functions
-
-    def get_coordinates(self, glon, glat, D=None):
-        """
-        Convert glon and glat to astropy SkyCoord
-        Add distance if possible (allows conversion to cartesian coords)
-
-        :return: astropy.coordinates.SkyCoord
-        """
-
-        if D:
-            return SkyCoord(
-                l=glon * u.degree,
-                b=glat * u.degree,
-                frame="galactic",
-                distance=D * u.mpc,
-            )
-        else:
-            return SkyCoord(l=glon * u.degree, b=glat * u.degree, frame="galactic")
