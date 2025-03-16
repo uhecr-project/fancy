@@ -73,7 +73,7 @@ class Data:
     def add_detector(
         self: Self,
         label: str = "TA2015",
-        hadr_model: str = "EPOS-LHC",
+        mass_model: str = "EPOS-LHC",
         mean_lnA_file: str = "meanlnA_logE_fit.txt",
     ) -> None:
         """
@@ -91,7 +91,7 @@ class Data:
         new_detector = Detector(label)
         new_detector.get_exposure_properties()
         new_detector.set_lnA_params(
-            meanlnA_file=get_path_to_meanlnA(mean_lnA_file), hadr_model=hadr_model
+            meanlnA_file=get_path_to_meanlnA(mean_lnA_file), mass_model=mass_model
         )
 
         # define detector

@@ -45,6 +45,7 @@ class GMFBackPropagation:
         gmf_model : str
             the GMF model considered for backpropagation.
         """
+        self.data = data
         self.gmf_model = gmf_model
 
         assert gmf_model in self.__gmf_models, (
@@ -67,12 +68,6 @@ class GMFBackPropagation:
         # uhecr energy properties
         self.uhecr_energy = data.uhecr.energy
         self.Nuhecrs = len(self.uhecr_energy)
-
-        # detector properties
-        self.fE = data.detector.energy_uncertainty
-        self.lnA_params = data.detector.lnA_params
-        self.deltaAng = data.detector.coord_uncertainty
-        self.kappa_d = data.detector.kappa_d
 
         # compile vMF model
         self.__compile_vMFmodel()
@@ -121,7 +116,7 @@ class GMFBackPropagation:
             CRPropa observer object
         mt_num : int
             the montel number for the UF23 model
-        
+
         Returns
         -------
         cr.ModuleList
@@ -184,22 +179,31 @@ class GMFBackPropagation:
         for i in range(self.Nuhecrs):
             # sample arrival directions via vMF
             uhecr_sampled_uvs = sample_vMF(
-                self.uhecr_uv[i], self.kappa_d, num_samples=Nsamples
+                self.uhecr_uv[i], self.data.detector.kappa_d, num_samples=Nsamples
             )
 
             # to do this, we sample over all energies first with truncated gaussian
             E_samples = norm.rvs(
                 loc=self.uhecr_energy[i],
-                scale=self.fE * self.uhecr_energy[i],
+                scale=self.data.detector.energy_uncertainty * self.uhecr_energy[i],
                 size=Nsamples,
             )  # in EeV
 
-            # now compute mean lnA, as a function of log10(E / EeV)
-            mu_sigma_lnAs = (
-                self.lnA_params[:, 0, np.newaxis] * np.log10(E_samples)[np.newaxis, :]
-                + self.lnA_params[:, 1, np.newaxis]
+            # # now compute mean lnA, as a function of log10(E / EeV)
+            # mu_sigma_lnAs = (
+            #     self.lnA_params[:, 0, np.newaxis] * np.log10(E_samples)[np.newaxis, :]
+            #     + self.lnA_params[:, 1, np.newaxis]
+            # )
+            # lnA_samples = norm.rvs(loc=mu_sigma_lnAs[0, :], scale=mu_sigma_lnAs[1, :])
+            lnA_samples = np.array(
+                [
+                    self.data.detector.sample_lnAs(
+                        E,
+                        Nsamples,
+                    )
+                    for E in E_samples
+                ]
             )
-            lnA_samples = norm.rvs(loc=mu_sigma_lnAs[0, :], scale=mu_sigma_lnAs[1, :])
 
             # now compute the rigidities using R = (E / Z) * (Z /A) * (A / (exp(lnA)))
             uhecr_sampled_Rs = E_samples / (0.5 * np.exp(lnA_samples)) * cr.EeV  # in EV
@@ -359,15 +363,14 @@ class GMFBackPropagation:
     def compute_kappa_gmf(self: Self) -> None:
         """Compute kappa gmf & theta by fitting to vMF distribution pre-computed via stan."""
         self.kappa_gmfs = Parallel(n_jobs=2)(
-            delayed(self._get_kappa_gmf)(uhecr_idx)
-            for uhecr_idx in range(self.Nuhecrs)
+            delayed(self._get_kappa_gmf)(uhecr_idx) for uhecr_idx in range(self.Nuhecrs)
         )
         self.thetaPs = self.f_theta(self.kappa_gmfs)  # for plotting purposes
 
     def _get_kappa_gmf(self: Self, uhecr_idx: int) -> float:
         """
         Get kappa_GMF for a given UHECR index.
-        
+
         Parameters
         ----------
         uhecr_idx : int
@@ -448,8 +451,8 @@ class GMFBackPropagation:
                 self.defl_sampled_uvs,
                 self.defl_mean_uvs,
                 self.time_delays,
-                self.deltaAng,
-                self.kappa_d,
+                self.data.detector.coord_uncertainty,
+                self.data.detector.kappa_d,
             ),
             open(outfile, "wb"),
             protocol=-1,

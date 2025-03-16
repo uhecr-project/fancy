@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List, Tuple
+from typing import List, Tuple, Union
 from scipy import stats, optimize
 
 import os, h5py
@@ -19,10 +19,9 @@ class EnergyLoss(ABC):
         """
         Abstract base class for energy loss calculations.
         """
-        self.lnA_params = data.detector.lnA_params
+        self.data = data
         self.detector_type = data.detector.label
-        self.hadr_model = data.detector.hadr_model
-        self.Eth = data.detector.Eth
+        self.mass_model = data.detector.mass_model
         self.verbose = verbose
 
     @abstractmethod
@@ -32,9 +31,9 @@ class EnergyLoss(ABC):
         alpha_min : float=-3,
         alpha_max : float=10,
         Nalphas : int=50,
-        Eemin : float = 1,
-        Eemax : float = 400,
-        NEes : int = 200
+        Eearth_min : Union[float, None] = None,
+        Eearth_max : float = 400,
+        NEearths : int = 200
     ) -> None:
         """
         Initalise our grid using composition weights.
@@ -49,11 +48,11 @@ class EnergyLoss(ABC):
             the maximum source spectral index for the grid
         Nalphas : int, default=50
             number of elements for the source spectral index grid
-        Eemin : float, default=1
+        Eearth_min : float, default=1
             the minimum energy at Earth for the grid
-        Eemax : float, default=10
+        Eearth_max : float, default=10
             the maximum energy at Earth for the grid
-        NEes : int, default=50
+        NEearths : int, default=50
             number of elements for the energy at Earth grid
         """
         # set grid for spectral index
@@ -79,43 +78,32 @@ class EnergyLoss(ABC):
         self.NAearths = len(massids)
 
         # generate energy grid for Earth
-        self.Ee_grid = np.logspace(
-            np.log10(Eemin),
-            np.log10(Eemax),
-            NEes
+        # lower limit should be at energy threshold 
+        # this is to preserve the normalisaation 
+        # of event samples that we use
+        # Eearth_min = self.data.detector.Eth if Eearth_min is None else Eearth_min
+        Eearth_min = 1
+        Eearth_grid = np.logspace(
+            np.log10(Eearth_min),
+            np.log10(Eearth_max),
+            NEearths + 1
         ) * u.EeV
-
-        # the mean and sigma of the lnA read from the data.detector.lnA object
-        mu_sigma_lnAs = self.lnA_params[:,0,np.newaxis] * np.log10(self.Ee_grid.value)[np.newaxis,:] + self.lnA_params[:,1,np.newaxis]
-
-        # for each energy bin, we take some number of samples and take the mean value as the lnA
-        self.lnA_grid = np.zeros_like(self.Ee_grid.value)
-        Nsamples = 1000
-
-        for ie in range(len(self.Ee_grid)):
-            mu_lnA, sigma_lnA = mu_sigma_lnAs[:,ie]
-            lnA_samples = stats.norm.rvs(loc=mu_lnA, scale=sigma_lnA, size=Nsamples)  
-            self.lnA_grid[ie] = np.mean(lnA_samples)
-
-        self.rigidities_grid = (self.Ee_grid.value  / (0.5 * np.exp(self.lnA_grid))) * u.EV # in EV
-        self.Rmax = np.min(self.rigidities_grid)
-        self.Rmin = np.max(self.rigidities_grid)
+        self.Eearth_grid = np.sqrt(Eearth_grid[1:] * Eearth_grid[:-1]) # bin centers
+        self.dEearth_grid = np.diff(Eearth_grid)  # bin widths
 
         self.Ndistances = len(self.distances)
-        self.NRs = len(self.rigidities_grid)
+        self.NEearths = len(self.Eearth_grid)
 
-        self.Eexs = np.zeros((self.Ndistances, self.Nalphas)) * u.EeV
+    # @abstractmethod
+    # def compute_Eexs(self):
+    #     """Compute expected energies for all distance and energies"""
+    #     pass
 
-    @abstractmethod
-    def compute_Eexs(self):
-        """Compute expected energies for all distance and energies"""
-        pass
+    # @abstractmethod
+    # def p_gt_Rth(self, delta):
+    #     """
+    #     Probability that rigidity is anove threshold. For MG1, this is the arrival energy
 
-    @abstractmethod
-    def p_gt_Rth(self, delta):
-        """
-        Probability that rigidity is anove threshold. For MG1, this is the arrival energy
-
-        :param delta: Uncertainty in energy reconstruction (%)
-        """
-        pass
+    #     :param delta: Uncertainty in energy reconstruction (%)
+    #     """
+    #     pass

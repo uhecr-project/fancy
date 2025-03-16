@@ -6,7 +6,7 @@ import numpy as np
 from astropy import units as u
 from astropy.coordinates import EarthLocation, SkyCoord
 from matplotlib import pyplot as plt
-from scipy import integrate
+from scipy import integrate, stats
 from typing_extensions import Self
 
 from fancy.detector.exposure import m_dec, m_integrand
@@ -18,11 +18,14 @@ __all__ = ["Detector"]
 class Detector:
     """UHECR observatory information and instrument response."""
 
-    __detector_labels : typing.ClassVar[tuple] = (
-        "TA2015", "auger2022", "auger2014", "auger2010"
+    __detector_labels: typing.ClassVar[tuple] = (
+        "TA2015",
+        "auger2022",
+        "auger2014",
+        "auger2010",
     )
 
-    __hadr_models: typing.ClassVar[dict] = {
+    __mass_models: typing.ClassVar[dict] = {
         "EPOS-LHC": 0,
         "SIBYLL2.3": 1,
     }
@@ -44,7 +47,7 @@ class Detector:
 
     __view_options: typing.ClassVar[list] = ["map", "decplot"]
 
-    def __init__(self: Self, label : str) -> None:
+    def __init__(self: Self, label: str) -> None:
         """
         UHECR observatory information and instrument response.
 
@@ -71,9 +74,11 @@ class Detector:
         self.coord_uncertainty = np.sqrt(7552.0 / self.kappa_d)
 
         self.energy_uncertainty = self.properties["f_E"]
-        self.Eth = self.properties["Eth"]
-        self.hadr_model = None  # default hadronic interaction model
+        self.Eth = float(self.properties["Eth"])
+        self.mass_model = None  # default model to describe mass composition
         self.lnA_params = None  # parameters for lnA fit
+        self.Rth = None         # rigidity threshold value computed from mean lnA threshold
+        self.lnA_th = None      # lnA threshold
 
         # timing information
         self.start_year = self.properties["start_year"]
@@ -91,8 +96,7 @@ class Detector:
         self.exposure_factor = None
         self.limiting_dec = None
 
-
-    def __get_detector_properties(self : Self, label : str) -> dict:
+    def __get_detector_properties(self: Self, label: str) -> dict:
         """
         Import the detector properties from the appropriate label.
 
@@ -116,13 +120,10 @@ class Detector:
             from fancy.detector.auger2014 import detector_properties
         elif label == "auger2010":
             from fancy.detector.auger2010 import detector_properties
-        
-        return detector_properties
-        
 
-    def get_exposure_properties(
-        self: Self, num_points: int = 500
-    ) -> None:
+        return detector_properties
+
+    def get_exposure_properties(self: Self, num_points: int = 500) -> None:
         """
         Calculate the exposure for a given detector location.
 
@@ -144,7 +145,6 @@ class Detector:
 
         # in radians
         self.threshold_zenith_angle = self.properties["theta_m"] * u.rad
-        print( self.threshold_zenith_angle)
 
         self.area = self.properties["A"]  # km^2
         self.alpha_T = self.properties["alpha_T"]  # km^2 sr yr
@@ -180,21 +180,94 @@ class Detector:
         self.limiting_dec = (self.declination[m == 0])[declim_index] * u.rad
 
     def set_lnA_params(
-        self: Self, meanlnA_file: str, hadr_model: str = "EPOS-LHC"
+        self: Self, meanlnA_file: str, mass_model: str = "EPOS-LHC"
     ) -> None:
         """Set the fit parameters that fit mean lnA with logE."""
-        self.hadr_model = hadr_model  # set this as the object
+        self.mass_model = mass_model  # set this as the object
         self.lnA_params = np.zeros((2, 2))  # ((mean/sigma), (slope & intercept))
 
         self.lnA_params[0, :] = np.genfromtxt(meanlnA_file, usecols=(1, 2))[
-            self.__hadr_models[hadr_model], :
+            self.__mass_models[mass_model], :
         ]
         self.lnA_params[1, :] = np.array(
             [0, 0.5]
         )  # set it constant for now. TODO: We can also optionally read them from the resutls
 
+        # we want to translate the threshold energy to threshold rigidity
+        # then we can exploit rigidity conservation to use that threshold rigidity
+        # for the source.
+        # we use the mean lnA from the energy threshold as the threshold mass
+        self.lnA_th = (
+            self.lnA_params[0, 0] * np.log10(self.Eth)
+            + self.lnA_params[0, 1]
+        )  
+        self.Rth = (self.Eth / (0.5 * np.exp(self.lnA_th)))
 
-    def save(self : Self, file_handle : h5py.File) -> None:
+        # print(f"Rigidity threshold [EV]: {self.Rth:.2f}")
+        # print(f"lnA threshold: {self.lnA_th:.2f}")
+
+    def sample_lnAs(
+        self: Self,
+        energy: float,
+        Nsamples: int = 1000,
+        lnA_min: float = 0,
+        lnA_max: float = np.log(56),
+    ) -> np.ndarray:
+        """
+        Sample the composition based on the lnA parameters.
+
+        Parameters
+        ----------
+        energy : float
+            the energy of the UHECR in EeV
+        Nsamples : int, default=1000
+            the number of samples to sample for
+        lnA_min : float, default=0
+            the minimum value for lnA sampling
+        lnA_max : float, default = log(56)
+            maximum value for lnA sampling.
+            Defaults to value for iron
+        """
+        # calculate mean and sigma lnA
+        mu_lnA, sigma_lnA = (
+            self.lnA_params[:, 0] * np.log10(energy)
+            + self.lnA_params[:, 1]
+        )
+
+        # if mass groups, then use a uniform distribution
+        if self.mass_model.find("MG") != -1:
+            pass
+        # if its hadronic interaction model, then use truncated normal
+        elif self.mass_model in set(["EPOS-LHC", "SIBYLL2.3"]):
+            a_lnA, b_lnA = (
+                (lnA_min - mu_lnA) / sigma_lnA,
+                (lnA_max - mu_lnA) / sigma_lnA,
+            )
+
+            lnA_samples = stats.truncnorm.rvs(a=a_lnA, b=b_lnA, loc=mu_lnA, scale=sigma_lnA, size=Nsamples)
+
+        return lnA_samples
+    
+    def get_p_Edet(self : Self, energies : np.ndarray) -> np.ndarray:
+        """
+        Compute the CCDF (complementary cumulative distribution function) for the energy detection threshold.
+
+        This function takes care of downscattering of events that are below Eth 
+        and for upscattering of events that are above Eth.
+        """
+        return 1 - np.array(
+            [
+                stats.norm.cdf(
+                    self.Eth,
+                    loc=E,
+                    scale=self.energy_uncertainty * E,
+                )
+                for E in energies
+            ]
+        )
+
+
+    def save(self: Self, file_handle: h5py.File) -> None:
         """
         Save to the passed H5py file handle.
 
@@ -209,10 +282,9 @@ class Detector:
                 continue
             file_handle.create_dataset(key, data=value)
 
-
     def plot_skymap(
-        self : Self,
-        view : str="map",
+        self: Self,
+        view: str = "map",
         coord: str = "gal",
         save: bool = False,
         file_path: typing.Union[str, None] = None,
@@ -294,7 +366,9 @@ class Detector:
         if save:
             fig.savefig(file_path, dpi=1000, bbox_inches="tight", pad_inches=0.5)
 
-    def __generate_exposure_colorbar(self : Self, cm : matplotlib.colors.Colormap) -> None:
+    def __generate_exposure_colorbar(
+        self: Self, cm: matplotlib.colors.Colormap
+    ) -> None:
         """
         Plot a colorbar for the exposure map.
 
@@ -320,7 +394,7 @@ class Detector:
         bar.ax.get_children()[1].set_linewidth(0)
         bar.set_label("Relative exposure")
 
-    def draw_exposure_lim(self : Self, skymap: AllSkyMap, coord: str = "gal") -> None:
+    def draw_exposure_lim(self: Self, skymap: AllSkyMap, coord: str = "gal") -> None:
         """
         Draw a line marking the edge of the detector's exposure.
 

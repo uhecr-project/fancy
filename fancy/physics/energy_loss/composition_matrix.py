@@ -366,8 +366,9 @@ class CompositionMatrixContainer:
             exclusion of other arrival masses, as this contribution is
             much stronger than the inclusion of the particular arrival mass.
             Default is 0.001, which is determined after playing around.
-        n_cores : int, defualt = os.cpu_count()
-            Number of cores used for parallelisation.
+        n_cores : int, defualt = 4
+            Number of cores used for parallelisation over distances.
+            Note: each calculation takes ~ 10 GB of RAM per distance.
         """
         # prepare arguments to input in the parallelisation
         opt_args = [
