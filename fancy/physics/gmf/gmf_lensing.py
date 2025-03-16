@@ -1,10 +1,11 @@
-"""Class that handles forward simulations of GMF deflections (lensing / weighted vMF maps)"""
+"""Class that handles forward simulations of GMF deflections (lensing / weighted vMF maps)."""
 
-import pickle as pickle
+import typing
 
 import astropy.units as u
 import numpy as np
 from astropy.coordinates import SkyCoord
+from typing_extensions import Self
 
 from fancy.utils.package_data import (
     get_path_to_lens,
@@ -12,20 +13,26 @@ from fancy.utils.package_data import (
 
 try:
     import crpropa
-except:
+except ImportError:
     crpropa = None
 
-import healpy
 
 class GMFLensing:
     """Class that handles forward simulations of GMF deflections (lensing / weighted vMF maps)."""
 
-    __lens_names = {"JF12": "JF12full_Gamale", "UF23":"UF23_all", "UF23Turb" : "UF23Turb_all"}  # noqa: RUF012
+    __lens_names: typing.ClassVar[dict] = {
+        "JF12": "JF12full_Gamale",
+        "UF23": "UF23_all",
+        "UF23Turb": "UF23Turb_all",
+    }
+    __npix: int = 49152  # pixelisation of order 6
 
-    def __init__(self, gmf_model: str = "JF12") -> None:
+    def __init__(self: Self, gmf_model: str = "JF12") -> None:
         """
         Class that handles forward simulations of GMF deflections (lensing / weighted vMF maps).
 
+        Parameters
+        ----------
         gmf_model: str, default JF12
             The desired GMF model for GMF lensing
         """
@@ -46,14 +53,23 @@ class GMFLensing:
                 f"Lensing for GMF model {gmf_model} not yet implemented."
             )
 
-    def apply_lens_with_particles(self, rigidities : np.ndarray, coordinates: SkyCoord) -> SkyCoord:
+    def apply_lens_with_particles(
+        self: Self, rigidities: np.ndarray, coordinates: SkyCoord
+    ) -> SkyCoord:
         """
         Apply GMF lensing by sampling & re-sampling. Returns same number of sampled events at earth as SkyCoord objects.
 
+        Parameters
+        ----------
         rigidities: np.ndarray
             rigidities from particle samples in EV
         coordinates: astropy.coordinates.SkyCoord
-            arrival directions of samples in SkyCoord
+            arrival directions of samples at the Galacitc boundary in SkyCoord
+
+        Returns
+        -------
+        astropy.coordinates.SkyCoord
+            arrival directions of samples at Earth in Galactic coordinates
         """
         # now GMF lensing
         particle_map = crpropa.ParticleMapsContainer()
@@ -83,43 +99,48 @@ class GMFLensing:
             representation_type="unitspherical",
         )
 
-    def apply_lens_to_map(self, weighted_map, R: float):
+    def apply_lens_to_map(self: Self, weighted_map: np.ndarray, R: float) -> np.ndarray:
         """
-        Apply GMF lensing from weighted healpy map
+        Apply GMF lensing from weighted healpy map.
 
-         weighted_map: 
-            map of normalised counts that represent an event distribution at each coordinate. **must be of Pixelisation order 6 (NPIX = 49152) following CRPropa conventions**
-         R: float
+        Parameters
+        ----------
+        weighted_map: healpix array
+            map of normalised counts that represent an event distribution at each coordinate.
+            Must be of Pixelisation order 6 (NPIX = 49152) following CRPropa conventions.
+        R: float
             rigidity in EV
-        """
 
+        Returns
+        -------
+        the lensed weighted map at Earth in np.ndarray
+        """
         # make sure dimensionality is of order 6
-        if len(weighted_map) != 49152:
+        if len(weighted_map) != self.__npix:
             raise ValueError(
                 "Dimension of weighted map must be of order 6 (NPIX = 49152)!"
             )
 
         # also make sure weighted map is normalised
-        assert (
-            np.sum(weighted_map) < 1.01 and np.sum(weighted_map) > 0.99
-        ), f"sum of unlensed weights = {np.sum(weighted_map)} != 1"
+        assert np.sum(weighted_map) < 1.01 and np.sum(weighted_map) > 0.99, (
+            f"sum of unlensed weights = {np.sum(weighted_map)} != 1"
+        )
 
         # create maps container and add weights to it
         particles = crpropa.ParticleMapsContainer()
-        particles.addWeights(R * crpropa.EeV, weighted_map)
+        particles.addWeights(np.float32(R) * crpropa.EeV, weighted_map)
 
         # apply lensing
         if not self.disable_gmf:
-            particles.applyLens(R * crpropa.EeV, self.gmf_lens)
+            particles.applyLens(np.float32(R) * crpropa.EeV, self.gmf_lens)
 
         # obtain the lensed weights
         lensed_weighted_map = particles.getWeights(
-            crpropa.nucleusId(1, 1), R * crpropa.EeV
+            crpropa.nucleusId(1, 1), np.float32(R) * crpropa.EeV
         )
-        if np.any(np.isnan(lensed_weighted_map)):
-            print(R, weighted_map[weighted_map > 0])
-            print(len(np.isnan(lensed_weighted_map) == True))
-            raise ValueError("NaN values in lensed weighted map!")
+
+        # force nan values to be minimum value of probability
+        lensed_weighted_map[np.isnan(lensed_weighted_map)] = 1 / self.__npix
 
         assert (
             np.sum(lensed_weighted_map) < 1.01 and np.sum(lensed_weighted_map) > 0.99

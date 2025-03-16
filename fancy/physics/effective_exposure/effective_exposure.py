@@ -1,28 +1,29 @@
 """Class that calculates effective exposure."""
 
-import os
-import pickle
+from typing import Union
 
 import astropy.units as u
 import h5py
 import healpy
 import numpy as np
 from astropy.coordinates import SkyCoord
-from scipy.interpolate import CubicSpline
-from scipy.stats import norm
-from tqdm import tqdm
+from joblib import Parallel, delayed
 from typing_extensions import Self
 
 from fancy import Data
 from fancy.detector.exposure import m_dec
 from fancy.physics.gmf import GMFLensing
-from fancy.utils.package_data import get_path_to_kappa_theta
+from fancy.utils.package_data import (
+    get_path_to_energy_loss_tables,
+)
 
 
 class EffectiveExposure:
     """Class to manage calculation of the effective exposure from given source(s), and constructs tables that will be passed to stan for interpolation."""
 
-    def __init__(self : Self, data: Data, gmf_model: str = "None", verbose : bool=False) -> None:
+    def __init__(
+        self: Self, data: Data, gmf_model: str = "None", verbose: bool = False
+    ) -> None:
         """
         Class to manage calculation of the effective exposure from given source(s).
 
@@ -36,51 +37,65 @@ class EffectiveExposure:
             to print out additional statements for debugging or not.
         """
         self.data = data
-        self.gmf_model = gmf_model
         self.verbose = verbose
 
-        # detector properties
-        self.mass_group = data.detector.mass_group
-        self.detector_type = data.detector.label
-
+        # label properties
         self.source_type = data.source.label
-        self.Dsrcs = data.source.distance * u.Mpc
-        self.coords_src = data.source.coord  # this returns galactic coordinates
-        src_names = data.source.name
-        self.Nsrcs = len(self.Dsrcs)
+        self.detector_type = data.detector.label
+        self.mass_model = data.detector.mass_model
+        self.gmf_model = gmf_model
+
+        # parameters otherwised used here
+        self.Bigmf_grid = None
+        self.rigidity_grid = None
+        self.alpha_grid = None
+        self.NBigmfs = None
+        self.NRs = None
+        self.Nsrcs = len(self.data.source.distance)
+        self.gmf_lens = GMFLensing(gmf_model=gmf_model)
+
+        self.delta_ang = None
+        self.coords_healpy = None
+
+        # exposure parameters
+        self.source_exposure = None
+        self.background_exposure = None
+        # integrated source / BG exposure
+        self.int_source_exposure = None
+        self.int_background_exposure = None
+
+        # self.Dsrcs = data.source.distance * u.Mpc
+        # self.coords_src = data.source.coord  # this returns galactic coordinates
+        # src_names = data.source.name
 
         print(
-            f"Configuration: {self.source_type}, {self.detector_type}, {self.mass_group}"
+            f"Configuration: {self.source_type}, {self.detector_type}, {self.mass_model}, {self.gmf_model}"
         )
 
         if verbose:
-            print(f"Sources: {src_names}")
-            print(f"Distances: {self.Dsrcs}")
-            print(f"Coordinates: {self.coords_src}")
+            print(f"Sources: {data.source.name}")
+            print(f"Distances: {data.source.distance * u.Mpc}")
+            print(f"Coordinates: {data.source.coord}")
 
     def initialise_grids(
         self: Self,
-        energy_loss_table_file: str,
+        energy_loss_table: str = "energy_tables.h5",
         Bigmf_min: float = 0.001,
-        Bigmf_max: float = 10,
+        Bigmf_max: float = 1,
         NBigmfs: int = 50,
+        R_min: Union[float, None] = None,
+        R_max: float = 1e3,
+        NRs: int = 50,
         Npixels: int = 49152,
-        kappa_theta_filename: str = "kappa_theta_map.pkl",
     ) -> None:
         """
         Initialise grids used for effective exposure calculation.
 
-        The grids used are based on the energy loss tables that are generated from running
-        the ProtonEnergyLoss or NucleiEnergyLoss model. Please ensure that the energy loss
-        tables are generated for the particular configuration considered.
-
         Parameter:
         ----------
-        energy_loss_table_file : str
-            path to the table for energy losses.
         Bigmf_min : float, default=0.001
             the minimum value of the IGMF strength used when generating the grid (in log space)
-        Bigmf_max : float, default=10
+        Bigmf_max : float, default=1 nG
             same as Bigmf_min, but maximum value instead
         NBigmfs : int, default=50
             the number of points in the Bigmf grid
@@ -89,9 +104,6 @@ class EffectiveExposure:
             Default is 49152, which is the default value used when generating the
             lens in CRPropa.
             DO NOT CHANGE UNLESS CRPROPA DOES SO!
-        kappa_theta_filename : str, default=kappa_theta_map.pkl
-            the path to the mapping from kappa <-> theta in the vMF distribution.
-            The default name uses the file that exists in `fancy/utils/resources`
         """
         # generate logarithmically spaced magnetic field grid
         self.Bigmf_grid = (
@@ -99,8 +111,12 @@ class EffectiveExposure:
         )
         self.NBigmfs = NBigmfs
 
+        # similarly generate a rigidity grid
+        R_min = self.data.detector.Rth if R_min is None else R_min
+        self.rigidity_grid = np.logspace(np.log10(R_min), np.log10(R_max), NRs) * u.EV
+        self.NRs = NRs
+
         # initialise healpy grid for exposure calculation
-        Npixels = 49152  # set from CRPropa, pixelisation of order 6
         Nside = healpy.npix2nside(Npixels)
         self.delta_ang = (4 * np.pi) / Npixels  # uniform grid spacing
         if self.verbose:
@@ -113,61 +129,25 @@ class EffectiveExposure:
             uvs_healpy, frame="galactic", representation_type="cartesian"
         )
 
-        # create grid of rigidities to compute effective exposure
-        self.rigidities_grid = (
-            np.logspace(
-                np.log10(self.data.detector.Rth),
-                np.log10(self.data.detector.Rth_max),
-                50,
-            )
-            * u.EV
+        # compute the exposure here
+        self.exposures = self.__compute_exposure()
+
+        # now load the rest of the grid properties via the energy loss table
+        self.__load_energy_loss_table(energy_loss_table)
+
+        # finally compute the background energy spectrum from this
+        self.Eearth_background_spectrum = np.zeros((self.Nalphas, self.NEearths)) * (
+            1 / u.EeV
         )
-        self.NRs = len(self.rigidities_grid)
-
-        # read out relevant parameters from energy loss tables
-        if not os.path.exists(energy_loss_table_file):
-            raise FileNotFoundError(
-                "Energy loss tables have not been generated. Construct them first!"
+        for ialpha, alpha in enumerate(self.alpha_grid):
+            self.Eearth_background_spectrum[ialpha, :] = bounded_power_law(
+                self.Eearth_grid,
+                alpha,
+                np.min(self.Eearth_grid),
+                np.max(self.Eearth_grid),
             )
 
-        with h5py.File(energy_loss_table_file, "r") as f:
-            # find the relevant group
-            config_label = f"{self.detector_type}_mg{self.mass_group}"
-            self.alpha_grid = f[config_label]["alpha_grid"][()]
-            self.distances_grid = f[config_label]["distances_grid"][()] * u.Mpc
-
-            self.Nalphas = len(self.alpha_grid)
-            self.Ndistances = len(self.distances_grid)
-
-            if self.mass_group != 1:
-                log10_arrspect_grid = f[config_label]["log10_arrspect_grid"][()]
-                log10_Rgrid = f[config_label]["log10_rigidities"][()]
-
-                # get the arrival spectrum values for the values of the rigidity
-                # grid defined using look-up tables
-                # interpolation doesnt work for faraway sources due to sharp gradients
-                Rs_idces = [
-                    np.digitize(r.value, 10**log10_Rgrid, right=True)
-                    for r in self.rigidities_grid
-                ]
-
-                self.arrspects_grid = np.zeros(
-                    (self.Ndistances, self.NRs, self.Nalphas)
-                ) * (1 / u.EV)
-                for ir, r_idx in enumerate(Rs_idces):
-                    self.arrspects_grid[:, ir, :] = (
-                        10 ** log10_arrspect_grid[:, r_idx, :]
-                    ) * (1 / u.EV)
-            else:
-                # parametrize expected energies as rigidities
-                self.Eexs_grid = 10 ** f[config_label]["log10_Eexs_grid"][()] * u.EV
-                self.Rth_srcs = f[config_label]["Rth_src_grid"][()] * u.EV
-
-        # read in the theta <-> kappa interpolated file
-        kappa_theta_file = str(get_path_to_kappa_theta(kappa_theta_filename))
-        (_, _, self.f_log10_kappa) = pickle.load(open(kappa_theta_file, "rb"))
-
-    def _compute_exposure(self: Self) -> None:
+    def __compute_exposure(self: Self) -> np.ndarray:
         """Compute the exposure as a function of declination in healpy."""
         # first transform coordianates to declination
         self.coords_healpy.representation_type = "unitspherical"
@@ -176,188 +156,284 @@ class EffectiveExposure:
 
         # compute exposure, which is function of declination only
         p = self.data.detector.params
-        self.exposures = p[3] / p[4] * m_dec(decs_healpy_grid, p) * (u.km**2 * u.yr)
+        exposures = p[3] / p[4] * m_dec(decs_healpy_grid, p) * (u.km**2 * u.yr)
 
         # transform the coordinates back to galactic
         self.coords_healpy.transform_to("galactic")
 
-    def compute_effective_exposure(
-        self: Self,
-        gmflens: GMFLensing,
-        kappa_max: float = 1e6,
-        exposure_min: float = 1e-30,
+        return exposures
+
+    def __load_energy_loss_table(
+        self: Self, energy_loss_table: str = "energy_tables.h5"
     ) -> None:
         """
-        Compute the effective exposure.
+        Load the energy loss table that is stored in h5 format.
+
+        Parameters
+        ----------
+        energy_loss_table : str, default=energy_tables.h5
+            the name of the file in which the energy tables are stored.
+            Full path is taken from fancy.utils.get_path_to_energy_loss()
+        """
+        with h5py.File(
+            str(get_path_to_energy_loss_tables(energy_loss_table)), "a"
+        ) as f:
+            config_label = f"{self.detector_type}_{self.mass_model}"
+
+            self.alpha_grid = f[config_label]["alpha_grid"][()]
+            self.Eearth_grid = 10 ** f[config_label]["log10_Eearth_grid"][()] * u.EeV
+            Eearth_spectrum = 10 ** f[config_label]["log10_Eearth_spectrum"][()] * (
+                1 / u.EeV
+            )
+            self.As = f[config_label]["As"][()]
+
+            # filter out spectrum values that only match within the number of sources
+            # in consideration
+            dis_indices = np.digitize(
+                self.data.source.distance, f[config_label]["distances_grid"][()]
+            )
+            self.Eearth_spectrum = np.take(Eearth_spectrum, indices=dis_indices, axis=0)
+
+        self.NEearths = len(self.Eearth_grid)
+        self.Nalphas = len(self.alpha_grid)
+
+    def compute_source_exposure(
+        self: Self,
+        kappa_max: float = 1e6,
+        exposure_min: float = 1e-30,
+        Nsamples: int = 1000,
+        n_jobs: int = 4,
+    ) -> None:
+        """
+        Compute the effective exposure from the source.
+
+        TODO: reformat this function such that we can easily access the intermediate functions
+        for plotting purposes?
 
         Parameter:
         ----------
-        gmflens: fancy.physics.gmf.gmflens.GMFLensing
-            Container for the GMF lens that will map the lens back to Earth
         kappa_max : float, default=1e6
             maximum threshold value for kappa computation
         exposure_min: float, default=1e-30
             minimum threshold value for exposure in km^2 yr
+        Nsamples : int, default=1000
+            the number of samples used for sampling lnA
+        n_jobs : int, default=4
+            the number of jobs to parallelise over for each source.
+            ignored if only one source.
         """
-        # calculate effective exposure
-        self.eff_exposure_grid = np.zeros((self.Nsrcs + 1, self.NRs, self.NBigmfs)) * (
-            u.km**2 * u.yr
-        )
+        # prepare arguments
+        exp_args = [
+            (
+                dis_idx,
+                self.data.source.distance[dis_idx],
+                self.data.source.unit_vector[dis_idx],
+                self.Eearth_spectrum[dis_idx, ...],
+                kappa_max,
+                exposure_min,
+                Nsamples,
+            )
+            for dis_idx in range(self.Nsrcs)
+        ]
 
-        # first compute exposure
-        self._compute_exposure()
-
-        for id in range(self.Nsrcs + 1):
-            if id < self.Nsrcs:  # sources
-                Dsrc = self.Dsrcs[id]
-                src_uv = self.coords_src[id].cartesian.xyz.value
-                print(f"Dsrc = {Dsrc:.2f}")
-            elif id == self.Nsrcs:  # background
-                src_uv = np.array([1, 0, 0])  # some random unit vector
-
-            for ir in tqdm(
-                range(self.NRs),
-                desc="Computing effective exposure grid over rigidities: ",
-                total=self.NRs,
-            ):
-                R = self.rigidities_grid[ir]
-
-                # if source model, then iterate for each magnetic field and compute individual kappas
-                if id < self.Nsrcs:   
-                    for ib, Bigmf in enumerate(self.Bigmf_grid):
-                        # kigmf = 10 ** self.f_log10_kappa(
-                        #     theta_igmf(R, Bigmf, Dsrc).to_value(u.deg)
-                        # )
-                        kigmf = 7552 * (theta_igmf(R, Bigmf, Dsrc) / (1 * u.deg)).value**-2
-                        kigmf = min(kigmf, kappa_max)
-
-                        self.coords_healpy.representation_type = "cartesian"
-                        weighted_map = (
-                            self.vMF(
-                                self.coords_healpy.cartesian.xyz.value, src_uv, kigmf
-                            )
-                            * self.delta_ang
-                        )
-                        weighted_map /= np.sum(
-                            weighted_map
-                        )  # some numerical error in normalisation, so we force normalisation here
-
-                        # lens the map only if we want to include GMF
-                        if self.gmf_model != "None":
-                            lensed_map = gmflens.apply_lens_to_map(
-                                weighted_map, R.to_value(u.EV)
-                            )
-                            # compute effective exposure
-                            eff_exp = np.dot(self.exposures, lensed_map)
-                        else:
-                            eff_exp = np.dot(self.exposures, weighted_map)
-
-                        # set some limit incase the effective exposure is so small
-                        eff_exp = max(eff_exp, exposure_min * u.km**2 * u.yr)
-                        self.eff_exposure_grid[id, ir, ib] = eff_exp
-
-                # background model, we do the same but without Bigmf since we dont have a kappa
-                # i.e. we fix kappa = 0
-                else:
-                    self.coords_healpy.representation_type = "cartesian"
-                    weighted_map = (
-                        self.vMF(self.coords_healpy.cartesian.xyz.value, src_uv, 0.0)
-                        * self.delta_ang
-                    )
-                    weighted_map /= np.sum(
-                        weighted_map
-                    )  # some numerical error in normalisation, so we force normalisation here
-
-                    # lens the map only if we want to include GMF
-                    if self.gmf_model != "None":
-                        lensed_map = gmflens.apply_lens_to_map(
-                            weighted_map, R.to_value(u.EV)
-                        )
-                        # compute effective exposure
-                        eff_exp = np.dot(self.exposures, lensed_map)
-                    else:
-                        eff_exp = np.dot(self.exposures, weighted_map)
-
-                    # compute effective exposure
-                    self.eff_exposure_grid[id, ir, :] = eff_exp
-
-    def get_weighted_exposure(self: Self) -> None:
-        """Apply weights to the effective exposure to get the weighted exposure."""
-        self.wexp_src_grid = np.zeros((self.Nsrcs, self.Nalphas, self.NBigmfs)) * (
-            u.km**2 * u.yr
-        )
-        self.wexp_bg_grid = np.zeros(self.Nalphas) * (u.km**2 * u.yr)
-
-        if self.mass_group != 1:
-            # compute the detection threshold CCDF to take into account downscattering of events
-            p_rdet = 1 - np.array(
-                [
-                    norm.cdf(
-                        self.data.detector.Rth,
-                        loc=R.value,
-                        scale=self.data.detector.rigidity_uncertainty * R.value,
-                    )
-                    for R in self.rigidities_grid
-                ]
+        # only run paralllelisation if more than one source
+        if self.Nsrcs == 1:
+            src_exp_results = [self.compute_single_source_exposure(exp_args[0])]
+        else:
+            src_exp_results = Parallel(n_jobs=n_jobs)(
+                delayed(self.compute_single_source_exposure)(arg) for arg in exp_args
             )
 
-        for ia in range(self.Nalphas):
-            alpha = self.alpha_grid[ia]
+        self.source_exposure = (
+            np.zeros((self.Nsrcs, self.NEearths, self.NBigmfs)) * u.km**2 * u.yr
+        )
+        self.int_source_exposure = (
+            np.zeros((self.Nsrcs, self.Nalphas, self.NBigmfs)) * u.km**2 * u.yr
+        )
 
-            # source case
-            for id in range(self.Nsrcs):
-                d_idx = np.digitize(
-                    self.Dsrcs[id], self.distances_grid, right=True
-                )  # get index from distance grid in prince calculation
+        for dis_idx, src_exp, int_src_exp in src_exp_results:
+            self.source_exposure[dis_idx, ...] = src_exp
+            self.int_source_exposure[dis_idx, ...] = int_src_exp
 
-                for ib in range(self.NBigmfs):
-                    if self.mass_group != 1:
-                        # integrate over all rigidities including detection effects
-                        # TODO: update this function to np.trapezoid for numpy >=2.0
-                        self.wexp_src_grid[id, ia, ib] = np.trapz(
-                            y=self.arrspects_grid[d_idx, :, ia]
-                            * self.eff_exposure_grid[id, :, ib]
-                            * p_rdet,
-                            x=self.rigidities_grid,
+    def compute_single_source_exposure(self: Self, args: tuple) -> np.ndarray:
+        """
+        Compute the exposure for a single source.
+
+        Wrapper function for parallelising over distance.
+
+        Paramters
+        ---------
+        args : tuple
+
+        """
+        dis_idx, dsrc, src_uv, earth_spect, kappa_max, exposure_min, Nsamples = args
+
+        src_exposure = np.zeros((self.NEearths, self.NBigmfs)) * u.km**2 * u.yr
+        int_src_exposure = np.zeros((self.Nalphas, self.NBigmfs)) * u.km**2 * u.yr
+
+        for ib in range(self.NBigmfs):
+            Bigmf = self.Bigmf_grid[ib]
+
+            eff_exps_per_R = np.zeros(self.NRs) * u.km**2 * u.yr
+
+            for ir in range(self.NRs):
+                kigmf = (
+                    7552
+                    * (
+                        theta_igmf(
+                            self.rigidity_grid[ir],
+                            Bigmf,
+                            dsrc,
                         )
-                    else:
-                        # compute expected energy and find index in rigidity grid
-                        # corresponding to it (we parametrize energy as rigidity for MG1)
-                        Rex = self.Eexs_grid[d_idx, ia]
-                        Rex_idx = min(np.digitize(
-                            Rex.value, self.rigidities_grid.value, right=False
-                        ), self.NRs-1)
+                        / (1 * u.deg)
+                    ).value
+                    ** -2
+                )
+                kigmf = min(kigmf, kappa_max)
 
-                        # weighting factor calculated by analytical integral of source
-                        # & arrival distribution, see CM19 for details
-                        # TODO: update this for bounded energy spectrum
-                        w_factor = (
-                            self.Rth_srcs[d_idx].value / self.data.detector.Rth
-                        ) ** (1.0 - alpha)
-
-                        self.wexp_src_grid[id, ia, ib] = (
-                            self.eff_exposure_grid[id, Rex_idx, ib] * w_factor
-                        )
-
-            # background case
-            if self.mass_group != 1:
-                # integrate over background spectrum w/ detection effects, which is jsut a power law
-                bg_spectrum = bounded_power_law(
-                    self.rigidities_grid.value,
-                    alpha,
-                    self.data.detector.Rth,
-                    self.data.detector.Rth_max,
-                ) * (1 / u.EV)
-                self.wexp_bg_grid[ia] = np.trapz(
-                    y=bg_spectrum * self.eff_exposure_grid[-1, :, 0] * p_rdet,
-                    x=self.rigidities_grid,
-                    axis=0,
+                # map lensed map
+                _, lensed_map = self.calculate_lensed_map(
+                    src_uv=src_uv,
+                    R=self.rigidity_grid[ir],
+                    kappa_igmf=kigmf,
                 )
 
-            else:  # for MG1 we just use the default exposure since rigidity / energy doesnt play a role here
-                self.wexp_bg_grid[ia] = (
-                    self.data.detector.alpha_T / (4 * np.pi) * (u.km**2 * u.yr)
+                # compute effective exposure
+                eff_exps_per_R[ir] = max(
+                    np.dot(self.exposures, lensed_map),
+                    exposure_min * u.km**2 * u.yr,
                 )
+
+            # now convert effective exposure to energy
+            eff_exps_per_Ee = self._convert_eff_exp_to_energy(
+                eff_exps_per_R, Nsamples=Nsamples
+            )
+
+            src_exposure[:, ib] = eff_exps_per_Ee
+
+            # now integrate over each alphya
+            # factoring into account the earth spectrum
+            for ialpha in range(self.Nalphas):
+                int_src_exposure[ialpha, ib] = np.trapz(
+                    y=earth_spect[:, ialpha]
+                    * eff_exps_per_Ee
+                    * self.data.detector.get_p_Edet(self.Eearth_grid.value),
+                    x=self.Eearth_grid,
+                )
+
+        return (dis_idx, src_exposure, int_src_exposure)
+
+    def compute_background_exposure(self: Self, Nsamples: int = 1000) -> None:
+        """
+        Compute the effective exposure from the background.
+
+        Parameter:
+        ----------
+        Nsamples : int, default=1000
+            the number of samples used for sampling lnA
+        """
+        eff_exps_per_R = np.zeros(self.NRs) * u.km**2 * u.yr
+        for ir in range(self.NRs):
+            # map lensed map
+            _, lensed_map = self.calculate_lensed_map(
+                src_uv=np.array([0, 0, 1]), R=self.rigidity_grid[ir], kappa_igmf=0.0
+            )
+
+            # compute effective exposure
+            eff_exps_per_R[ir] = np.dot(self.exposures, lensed_map)
+
+        # now convert effective exposure to energy
+        self.background_exposure = self._convert_eff_exp_to_energy(
+            eff_exps_per_R, Nsamples=Nsamples
+        )
+
+        self.int_background_exposure = np.zeros(self.Nalphas) * u.km**2 * u.yr
+        # now integrate over each alphya
+        # factoring into account the earth spectrum
+        for ialpha in range(self.Nalphas):
+            self.int_background_exposure[ialpha] = np.trapz(
+                y=self.Eearth_background_spectrum[ialpha, :]
+                * self.background_exposure
+                * self.data.detector.get_p_Edet(self.Eearth_grid.value),
+                x=self.Eearth_grid,
+            )
+
+    def calculate_lensed_map(
+        self: Self, src_uv: np.ndarray, kappa_igmf: float, R: float
+    ) -> np.ndarray:
+        """
+        Calculate the lensed map per source & rigidity.
+
+        Parameters
+        ----------
+        src_uv : np.ndarray
+            unit vector for source coordinate
+        kappa_igmf : float
+            the deflection parameter for vMF
+        R : float
+            the rigidity in EV
+
+        Returns
+        -------
+        the map weighted with a vMF and the map lensed via the GMF (or not if gmf_model = None)
+        """
+        self.coords_healpy.representation_type = "cartesian"
+        weighted_map = (
+            self.vMF(self.coords_healpy.cartesian.xyz.value, src_uv, kappa_igmf)
+            * self.delta_ang
+        )
+        weighted_map /= np.sum(
+            weighted_map
+        )  # some numerical error in normalisation, so we force normalisation here
+
+        # lens the map only if we want to include GMF
+        if self.gmf_model != "None":
+            lensed_map = self.gmf_lens.apply_lens_to_map(weighted_map, R.to_value(u.EV))
+        else:
+            lensed_map = weighted_map
+
+        return weighted_map, lensed_map
+
+    def _convert_eff_exp_to_energy(
+        self: Self, eff_exp_rigidity: np.ndarray, Nsamples: int = 1000
+    ) -> np.ndarray:
+        """
+        Convert the rigidity-based effective exposure to function of energy.
+
+        This is done by adding earth mass information by lnA sampling.
+
+        Parameters
+        ----------
+        eff_exp_rigidity : np.ndarray
+            the effective exposure in km^2 yr as a function of rigidity
+
+        Returns
+        -------
+        same but as a function of energy after convolving with lnA information
+        """
+        eff_exp_energy = np.zeros(self.NEearths) * u.km**2 * u.yr
+
+        for iEe, Eearth in enumerate(self.Eearth_grid):
+            lnA_samples = self.data.detector.sample_lnAs(
+                energy=Eearth.value,
+                Nsamples=Nsamples,
+                lnA_min=1,
+                lnA_max=np.log(self.As).max(),
+            )
+
+            # now iterate over each sample
+            # and histogram the contribution
+            for lnA in lnA_samples:
+                # compute the rigidity for each energy + sampled composition
+                R = (Eearth.value / (0.5 * np.exp(lnA))) * u.EV
+                # find the corresponding bin
+                Rbin_idx = np.digitize(R, self.rigidity_grid, right=True)
+
+                eff_exp_energy[iEe] += eff_exp_rigidity[Rbin_idx]
+
+            eff_exp_energy[iEe] /= Nsamples
+
+        return eff_exp_energy
 
     def save(self: Self, outfile: str):
         """
@@ -368,36 +444,55 @@ class EffectiveExposure:
         outfile : str
             the path to the output file. must be in .h5 format.
         """
-        assert (
-            outfile.find(".h5") > 0
-        ), f"Output file {outfile} needs to have a .h5 extension."
+        assert outfile.find(".h5") > 0, (
+            f"Output file {outfile} needs to have a .h5 extension."
+        )
         with h5py.File(outfile, "a") as f:
-            config_label = f"{self.source_type}_{self.detector_type}_mg{self.mass_group}_{self.gmf_model}"
+            config_label = f"{self.source_type}_{self.detector_type}_{self.mass_model}_{self.gmf_model}"
             if config_label in f.keys():
                 del f[config_label]
             config_gr = f.create_group(config_label)
 
-            config_gr.create_dataset("Dsrcs", data=self.Dsrcs)
+            config_gr.create_dataset("source_distances", data=self.data.source.distance)
+            config_gr.create_dataset("source_uvs", data=self.data.source.unit_vector)
             config_gr.create_dataset("alpha_grid", data=self.alpha_grid)
-            config_gr.create_dataset("rigidities_grid", data=self.rigidities_grid)
+            config_gr.create_dataset(
+                "log10_Eearth_grid", data=np.log10(self.Eearth_grid.value)
+            )
             config_gr.create_dataset(
                 "log10_Bigmf_grid", data=np.log10(self.Bigmf_grid.to_value(u.nG))
             )
-            config_gr.create_dataset("distances_grid", data=self.distances_grid)
-            config_gr.create_dataset("effective_exposure", data=self.eff_exposure_grid)
             config_gr.create_dataset(
-                "log10_wexp_src_grid",
-                data=np.log10(self.wexp_src_grid.to_value(u.km**2 * u.yr)),
+                "log10_source_exposure",
+                data=np.log10(self.source_exposure.to_value(u.km**2 * u.yr)),
             )
             config_gr.create_dataset(
-                "log10_wexp_bg_grid",
-                data=np.log10(self.wexp_bg_grid.to_value(u.km**2 * u.yr)),
+                "log10_background_exposure",
+                data=np.log10(self.background_exposure.to_value(u.km**2 * u.yr)),
+            )
+            config_gr.create_dataset(
+                "log10_integrated_source_exposure",
+                data=np.log10(self.int_source_exposure.to_value(u.km**2 * u.yr)),
+            )
+            config_gr.create_dataset(
+                "log10_integrated_background_exposure",
+                data=np.log10(self.int_background_exposure.to_value(u.km**2 * u.yr)),
             )
 
-    def vMF(self: Self, x: np.array, mu: np.array, kappa: float):
+    def vMF(self: Self, x: np.array, mu: np.array, kappa: float) -> np.ndarray:
         """
-        vMF distribution given mean direction mu, spread parameter kappa
+        Return a vMF distribution.
+
         NB: shape of x must be (N, 3)
+
+        Parameters
+        ----------
+        x: np.array
+            array of cartesian coordinates
+        mu: np.array
+            array of cartesian coordinates for the mean direction
+        kappa: float
+            deflection parameter
         """
         if kappa > 100:
             return np.exp(
@@ -415,14 +510,20 @@ class EffectiveExposure:
             )
 
 
-def theta_igmf(R, Bigmf, D, lc=1):
+def theta_igmf(R: float, Bigmf: float, D: float, lc: float = 1) -> float:
     """
-    Deflection angle for IGMF in degrees
+    Deflection angle for IGMF in degrees.
 
-    :param R: rigidity in EV
-    :param Bigmf: IGMF magnetic field strength in nG
-    :param D: distance of the source in Mpc
-    :param lc: coherence length in Mpc (default 1 Mpc)
+    Parameters
+    ----------
+    R: float
+        rigidity in EV
+    Bigmf: float
+        IGMF magnetic field strength in nG
+    D: float
+        distance of the source in Mpc
+    lc: float
+         coherence length in Mpc (default 1 Mpc)
     """
     return (
         2.3
@@ -433,11 +534,26 @@ def theta_igmf(R, Bigmf, D, lc=1):
     ) * u.deg
 
 
-def bounded_power_law(R, alpha_b, Rmin, Rmax):
-    """Background spectrum"""
-    if alpha_b != 1.0:
-        norm = (1.0 - alpha_b) / (Rmax ** (1.0 - alpha_b) - Rmin ** (1.0 - alpha_b))
-    else:
-        norm = 1.0 / (np.log(Rmax) - np.log(Rmin))
+def bounded_power_law(
+    x: np.ndarray, alpha: float, xmin: float, xmax: float
+) -> np.ndarray:
+    """
+    Bounded power law in both directions.
 
-    return norm * R ** (-alpha_b)
+    Parameters
+    ----------
+    x: np.ndarray
+        array of rigidities in EV
+    alpha: float
+        spectral index
+    xmin: float
+        minimum rigidity in EV
+    xmax: float
+        maximum rigidity in EV
+    """
+    if alpha != 1.0:
+        norm = (1.0 - alpha) / (xmax ** (1.0 - alpha) - xmin ** (1.0 - alpha))
+    else:
+        norm = 1.0 / (np.log(xmax) - np.log(xmin))
+
+    return norm * x ** (-alpha)
