@@ -81,8 +81,8 @@ class EnergyLoss(ABC):
         # lower limit should be at energy threshold 
         # this is to preserve the normalisaation 
         # of event samples that we use
-        # Eearth_min = self.data.detector.Eth if Eearth_min is None else Eearth_min
-        Eearth_min = 1
+        Eearth_min = self.data.detector.Eth if Eearth_min is None else Eearth_min
+        # Eearth_min = 1
         Eearth_grid = np.logspace(
             np.log10(Eearth_min),
             np.log10(Eearth_max),

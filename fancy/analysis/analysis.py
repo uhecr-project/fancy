@@ -6,11 +6,15 @@ from typing import Union
 import cmdstanpy
 import h5py
 import numpy as np
+from cmdstanpy import CmdStanModel
 from typing_extensions import Self  # change to typing for py>3.11
 
 from fancy.interfaces.data import Data
-from fancy.interfaces.model import Model
-from fancy.utils.package_data import get_path_to_kappa_theta
+from fancy.utils.package_data import (
+    get_path_to_kappa_theta,
+    get_path_to_stan_file,
+    get_path_to_stan_includes,
+)
 
 
 class Analysis:
@@ -26,27 +30,24 @@ class Analysis:
     def __init__(
         self: Self,
         data: Data,
-        model: Model,
         analysis_type: str = "joint_gmf_composition",
     ) -> None:
         """
         Container to manage the inputs and outputs of the fits.
 
-        Parameter
-        ---------
+        Parameters
+        ----------
         data: fancy.interfaces.data.Data
             Container that handles the source, uhecr, and detector information.
             All such information should already be initialised (see relevant class for
             more information.)
-        model: fancy.interfaces.model.Model
-            Container that handles the stan Model
         analysis_type: str, default=joint_gmf_composition
             The analysis type to consider.
         """
         self.data = data
-        self.model = model
         self.analysis_type = analysis_type
 
+        self.stan_model = None
         self.fit_input = None
         self.fit = None
 
@@ -60,8 +61,8 @@ class Analysis:
         """
         Pass in effective exposure & energy loss tables that have been pre-generated.
 
-        Parameter:
-        ---------
+        Parameters
+        ----------
         exposure_table_file : str
             The table containing the information about the effective exposure
             of each configuration (source, detector, MG).
@@ -83,47 +84,67 @@ class Analysis:
             """Read from energy loss tables"""
             with h5py.File(energy_table_file, "r") as file:
                 config_label = (
-                    f"{self.data.detector.label}_mg{self.data.detector.mass_group}"
+                    f"{self.data.detector.label}_{self.data.detector.mass_model}"
                 )
 
                 self.distances_grid = file[config_label]["distances_grid"][()]  # Mpc
                 self.alpha_grid = file[config_label]["alpha_grid"][()]
-                self.log10_Rgrid = file[config_label]["log10_rigidities"][()]
-                self.log10_Eexs_grid = file[config_label]["log10_Eexs_grid"][
+                self.log10_Eearth_grid = file[config_label]["log10_Eearth_grid"][()]
+                self.log10_Esrcs_grid = file[config_label]["log10_Esrcs"][
                     ()
                 ]  # log10(EeV)
 
-                if self.data.detector.mass_group != 1:
-                    self.log10_arr_spect_grid = file[config_label][
-                        "log10_arrspect_grid"
-                    ][()]  # log10(1/EV)
-                else:
-                    self.Rarr_grid = file[config_label]["Rarr_grid"][()]  # log10(1/EV)
+                self.log10_Eearth_spectrum = file[config_label][
+                    "log10_Eearth_spectrum"
+                ][()]  # log10(1/EV)
 
             """Read from exposure table"""
             with h5py.File(exposure_table_file, "r") as file:
-                config_label = f"{self.data.source.label}_{self.data.detector.label}_mg{self.data.detector.mass_group}_{gmf_model}"
+                config_label = f"{self.data.source.label}_{self.data.detector.label}_{self.data.detector.mass_model}_{gmf_model}"
                 self.log10_Bigmf_grid = file[config_label]["log10_Bigmf_grid"][
                     ()
                 ]  # log10(nG)
-                self.log10_wexp_src_grid = file[config_label]["log10_wexp_src_grid"][
+                self.log10_source_exposure_grid = file[config_label]["log10_integrated_source_exposure"][
                     ()
                 ]  # km^2 yr
-                self.log10_wexp_bg_grid = file[config_label]["log10_wexp_bg_grid"][
+                self.log10_background_exposure_grid = file[config_label]["log10_integrated_background_exposure"][
                     ()
                 ]  # km^2 yr
-
-            """Read from kappa_theta map"""
-            kappa_theta_file = str(get_path_to_kappa_theta(kappa_theta_filename))
-            (self.thetas_interp_arr, self.log10_kappas_interp_arr, _) = pickle.load(
-                open(kappa_theta_file, "rb")
-            )
         else:
             raise DeprecationWarning(
                 f"Handles for analysis type {self.analysis_type} is deprecated."
             )
 
-    def _prepare_fit_inputs(self: Self) -> None:
+    def compile_stan_model(self: Self) -> None:
+        """Compile the Stan model for the analysis."""
+        # get path to the stan file
+        if self.analysis_type == "arrival":
+            stan_path = get_path_to_stan_includes("arrival_direction")
+            path_to_stan_file = get_path_to_stan_file(
+                "arrival_direction", "arrival_direction_model.stan"
+            )
+        elif self.analysis_type == "joint":
+            stan_path = get_path_to_stan_includes("joint")
+            path_to_stan_file = get_path_to_stan_file("joint", "joint_model.stan")
+        elif self.analysis_type == "joint_gmf":
+            stan_path = get_path_to_stan_includes("joint_gmf")
+            path_to_stan_file = get_path_to_stan_file(
+                "joint_gmf", "joint_gmf_model.stan"
+            )
+        elif self.analysis_type in set(["joint_composition", "joint_gmf_composition"]):
+            stan_path = get_path_to_stan_includes("joint_composition")
+            path_to_stan_file = get_path_to_stan_file(
+                "joint_composition", "joint_composition_model.stan"
+            )
+
+        stanc_options = {"include-paths": stan_path}
+
+        # TODO: compiling stan like this is deprecated, should fix this at some point
+        self.stan_model = CmdStanModel(
+            stan_file=path_to_stan_file, stanc_options=stanc_options
+        )
+
+    def prepare_fit_inputs(self: Self) -> None:
         """Gather inputs from Model, Data and IntegrationTables."""
         # prepare fit inputs
         self.fit_input = {
@@ -131,7 +152,6 @@ class Analysis:
             "varpi": self.data.source.coord.cartesian.xyz.value.T,
             "D": self.data.source.distance,
             "N": self.data.uhecr.N,
-            "A": self.data.uhecr.A,
             "zenith_angle": self.data.uhecr.zenith_angle,
             "alpha_T": self.data.detector.alpha_T,
         }
@@ -156,43 +176,40 @@ class Analysis:
             self.fit_input["thetas_grid"] = self.thetas_interp_arr
 
             # UHECR parameters
-            # if we find rigidity in dataset, then use that, otherwise divide by meanZ of mass group
-            if len(self.data.uhecr.rigidity) > 0:
-                print("Using available rigidity data for analysis.")
-                self.fit_input["Rdet"] = self.data.uhecr.rigidity
-            else:
-                print(f"Dividing energy data by mean charge {self.data.detector.meanZ} for rigidity.")
-                self.fit_input["Rdet"] = (
-                    self.data.uhecr.energy / self.data.detector.meanZ
-                )
+            self.fit_input["Edet"] = (
+                self.data.uhecr.energy
+            )
             self.fit_input["exp_factors"] = self.data.uhecr.exposure
 
             # detector parameters
-            self.fit_input["Rth"] = self.data.detector.Rth
-            self.fit_input["Rth_max"] = self.data.detector.Rth_max
-            self.fit_input["Rerr"] = self.data.detector.rigidity_uncertainty
+            self.fit_input["Eth"] = self.data.detector.Eth
+            self.fit_input["Eerr"] = self.data.detector.energy_uncertainty
+            self.fit_input["mean_lnA_params"] = self.data.detector.lnA_params[0,:]
+            self.fit_input["sigma_lnA_params"] = self.data.detector.lnA_params[1,:]
+            self.fit_input["lnA_min"] = 1.0
+            self.fit_input["lnA_max"] = np.log(56)
 
             # arrival spectrum parameters
             self.fit_input["Nds"] = len(self.distances_grid)
-            self.fit_input["NRs"] = len(self.log10_Rgrid)
+            self.fit_input["NEearths"] = len(self.log10_Eearth_grid)
             self.fit_input["Nalphas"] = len(self.alpha_grid)
             self.fit_input["distances_grid"] = self.distances_grid
             self.fit_input["log10_Rgrid"] = self.log10_Rgrid
             self.fit_input["alpha_grid"] = self.alpha_grid
 
             if self.data.detector.mass_group != 1:
-                self.fit_input["log_arr_spectrum_grid"] = np.log(
+                self.fit_input["log_Eearth_spectrum"] = np.log(
                     10.0**self.log10_arr_spect_grid
                 )
             else:
                 self.fit_input["Rarr_grid"] = self.Rarr_grid
 
             # Nex / flux parameters
-            self.fit_input["log10_Eexs_grid"] = self.log10_Eexs_grid
+            self.fit_input["log10_Esrcs_grid"] = self.log10_Esrcs_grid
             self.fit_input["NBigmfs"] = len(self.log10_Bigmf_grid)
             self.fit_input["log10_Bigmf_grid"] = self.log10_Bigmf_grid
-            self.fit_input["log10_wexp_src_grid"] = self.log10_wexp_src_grid
-            self.fit_input["log10_wexp_bg_grid"] = self.log10_wexp_bg_grid
+            self.fit_input["log10_source_exposure_grid"] = self.log10_source_exposure_grid
+            self.fit_input["log10_backgrond_exposure_grid"] = self.log10_backgrond_exposure_grid
 
         else:
             raise DeprecationWarning(
@@ -206,12 +223,12 @@ class Analysis:
         seed: Union[int, None] = None,
         warmup: Union[int, None] = None,
         show_progress: bool = True,
-        **kwargs,
+        **kwargs: dict,
     ) -> cmdstanpy.stanfit.mcmc.CmdStanMCMC:
         """
         Fit a model.
 
-        Parameter:
+        Parameters
         ----------
         iterations: int, default=1000
             number of iterations
@@ -226,8 +243,10 @@ class Analysis:
         show_progress: bool, default=True
             to show the progress of the fits in a tqdm progress
             bar or not.
+        kwargs : dict
+            additional arguments to pass to the fit method
 
-        Return:
+        Returns
         -------
         fit : cmdstanpy.stanfit.mcmc.CmdStanMCMC
             The fit output from stan that contains the samples
@@ -241,12 +260,13 @@ class Analysis:
         See https://cmdstanpy.readthedocs.io/en/v1.2.0/api.html#cmdstanpy.CmdStanModel.sample
         for more details.
         """
-        # Prepare fit inputs
-        self._prepare_fit_inputs()
+        # make sure that the fit inputs are prepared
+        if self.fit_input == {}:
+            raise ValueError("Run `prepare_fit_inputs` first.")
 
         # fit
         print("Performing fitting...")
-        self.fit = self.model.model.sample(
+        self.fit = self.stan_model.sample(
             data=self.fit_input,
             iter_sampling=iterations,
             chains=chains,
@@ -291,10 +311,6 @@ class Analysis:
             if self.data.detector:
                 self.data.detector.save(detector_handle)
 
-            model_handle = f.create_group("model")
-            if self.model:
-                self.model.save(model_handle)
-
             if self.fit is None:
                 raise ValueError("Run `fit_model` first!")
             fit_handle = f.create_group("fit")
@@ -310,7 +326,6 @@ class Analysis:
 
             # log posterior
             samples.create_dataset("log_post", data=self.fit.method_variables()["lp__"])
-
 
     # KW: 12.06.24: I have shifted the table calculation to EffectiveExposure & EnergyLoss modules since I want to make the Analysis object only used for performing fits and not as a general container.
     # Similar for the simulation, however I do not port this to the Simulation module since this requires the use of stan when there are more simpler ways to forwards simulate the events.

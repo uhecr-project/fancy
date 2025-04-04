@@ -10,6 +10,14 @@ def get_path_to_energy_loss_tables(file_name: str) -> Path:
 
     return Path(file_path)
 
+def get_path_to_exposure_tables(file_name: str) -> Path:
+
+    file_path = resource_filename(
+        "fancy", "physics/effective_exposure/tables/%s" % file_name
+    )
+
+    return Path(file_path)
+
 
 def get_path_to_stan_includes(model_type: str) -> Path:
 

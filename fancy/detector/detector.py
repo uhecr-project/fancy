@@ -7,7 +7,7 @@ from astropy import units as u
 from astropy.coordinates import EarthLocation, SkyCoord
 from matplotlib import pyplot as plt
 from scipy import integrate, stats
-from typing_extensions import Self
+from typing_extensions import Self, Tuple
 
 from fancy.detector.exposure import m_dec, m_integrand
 from fancy.plotting import AllSkyMapCartopy as AllSkyMap
@@ -77,8 +77,8 @@ class Detector:
         self.Eth = float(self.properties["Eth"])
         self.mass_model = None  # default model to describe mass composition
         self.lnA_params = None  # parameters for lnA fit
-        self.Rth = None         # rigidity threshold value computed from mean lnA threshold
-        self.lnA_th = None      # lnA threshold
+        self.Rth = None  # rigidity threshold value computed from mean lnA threshold
+        self.lnA_th = None  # lnA threshold
 
         # timing information
         self.start_year = self.properties["start_year"]
@@ -197,14 +197,8 @@ class Detector:
         # then we can exploit rigidity conservation to use that threshold rigidity
         # for the source.
         # we use the mean lnA from the energy threshold as the threshold mass
-        self.lnA_th = (
-            self.lnA_params[0, 0] * np.log10(self.Eth)
-            + self.lnA_params[0, 1]
-        )  
-        self.Rth = (self.Eth / (0.5 * np.exp(self.lnA_th)))
-
-        # print(f"Rigidity threshold [EV]: {self.Rth:.2f}")
-        # print(f"lnA threshold: {self.lnA_th:.2f}")
+        self.lnA_th = self.lnA_params[0, 0] * np.log10(self.Eth) + self.lnA_params[0, 1]
+        self.Rth = self.Eth / (0.5 * np.exp(self.lnA_th))
 
     def sample_lnAs(
         self: Self,
@@ -230,13 +224,12 @@ class Detector:
         """
         # calculate mean and sigma lnA
         mu_lnA, sigma_lnA = (
-            self.lnA_params[:, 0] * np.log10(energy)
-            + self.lnA_params[:, 1]
+            self.lnA_params[:, 0] * np.log10(energy) + self.lnA_params[:, 1]
         )
 
         # if mass groups, then use a uniform distribution
         if self.mass_model.find("MG") != -1:
-            pass
+            raise NotImplementedError("Still need to implement for mass groups.")
         # if its hadronic interaction model, then use truncated normal
         elif self.mass_model in set(["EPOS-LHC", "SIBYLL2.3"]):
             a_lnA, b_lnA = (
@@ -244,15 +237,71 @@ class Detector:
                 (lnA_max - mu_lnA) / sigma_lnA,
             )
 
-            lnA_samples = stats.truncnorm.rvs(a=a_lnA, b=b_lnA, loc=mu_lnA, scale=sigma_lnA, size=Nsamples)
+            lnA_samples = stats.truncnorm.rvs(
+                a=a_lnA, b=b_lnA, loc=mu_lnA, scale=sigma_lnA, size=Nsamples
+            )
 
         return lnA_samples
+
+    def get_lnA_pdf(
+        self: Self,
+        lnA_grid : np.ndarray,
+        energy: float,
+        lnA_min: float = 0,
+        lnA_max: float = np.log(56),
+    ) -> np.ndarray:
+        """
+        Get the lnA pdf for the detector.
+
+        Returns
+        -------
+        lnA_pdf : np.ndarray
+            the lnA pdf for the detector
+        """
+        # calculate mean and sigma lnA
+        mu_lnA, sigma_lnA = (
+            self.lnA_params[:, 0] * np.log10(energy) + self.lnA_params[:, 1]
+        )
+
+        # if mass groups, then use a uniform distribution
+        if self.mass_model.find("MG") != -1:
+            raise NotImplementedError("Still need to implement for mass groups.")
+        # if its hadronic interaction model, then use truncated normal
+        elif self.mass_model in set(["EPOS-LHC", "SIBYLL2.3"]):
+            a_lnA, b_lnA = (
+                (lnA_min - mu_lnA) / sigma_lnA,
+                (lnA_max - mu_lnA) / sigma_lnA,
+            )
+
+            lnA_pdf = stats.truncnorm.pdf(
+                lnA_grid,
+                a=a_lnA,
+                b=b_lnA,
+                loc=mu_lnA,
+                scale=sigma_lnA,
+            )
+        return lnA_pdf
     
-    def get_p_Edet(self : Self, energies : np.ndarray) -> np.ndarray:
+    def get_mu_sigma_lnA(self : Self, energy : float) -> Tuple[float, float]:
+        """
+        Return the mean and sigma lnA as a function of energy.
+
+        Parameters
+        ----------
+        energy : float
+            the energy of the UHECR in EeV
+        """
+        # calculate mean and sigma lnA
+        mu_lnA, sigma_lnA = (
+            self.lnA_params[:, 0] * np.log10(energy) + self.lnA_params[:, 1]
+        )
+        return mu_lnA, sigma_lnA
+
+    def get_p_Edet(self: Self, energies: np.ndarray) -> np.ndarray:
         """
         Compute the CCDF (complementary cumulative distribution function) for the energy detection threshold.
 
-        This function takes care of downscattering of events that are below Eth 
+        This function takes care of downscattering of events that are below Eth
         and for upscattering of events that are above Eth.
         """
         return 1 - np.array(
@@ -265,7 +314,6 @@ class Detector:
                 for E in energies
             ]
         )
-
 
     def save(self: Self, file_handle: h5py.File) -> None:
         """

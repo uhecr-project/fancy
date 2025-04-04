@@ -165,12 +165,19 @@ class Uhecr:
         self.label = uhecr_properties["label"]
 
         # Read from input dict
-        self.N = uhecr_properties["N"]
         self.unit_vector = uhecr_properties["unit_vector"]
         self.energy = uhecr_properties["energy"]
+        self.N = len(self.energy)
+
+        self.exposure = uhecr_properties["exposure"] if "exposure" in uhecr_properties else np.ones(self.N)
+
         self.zenith_angle = uhecr_properties["zenith_angle"]
-        self.A = uhecr_properties["A"]
-        self.kappa_gmf = uhecr_properties["kappa_gmf"]
+        self.year = uhecr_properties["years"]
+        self.day = uhecr_properties["days"]
+
+        self.period = self.__find_period()
+        self.A = self.__find_area()
+
 
         # Only if simulated UHECRs
         # try:
@@ -339,7 +346,8 @@ class Uhecr:
             area = [possible_areas[i - 1] * exp_factor for i in self.period]
 
         else:
-            print("Error: effective areas and periods not defined")
+            print("Effective areas and periods not defined. Setting uniform.")
+            area = np.ones(len(self.period))
 
         return area
 
@@ -398,6 +406,10 @@ class Uhecr:
                     period.append(2)
                 else:
                     print("Error: cannot determine period for year", y, "and day", d)
+
+        else:
+            print(f"no period data found for {self.label}. setting uniform")
+            period = np.ones(len(self.year), dtype=int)
 
         return period
 
