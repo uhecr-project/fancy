@@ -1,147 +1,118 @@
 """Class to manage simulations for UHECR propagation & detector effects"""
 
-import os
-import numpy as np
-import pickle as pickle
-import h5py
 import datetime
-from typing import Union
+import os
+import pickle as pickle
+import tempfile
 
-from scipy.interpolate import RegularGridInterpolator, CubicSpline
-
-from astropy.coordinates import SkyCoord, AltAz
 import astropy.units as u
+import h5py
+import numpy as np
+from astropy.coordinates import AltAz, SkyCoord
 from astropy.time import Time
+from scipy.stats import truncnorm
+from scipy.interpolate import CubicSpline, RegularGridInterpolator
+from typing_extensions import ClassVar, List, Self, Tuple, Union
+from vMF import sample_vMF
 
 from fancy import Data
-from fancy.physics.gmf import GMFBackPropagation, GMFLensing
 from fancy.detector.exposure import m_dec
-from vMF import sample_vMF
-import tempfile
-from fancy.utils.package_data import get_path_to_kappa_theta
+from fancy.physics.gmf import GMFBackPropagation, GMFLensing
+from fancy.utils.helpers import bounded_power_law, theta_igmfs
+from fancy.utils.package_data import (
+    get_path_to_energy_loss_tables,
+    get_path_to_exposure_tables,
+)
 
 
 class Simulation:
-    """
-    Handles the generation of simulation samples
-    """
+    """Handles the generation of simulation samples."""
 
-    truth_input_keys = ["f", "alpha_s", "alpha_b", "log10_L", "Bigmf", "Nex", "F0"]
+    __truth_input_keys : ClassVar[list] = ["f", "alpha_s", "alpha_b", "log10_L", "Bigmf", "Nex", "F0"]
 
     def __init__(
         self,
         data: Data,
-        energy_loss_table_file: str,
-        exposure_table_file: str,
-        kappa_theta_filename: str = "kappa_theta_map.pkl",
+        energy_loss_table_file: str = "energy_tables.h5",
+        exposure_table_file: str = "exposure_tables.h5",
         gmf_model: str = "None",
         verbose : bool = False
     ):
         """
-        Handles the generation of simulation samples
+        Handle the generation of simulation samples.
 
-        :param data: Data object from fancy
-        :param energy_loss_table_file: file for energy tables
-        :param exposure_table_file: file where exposure tables are contained
+        data: fancy.interfaces.Data
+            Data object from fancy
+        energy_loss_table_file: str
+            file for energy tables
+        exposure_table_file: str
+            file where exposure tables are contained
+        gmf_model : str, default="None"
+            the GMF model to use when generating the simulations. 
+            Default to None, i.e. we dont perform GMF lensing
         """
-
         self.detector_type = data.detector.label
-        self.mass_group = data.detector.mass_group
+        self.mass_model = data.detector.mass_model
         self.source_type = data.source.label
         self.gmf_model = gmf_model
 
         # source parameters
-        self.Dsrcs = data.source.distance * u.Mpc
         self.Nsrcs = data.source.N
 
         self.data = data
         self.verbose = verbose
 
-        # make sure files do exist
-        if not os.path.exists(energy_loss_table_file):
-            raise FileNotFoundError(
-                "Energy loss tables have not been generated. Construct them first!"
-            )
-
-        if not os.path.exists(exposure_table_file):
-            raise FileNotFoundError(
-                "Exposure tables have not been generated. Construct them first!"
-            )
-
         # initialise the grids
-        self._initialise_grids(energy_loss_table_file, exposure_table_file, kappa_theta_filename)
+        self._initialise_grids(energy_loss_table_file, exposure_table_file)
 
     def _initialise_grids(
-        self, energy_loss_table_file: str, exposure_table_file: str, kappa_theta_filename : str = "kappa_theta_map.pkl", dlR=0.001
-    ):
+        self, energy_loss_table_file: str = "energy_tables.h5", exposure_table_file: str = "exposure_tables.h5"
+    ) -> None:
         """
-        Initialise grids used for simulation
+        Initialise grids used for simulation.
 
-        :param energy_loss_table_file: file for energy tables
-        :param exposure_table_file: file where exposure tables are contained
-        :param dlR: discretisation in logarithmic bins of log10(EV), default 0.001
+        energy_loss_table_file : str
+            file for energy tables
+        exposure_table_file : str
+            path to file where exposure tables are contained
         """
-
-        with h5py.File(energy_loss_table_file, "r") as f:
+        with h5py.File(str(get_path_to_energy_loss_tables(energy_loss_table_file)), "r") as f:
             # find the relevant group
-            config_label = f"{self.detector_type}_mg{self.mass_group}"
+            config_label = f"{self.detector_type}_{self.mass_model}"
             self.alpha_grid = f[config_label]["alpha_grid"][()]
-            self.distances_grid = f[config_label]["distances_grid"][()] * u.Mpc
-            log10_Rgrid = f[config_label]["log10_rigidities"][()]
-
-            # create separate grid for sampling
-            lRbins = np.arange(
-                np.log10(self.data.detector.Rth),
-                np.log10(self.data.detector.Rth_max),
-                dlR,
-            )
-            self.rigidity_widths = (10 ** lRbins[1:] - 10 ** lRbins[:-1]) * u.EV
-            self.rigidities = 10 ** (0.5 * (lRbins[1:] + lRbins[:-1])) * u.EV
-
-            if self.mass_group != 1:
-                log10_arrspect_grid = f[config_label]["log10_arrspect_grid"][()]
-
-                # interpolate for the rigidity grid used here
-                f_log10_arrspect = CubicSpline(
-                    y=log10_arrspect_grid, x=log10_Rgrid, axis=1
-                )
-                self.log10_arrspects_grid = f_log10_arrspect(
-                    np.log10(self.rigidities.value)
-                ) * (1 / u.EV)
-
-            else:
-                # get arrival rigidities as a function of distance and source rigidity
-                Rarr_grid = f[config_label]["Rarr_grid"][()] * u.EV
-
-                # interpolate for the rigidity grid used here
-                self.f_Rarr = CubicSpline(y=Rarr_grid, x=10**log10_Rgrid, axis=1)
+            self.Eearth_grid = 10**f[config_label]["log10_Eearth_grid"][()] * u.EeV
+            self.dEearth_grid = f[config_label]["dEearth_grid"][()] * u.EeV
+            log10_Eearth_spectrum = f[config_label]["log10_Eearth_spectrum"][()] * (1 / u.EeV)
 
             # also get the expected energies
-            self.log10_Eexs_grid = f[config_label]["log10_Eexs_grid"][()] * u.EeV
+            log10_Esrc = f[config_label]["log10_Esrc"][()] * u.EeV
+
+            # filter out spectrum values that only match within the number of sources
+            # in consideration
+            dis_indices = np.digitize(
+                self.data.source.distance, f[config_label]["distances_grid"][()], right=True
+            )
+            self.log10_Eearth_spectrum = np.take(log10_Eearth_spectrum, indices=dis_indices, axis=0)
+            self.log10_Esrc = np.take(log10_Esrc, indices=dis_indices, axis=0)
 
         self.Nalphas = len(self.alpha_grid)
-        self.Ndistances = len(self.distances_grid)
-        self.NRs = len(self.rigidities)
+        self.NEearths = len(self.Eearth_grid)
 
         # now read the exposure table file
-        with h5py.File(exposure_table_file, "r") as f:
+        with h5py.File(str(get_path_to_exposure_tables(exposure_table_file)), "r") as f:
             # find the relevant group
-            config_label = f"{self.source_type}_{self.detector_type}_mg{self.mass_group}_{self.gmf_model}"
+            config_label = f"{self.source_type}_{self.detector_type}_{self.mass_model}_{self.gmf_model}"
             self.log10_Bigmf_grid = f[config_label]["log10_Bigmf_grid"][()] * u.nG
-            self.log10_wexp_src_grid = (
-                f[config_label]["log10_wexp_src_grid"][()] * u.km**2 * u.yr
+            self.log10_integrated_source_exposure = (
+                f[config_label]["log10_integrated_source_exposure"][()]
             )
-            self.log10_wexp_bg_grid = (
-                f[config_label]["log10_wexp_bg_grid"][()] * u.km**2 * u.yr
+            self.log10_integrated_background_exposure = (
+                f[config_label]["log10_integrated_background_exposure"][()]
             )
 
         self.NBigmfs = len(self.log10_Bigmf_grid)
 
-        # read in the theta <-> kappa interpolated file
-        kappa_theta_file = str(get_path_to_kappa_theta(kappa_theta_filename))
-        (_, _, self.f_log10_kappa) = pickle.load(open(kappa_theta_file, "rb"))
-
-    def set_parameters_from_inputs(self, input_dict : dict, truth_outfile: str):
+    def set_parameters_from_inputs(self, input_dict : dict) -> None:
         """
         Set parameters from fit inputs from posteriors.
 
@@ -155,6 +126,7 @@ class Simulation:
         # create dictionaryu of truths
         self.truth_dict = {
             "alpha_s": input_dict["alpha_s"],
+            "alpha_b" : input_dict["alpha_b"],
             "f": input_dict["f"],
             "L": 10**input_dict["log10_L"],
             "log10_L": input_dict["log10_L"],
@@ -174,116 +146,7 @@ class Simulation:
 
         self.Nuhecrs = np.sum(self.Nuhecrs_arr)
 
-        if self.mass_group != 1:
-            self.truth_dict["alpha_b"] = input_dict["alpha_b"]
-
-        print(f"Storing truths to {truth_outfile}")
-        with open(truth_outfile, "wb") as file:
-            pickle.dump(self.truth_dict, file, protocol=-1)
-
-    def set_truths_from_priors(self, input_dict : dict, truth_outfile : str):
-        """
-        Set truths based on the priors.
-
-        Parameter:
-        ----------
-        input_dict : dict
-            dictionary of input parameters that contain all values
-        truth_outfile : str
-            output file for truths
-        """
-        alpha_s = input_dict["alpha_s"]
-        Bigmf = input_dict["Bigmf"] * u.nG
-        L = 10**input_dict["log10_L"] * u.EeV / u.yr
-        F0 = 10**input_dict["log10_F0"] * u.km**-2 * u.yr**-1
-
-        if self.mass_group != 1:
-            alpha_b = input_dict["alpha_b"]
-
-        # calculate the number of expected events from all sources using weighted exposure * total flux
-        wexps_src = np.zeros(self.Nsrcs) * (u.km**2 * u.yr)
-        Fs_per_Ls = np.zeros(self.Nsrcs) * (u.km**-2 * u.EeV**-1)
-
-        for id, Dsrc in enumerate(self.Dsrcs):
-            dmax_idx = np.digitize(Dsrc, self.distances_grid, right=True)
-
-            f_log10_wexp_src = RegularGridInterpolator(
-                (self.alpha_grid, self.log10_Bigmf_grid),
-                self.log10_wexp_src_grid[id, ...],
-            )
-            log10_wexp_src = f_log10_wexp_src((alpha_s, np.log10(Bigmf.value)))
-            wexps_src[id] = 10.0**log10_wexp_src * (u.km**2 * u.yr)
-
-            f_log10_Eexs = CubicSpline(
-                x=self.alpha_grid, y=self.log10_Eexs_grid[dmax_idx, :]
-            )
-            Eex = 10.0 ** f_log10_Eexs(alpha_s) * u.EeV
-            Fs_per_Ls[id] = 1 / (4 * np.pi * Dsrc.to(u.km) ** 2) / Eex
-
-        # calculate expected events from source
-        Nex_src = (np.sum(wexps_src * Fs_per_Ls)) / self.Nsrcs * L
-
-        # now calculate the flux & Nex_BG
-        Fs = np.sum(Fs_per_Ls) * L
-        # for background flux, interpolate weighted exposure and calculate using Nex_bg
-        f_log10_wexp_bg = CubicSpline(
-            x=self.alpha_grid, y=self.log10_wexp_bg_grid
-        )  # NB: take any index for Bigmf since no dependence on it
-        if self.mass_group != 1:
-            Nex_bg = F0 * (10.0 ** f_log10_wexp_bg(alpha_b) * (u.km**2 * u.yr))
-        else:
-            Nex_bg = F0 * (10.0 ** f_log10_wexp_bg(alpha_s) * (u.km**2 * u.yr))
-        FT = Fs + F0  # total flux
-        f1 = Fs / FT  # source fraction before detection
-
-        Nex = Nex_bg + Nex_src
-
-        # convert to integer using np.round (TODO: strictly should be Poisson, edit later)
-        # store as object since we need to use this for sampling
-
-        # artificially add one event for each so that we at least have 1 event per source / BG to simulate
-        self.Nuhecrs_arr = np.zeros(self.Nsrcs + 1, dtype=int)  # type: ignore
-        self.Nuhecrs_arr[: self.Nsrcs] = int(np.round(Nex_src) + 1)
-        self.Nuhecrs_arr[self.Nsrcs] = int(np.round(Nex_bg) + 1)
-        self.Nuhecrs = np.sum(self.Nuhecrs_arr)
-
-        f = Nex_src / Nex
-
-        if self.verbose:
-            print("Computed parameters from inputs: ")
-            print(f"Luminosity per source: {L:.4e}")
-            print(f"FT: {FT:.3e}, Fs: {Fs:.3e}, F0: {F0:.3e}, f1 = Fs / FT: {f1:.3e}")
-            print(f"f = {f}")
-            print(f"Nex: {Nex:.3f}, Nex_src: {Nex_src:.3f}, Nex_bg: {Nex_bg:.3f}")
-            print(
-                f"Nuhecrs: {np.sum(self.Nuhecrs_arr):d}, Nuhecrs_src: {np.sum(self.Nuhecrs_arr[:-1]):d}, Nuhecrs_bg: {self.Nuhecrs_arr[-1]:d}"
-            )
-            print(f"Storing truths to {truth_outfile}")
-
-        # create dictionaryu of truths
-        self.truth_dict = {
-            "alpha_s": alpha_s,
-            "f": f,
-            "f1": f1.value,
-            "L": L.value,
-            "log10_L": np.log10(L.value),
-            "Bigmf": Bigmf.value,
-            "F0": F0,
-            "log10_F0": np.log10(F0.value),
-            "Fs": Fs.value,
-            "FT": FT.value,
-            "Nex": Nex,
-            "Nsrc": Nex_src,
-            "Nbg": Nex_bg,
-        }
-        if self.mass_group != 1:
-            self.truth_dict["alpha_b"] = alpha_b
-
-        with open(truth_outfile, "wb") as file:
-            pickle.dump(self.truth_dict, file, protocol=-1)
-        
-
-    def set_truths(self, input_dict: dict, truth_outfile: str):
+    def set_truths(self : Self, input_dict: dict) -> None:
         """
         Set simulation truths based on truths. 
 
@@ -291,8 +154,6 @@ class Simulation:
         ----------
         input_dict : dict
             dictionary of input parameters that contain all values
-        truth_outfile : str
-            output file for truths
         """
         # first assert that the inputs keys match the ones the class definition
         # assert np.all(
@@ -303,9 +164,7 @@ class Simulation:
         Bigmf = input_dict["Bigmf"] * u.nG
         Nex = input_dict["Nex"]
         f = input_dict["f"]
-
-        if self.mass_group != 1:
-            alpha_b = input_dict["alpha_b"]
+        alpha_b = input_dict["alpha_b"]
 
         # calculate expected events from background using source fraction
         Nex_src = Nex * f
@@ -318,24 +177,22 @@ class Simulation:
         for id, Dsrc in enumerate(self.Dsrcs):
             dmax_idx = np.digitize(Dsrc, self.distances_grid, right=True)
 
+            # TODO: investigate whether doing interpolation is truly alright here
             f_log10_wexp_src = RegularGridInterpolator(
                 (self.alpha_grid, self.log10_Bigmf_grid),
-                self.log10_wexp_src_grid[id, ...],
+                self.log10_integrated_source_exposure[id, ...],
             )
             log10_wexp_src = f_log10_wexp_src((alpha_s, np.log10(Bigmf.value)))
             wexps_src[id] = 10.0**log10_wexp_src * (u.km**2 * u.yr)
 
-            f_log10_Eexs = CubicSpline(
-                x=self.alpha_grid, y=self.log10_Eexs_grid[dmax_idx, :]
+            # TODO: same here
+            f_log10_Esrc = CubicSpline(
+                x=self.alpha_grid, y=self.log10_Esrc[dmax_idx, :]
             )
-            Eex = 10.0 ** f_log10_Eexs(alpha_s) * u.EeV
+            Eex = 10.0 ** f_log10_Esrc(alpha_s) * u.EeV
             Fs_per_Ls[id] = 1 / (4 * np.pi * Dsrc.to(u.km) ** 2) / Eex
 
         L = Nex_src / (np.sum(wexps_src * Fs_per_Ls)) / self.Nsrcs
-
-        print((L * wexps_src * Fs_per_Ls) * self.Nsrcs, np.sum((wexps_src * Fs_per_Ls) * self.Nsrcs * L))
-
-        # raise Exception()
 
         # convert to integer using np.round (TODO: strictly should be Poisson, edit later)
         # store as object since we need to use this for sampling
@@ -347,32 +204,27 @@ class Simulation:
         # now calculate the flux
         Fs = np.sum(Fs_per_Ls) * L
         # for background flux, interpolate weighted exposure and calculate using Nex_bg
+        # TODO: same here as well
         f_log10_wexp_bg = CubicSpline(
-            x=self.alpha_grid, y=self.log10_wexp_bg_grid
+            x=self.alpha_grid, y=self.log10_integrated_background_exposure
         )  # NB: take any index for Bigmf since no dependence on it
-        if self.mass_group != 1:
-            F0 = Nex_bg / (10.0 ** f_log10_wexp_bg(alpha_b) * (u.km**2 * u.yr))
-        else:
-            F0 = Nex_bg / (10.0 ** f_log10_wexp_bg(alpha_s) * (u.km**2 * u.yr))
+        F0 = Nex_bg / (10.0 ** f_log10_wexp_bg(alpha_s) * (u.km**2 * u.yr))
         FT = Fs + F0  # total flux
-        f1 = Fs / FT  # source fraction before detection
 
         if self.verbose:
             print("Computed parameters from inputs: ")
             print(f"Luminosity per source: {L:.4e}")
-            print(f"FT: {FT:.3e}, Fs: {Fs:.3e}, F0: {F0:.3e}, f1 = Fs / FT: {f1:.3e}")
+            print(f"FT: {FT:.3e}, Fs: {Fs:.3e}, F0: {F0:.3e}")
             print(f"f = {f}")
             print(f"Nex: {Nex:.3f}, Nex_src: {Nex_src:.3f}, Nex_bg: {Nex_bg:.3f}")
             print(
                 f"Nuhecrs: {np.sum(self.Nuhecrs_arr):d}, Nuhecrs_src: {np.sum(self.Nuhecrs_arr[:-1]):d}, Nuhecrs_bg: {self.Nuhecrs_arr[-1]:d}"
             )
-            print(f"Storing truths to {truth_outfile}")
 
         # create dictionaryu of truths
         self.truth_dict = {
             "alpha_s": alpha_s,
             "f": f,
-            "f1": f1.value,
             "L": L.value,
             "log10_L": np.log10(L.value),
             "Bigmf": Bigmf.value,
@@ -383,109 +235,85 @@ class Simulation:
             "Nex": Nex,
             "Nsrc": Nex_src,
             "Nbg": Nex_bg,
+            "alpha_b" : alpha_b
         }
-        if self.mass_group != 1:
-            self.truth_dict["alpha_b"] = alpha_b
 
-        with open(truth_outfile, "wb") as file:
-            pickle.dump(self.truth_dict, file, protocol=-1)
-
-    def sample_events(self, sampling_factor: int = 100):
+    def sample_events(self : Self, sampling_factor: int = 10) -> Tuple[List, List, List]:
         """
-        Sample rigidities / energies and arrival directions at the Galactic boundary
+        Sample energies, earth mass composition, and arrival directions at the Galactic boundary.
 
-        :param sampling_factor: factor to multiply with number of UHECRs to simulate for sampling
+        - The energies are sampled via the arrival energy spectrum pre-computed via the 
+        energy loss module. 
+        - The arrival directions are sampled using the vMF model with deflections from the EGMF model.
+        - The mass composition is sampled via the mass models used in the energy loss module.
+
+        NB: we combine energy & mass to get rigidities since this is what we use for lensing.
+
+        Parameters
+        ----------
+        sampling_factor: int, default=10
+             factor to multiply with number of UHECRs to simulate for sampling
+
+        Returns
+        -------
+        sampled_energies: list
+            sampled energies at the Galactic boundary
+        sampled_masses: list
+            sampled masses at the Galactic boundary
+        sampled_coords_gb: list
+            sampled arrival directions at the Galactic boundary
         """
         Nsamples_arr = (
             np.full(self.Nsrcs + 1, sampling_factor, dtype=int) * self.Nuhecrs_arr
         )
-
-        """Sampling rigidities at GB"""
         # sample using rng.choice
         rng = np.random.default_rng()
 
-        sampled_rigidities = []
+        """Sampling energies & masses at GB"""
+        sampled_energies = []
+        sampled_masses = []
 
-        if self.mass_group != 1:
-            # precompute background spectrum & its probability
-            bg_spectrum_grid = bounded_power_law(
-                self.rigidities.value,
-                self.truth_dict["alpha_b"],
-                self.data.detector.Rth,
-                self.data.detector.Rth_max,
-            )
-            probs_bg = (
-                bg_spectrum_grid
-                * self.rigidity_widths.value
-                / np.sum(bg_spectrum_grid * self.rigidity_widths.value)
-            )
+        for id, Nsamples in enumerate(Nsamples_arr):
 
-            for id, Nsamples in enumerate(Nsamples_arr):
+            if id < self.Nsrcs:
+                # sample energies from the arrival spectrum
+                # here we interpolate over all spectral indices and 
+                # evaluate at the truth
+                src_spectrum_grid = 10**CubicSpline(
+                    y=self.log10_Eearth_spectrum[id, :, :],
+                    x=self.alpha_grid,
+                    axis=1,
+                )(self.truth_dict["alpha_s"]) 
 
-                if id < self.Nsrcs:
-                    didx = np.digitize(self.Dsrcs[id], self.distances_grid, right=True)
+                # the probabilities we sample from are normalised by multiplying with
+                # the energy widths
+                probs_energy = (
+                    src_spectrum_grid
+                    * self.dEearth_grid.value
+                    / np.sum(src_spectrum_grid * self.dEearth_grid.value)
+                )
 
-                    # similar to the background spectrum
-                    f_log10_arrspect = CubicSpline(
-                        y=self.log10_arrspects_grid[didx, :, :],
-                        x=self.alpha_grid,
-                        axis=1,
-                    )
-                    src_spectrum_grid = 10.0 ** f_log10_arrspect(
-                        self.truth_dict["alpha_s"]
-                    )
-                    probs_src = (
-                        src_spectrum_grid
-                        * self.rigidity_widths.value
-                        / np.sum(src_spectrum_grid * self.rigidity_widths.value)
-                    )
+            else:
+                 # precompute background spectrum & its probability
+                bg_spectrum_grid = bounded_power_law(
+                    self.Eearth_grid.value,
+                    self.truth_dict["alpha_b"],
+                    np.min(self.Eearth_grid.value),
+                    np.max(self.Eearth_grid.value),
+                )
+                probs_energy = (
+                    bg_spectrum_grid
+                    * self.dEearth_grid.value
+                    / np.sum(bg_spectrum_grid * self.dEearth_grid.value)
+                )
 
-                    # sample using random.choice
-                    sampled_rigidities.append(
-                        rng.choice(self.rigidities, size=Nsamples, p=probs_src)
-                    )
-                else:
-                    sampled_rigidities.append(
-                        rng.choice(self.rigidities, size=Nsamples, p=probs_bg)
-                    )
+            # then sample energies via rng.choice
+            Ee_samples = rng.choice(self.Ees_grid, size=Nsamples, p=probs_energy)
+            sampled_energies.append(Ee_samples)
 
-        else:  # MG1, sample via power-law distribution only bounded by minimum (TODO: make this bounded power law instead)
-            src_spectrum_grid = lbounded_power_law(
-                self.rigidities.value,
-                self.truth_dict["alpha_s"],
-                self.data.detector.Rth,
-            )
-            probs_src = (
-                src_spectrum_grid
-                * self.rigidity_widths.value
-                / np.sum(src_spectrum_grid * self.rigidity_widths.value)
-            )
-
-            bg_spectrum_grid = lbounded_power_law(
-                self.rigidities.value,
-                self.truth_dict["alpha_s"],
-                self.data.detector.Rth,
-            )
-            probs_bg = (
-                bg_spectrum_grid
-                * self.rigidity_widths.value
-                / np.sum(bg_spectrum_grid * self.rigidity_widths.value)
-            )
-
-            for id, Nsamples in enumerate(Nsamples_arr):
-                if id < self.Nsrcs:
-
-                    # sample using random.choice
-                    Rsrcs_samples = rng.choice(
-                        self.rigidities, size=Nsamples, p=probs_src
-                    )
-                    # store arrival rigidities, computed via interpolation
-                    sampled_rigidities.append(self.f_Rarr(Rsrcs_samples)[id, :])
-                else:
-                    # otherwise no losses
-                    sampled_rigidities.append(
-                        rng.choice(self.rigidities, size=Nsamples, p=probs_bg)
-                    )
+            # now sample for lnA
+            lnA_samples = np.array([self.data.detector.sample_lnAs(energy=Ee * u.EeV, Nsamples=1) for Ee in Ee_samples])
+            sampled_masses.append(np.exp(lnA_samples))
 
         """Sampling for arrival directions"""
         sampled_coords_gb = []
@@ -500,8 +328,9 @@ class Simulation:
                 #     self.truth_dict["Bigmf"] * u.nG,
                 #     self.Dsrcs[id],
                 # ))
-                kappa_igmfs = 7552 * (theta_igmf_vec(
-                    sampled_rigidities[id] * u.EV,
+
+                kappa_igmfs = 7552 * (theta_igmfs(
+                    (sampled_energies[id] / (0.5 * sampled_masses[id])) * u.EV,
                     self.truth_dict["Bigmf"] * u.nG,
                     self.Dsrcs[id],
                     ) / (1 * u.deg)).value**-2
@@ -534,25 +363,34 @@ class Simulation:
                     )
                 )
 
-        return sampled_rigidities, sampled_coords_gb
+        return sampled_energies, sampled_masses, sampled_coords_gb
 
-    def apply_lens(self, sampled_rigidities, sampled_coords):
+    def apply_lens(self : Self, sampled_rigidities : List[np.ndarray], sampled_coords : List[SkyCoord]) -> List[SkyCoord]:
         """
-        Apply GMF lens by sampling & re-sampling of particles
+        Apply GMF lens by sampling & re-sampling of particles.
 
-        :param sampled_rigidites: rigidities after sampling (list of np arrays)
-        :param sampled_coords: coordinates after sampling (list of SkyCoord)
+        Parameters
+        ----------
+        sampled_rigidites: list[np.ndarray]
+            sampled rigidities at the Galactic boundary
+        sampled_coords: list[astropy.coordinate.SkyCoord]
+            sampled arrival diretions at the Galactic boundary
+        
+        Returns
+        -------
+        sampled_coords_earth: list[astropy.coordinate.SkyCoord]
+            sampled arrival directions at the Earth after lensing.
         """
-
         if self.gmf_model == "None":
             print(
-                f"GMF is disabled. Will not run this code and return the initial samples"
+                "GMF is disabled. Will not run this code and return the initial samples"
             )
             return sampled_coords
 
-        # initialise GMFLENs
+        # initialise gmf lens object
         gmflens = GMFLensing(self.gmf_model)
 
+        # apply lensing to the coordinates at GB for each rigidity
         sampled_coords_earth = []
         for id, sampled_coord in enumerate(sampled_coords):
             sampled_coords_earth.append(
@@ -562,26 +400,25 @@ class Simulation:
         return sampled_coords_earth
 
     def apply_detector_cuts(
-        self, sampled_rigidities, sampled_coords, deltaR=None, sigma_dir=None
-    ):
+        self : Self, sampled_energies : List[np.ndarray], sampled_masses : List[np.ndarray], sampled_coords : List[np.ndarray]
+    ) -> Tuple[np.ndarray, np.ndarray, SkyCoord]:
         """
-        Apply detector cuts to sampled events at Earth
-
-        :param sampled_rigidites: rigidities after sampling (list of np arrays)
-        :param sampled_coords: coordinates after sampling (list of SkyCoord)
-        :param delta: force rigidity uncertainty in %
-        :param sigma_dir: force angular reconstruction uncertainty in deg
+        Apply detector cuts to sampled events at Earth.
+        
+        Parameters
+        ----------
+        sampled_energies : List[np.ndarray]
+            energies after sampling (list of np arrays)
+        sampled_masses : List[np.ndarray]
+            masses after sampling (list of np arrays)
+        sampled_coords: List[np.ndarray]
+            coordinates after sampling (list of SkyCoord)
         """
-        self.rigidities_det = np.zeros(self.Nuhecrs)
+        self.energies_det = np.zeros(self.Nuhecrs)
+        self.lnAs_det = np.zeros(self.Nuhecrs)
         glons_det = np.zeros(self.Nuhecrs)
         glats_det = np.zeros(self.Nuhecrs)
         self.exposure_factors = np.zeros(self.Nuhecrs)
-
-        # some uncertainty parameters that can be forced
-        kappa_d = (
-            self.data.detector.kappa_d if sigma_dir == None else 7552 * sigma_dir**-2
-        )
-        deltaR = self.data.detector.rigidity_uncertainty if deltaR == None else deltaR
 
         rng_det = np.random.default_rng()
         uhecr_idx = 0
@@ -607,7 +444,7 @@ class Simulation:
 
                     # sample reconstruction uncertainty using vMF
                     reconstr_uv = sample_vMF(
-                        coord_earth.cartesian.xyz.value, kappa_d, num_samples=1
+                        coord_earth.cartesian.xyz.value, self.data.detector.kappa_d, num_samples=1
                     )[0]
                     reconstr_uv /= np.linalg.norm(reconstr_uv)
                     reconst_coord = SkyCoord(
@@ -624,17 +461,24 @@ class Simulation:
                         [0, 1], p=[pdet, 1 - pdet]
                     )  # use binomial distribution to sample that UHECR
 
-                    # rigidity reconstruction
-                    rig = sampled_rigidities[id][i]
-                    reconst_rig = rng_det.normal(rig, deltaR * rig)
+                    # energy reconstruction
+                    # done via truncated normal distribution 
+                    en = sampled_energies[id][i]
+                    reconst_en = self.data.detector.sample_energies(en, 1)
+
+                    # mass reconstruction
+                    # done via truncated normal distribution as well
+                    mass = sampled_masses[id][i]
+                    # reconst_mass = self.data.detector.sam(mass, 1)
 
                     # if particle is within exposure & within cuts then append
                     if (
                         (accept == 0)
-                        and (reconst_rig >= self.data.detector.Rth)
-                        and (reconst_rig <= self.data.detector.Rth_max)
+                        and (reconst_en >= self.data.detector.Eth)
+                        # and (reconst_rig <= self.data.detector.Rth_max)
                     ):
-                        self.rigidities_det[uhecr_idx] = reconst_rig
+                        self.energies_det[uhecr_idx] = reconst_en
+                        self.lnAs_det[uhecr_idx] = np.log(mass)
                         reconst_coord.transform_to("galactic")
                         reconst_coord.representation_type = "unitspherical"
                         glons_det[uhecr_idx] = reconst_coord.galactic.l.deg
@@ -657,7 +501,7 @@ class Simulation:
                     print(f"Counts / src = {count_per_src}")
 
             if uhecr_idx > self.Nuhecrs:
-                raise Exception(
+                raise ValueError(
                     f"something wrong with indexing: {uhecr_idx}, {self.Nuhecrs}"
                 )
 
@@ -665,26 +509,32 @@ class Simulation:
             glons_det * u.deg, glats_det * u.deg, frame="galactic"
         )
 
-        if np.any(self.rigidities_det == 0):
+        if np.any(self.energies_det == 0):
             raise ValueError(
-                f"zero value detected in rigidity computation: {np.where(self.rigidities_det == 0)}"
+                f"zero value detected in rigidity computation: {np.where(self.energies_det == 0)}"
             )
+        
+        return self.energies_det, self.lnAs_det, self.coords_det
 
-    def backpropagate_events(self, Nsamples_bt: int = 100, njobs=4):
+    def backpropagate_events(self : Self, n_samples: int = 100, n_jobs : int=4):
         """
         Backpropagate the sampled & exposure-applied events at Earth back to the GB.
 
-        :param Nsamples_bt: the number of samples for backpropagation simulation
+        Parameters
+        ----------
+        n_samples: int
+            the number of samples for backpropagation simulation
+        n_jobs: int
+            the number of jobs to use for parallelisation
         """
-
         # first write data to temporary file such that Data can read it
         outfile = tempfile.mkstemp()[1]
         with h5py.File(outfile, "w") as f:
             data_gr = f.create_group(self.detector_type)
             data_gr.create_dataset(
-                "energy", data=self.rigidities_det * self.data.detector.meanZ
+                "energy", data=self.energies_det * self.data.detector.meanZ
             )
-            data_gr.create_dataset("rigidity", data=self.rigidities_det)
+            data_gr.create_dataset("rigidity", data=self.energies_det / (0.5 * np.exp(self.lnAs_det)))
             data_gr.create_dataset("exposure", data=self.exposure_factors)
             data_gr.create_dataset("glon", data=self.coords_det.galactic.l.deg)
             data_gr.create_dataset("glat", data=self.coords_det.galactic.b.deg)
@@ -696,11 +546,11 @@ class Simulation:
             data_gr.create_dataset("day", data=np.ones(self.Nuhecrs, dtype=int))  # stub
 
         # add this to the data object
-        self.data.add_uhecr(outfile, label=self.detector_type, gmf_model="None")
+        self.data.add_uhecr(outfile, label=self.detector_type, hadr_model=self.mass_model, gmf_model="None")
 
         # now perform GMF back propagation
         gmfbackprop = GMFBackPropagation(self.data, self.gmf_model)
-        gmfbackprop.run_backpropagation(Nsamples_bt, njobs=njobs)
+        gmfbackprop.run_backpropagation(n_samples, njobs=n_jobs)
         gmfbackprop.compute_kappa_gmf()
 
         # set properties
@@ -710,20 +560,19 @@ class Simulation:
             self.glons_gb = gmfbackprop.uhecr_coords_gb.galactic.l.deg
             self.glats_gb = gmfbackprop.uhecr_coords_gb.galactic.b.deg
 
-    def save(self, outfile: str):
+    def save(self : Self, outfile: str) -> None:
         """
         Save the simulation file as a new UHECR file.
 
-        :param outfile: the output file as an UHECR file
+        Parameters
+        ----------
+        outfile: str
+            the output file as an UHECR file
         """
         # simulate for zenith angles for compatibility
         zeniths_sim, years_sim, days_sim = self._simulate_zenith_angles(
             self.coords_det.transform_to("icrs")
         )
-
-        # compute energy & ICRS coordinates also for compatibility
-        # energies computed from multiplying with mean charge from mass group
-        energies_det = self.rigidities_det * self.data.detector.meanZ
 
         # get ra, dec, glon, glat
         glons_det, glats_det = (
@@ -741,7 +590,8 @@ class Simulation:
             simulated_data.create_dataset("year", data=years_sim)
             simulated_data.create_dataset("theta", data=zeniths_sim)
             simulated_data.create_dataset("rigidity", data=self.rigidities_det)
-            simulated_data.create_dataset("energy", data=energies_det)
+            simulated_data.create_dataset("energy", data=self.energies_det)
+            simulated_data.create_dataset("mass", data=np.exp(self.lnAs_det))
             simulated_data.create_dataset("ra", data=ras_det)
             simulated_data.create_dataset("dec", data=decs_det)
             simulated_data.create_dataset("glat", data=glats_det)
@@ -750,7 +600,7 @@ class Simulation:
 
             if self.gmf_model != "None":
                 gmfdefl_datas_grp = simulated_data.create_group("gmf")
-                config_key = f"{self.gmf_model}_mg{self.mass_group}"
+                config_key = f"{self.gmf_model}_{self.mass_model}"
                 if config_key in gmfdefl_datas_grp.keys():
                     del gmfdefl_datas_grp[config_key]
                 gmfdefl_datas_config_grp = gmfdefl_datas_grp.create_group(config_key)
@@ -817,40 +667,3 @@ class Simulation:
             )
 
         return np.array(zenith_angles), np.array(years), np.array(days)
-
-
-def bounded_power_law(x, alpha, xmin, xmax):
-    """bounded power law spectrum"""
-    if alpha != 1.0:
-        norm = (1.0 - alpha) / (xmax ** (1.0 - alpha) - xmin ** (1.0 - alpha))
-    else:
-        norm = 1.0 / (np.log(xmax) - np.log(xmin))
-
-    return norm * x ** (-alpha)
-
-
-def lbounded_power_law(x, alpha, xmin):
-    """Lower bounded power law spectrum"""
-    return (alpha - 1.0) * xmin ** (alpha - 1.0) * x ** (-alpha)
-
-
-def theta_igmf(R, Bigmf, D, lc=1):
-    """
-    Deflection angle for IGMF in degrees
-
-    :param R: rigidity in EV
-    :param Bigmf: IGMF magnetic field strength in nG
-    :param D: distance of the source in Mpc
-    :param lc: coherence length in Mpc (default 1 Mpc)
-    """
-    return (
-        2.3
-        * (50 * u.EV / R)
-        * (Bigmf / (1 * u.nG))
-        * np.sqrt(D / (10 * u.Mpc))
-        * np.sqrt(lc)
-    ) * u.deg
-
-
-def theta_igmf_vec(Rs, Bigmf, D, lc=1):
-    return np.array([theta_igmf(R, Bigmf, D, lc).to_value(u.deg) for R in Rs])

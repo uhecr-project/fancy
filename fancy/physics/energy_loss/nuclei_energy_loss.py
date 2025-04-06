@@ -49,7 +49,7 @@ class NucleiEnergyLoss(EnergyLoss):
         alpha_max: float = 10,
         Nalphas: int = 25,
         Eemin: Union[float, None] = None,
-        Eemax: float = 1000,
+        Eemax: float = 300,
         NEes: int = 50,
     ) -> None:
         """
@@ -230,7 +230,7 @@ class NucleiEnergyLoss(EnergyLoss):
             lnA_total_samples = self.data.detector.sample_lnAs(
                 energy=Ee.value,
                 Nsamples=20000,
-                lnA_min=1,
+                lnA_min=np.log(self.As).min(),
                 lnA_max=np.log(self.As).max(),
             )
 
@@ -263,7 +263,7 @@ class NucleiEnergyLoss(EnergyLoss):
                 lnA_pdfs = self.data.detector.get_lnA_pdf(
                     lnA_samples,
                     energy=Ee.value,
-                    lnA_min=1,
+                    lnA_min=np.log(self.As).min(),
                     lnA_max=np.log(self.As).max(),
                 )
                 R_sample_idces = np.digitize(
@@ -290,6 +290,10 @@ class NucleiEnergyLoss(EnergyLoss):
     ) -> Tuple[int, int, np.ndarray]:
         """
         Optimise for representative source weights for a single source.
+
+        TODO: investigate whether the method is alright, or that the 
+        representative masses can be anywhere from As=2 to As = 56 
+        (i.e. should it be monotonically increasing?)
 
         Parameters
         ----------

@@ -47,7 +47,7 @@ class Data:
         self: Self,
         filename: str,
         label: str = "TA2015",
-        hadr_model: str = "EPOS-LHC",
+        mass_model: str = "EPOS-LHC",
         gmf_model: str = "JF12",
     ) -> None:
         """
@@ -59,13 +59,13 @@ class Data:
             name of the file containing the object's data
         label: str
             reference label for the uhecr dataset
-        hadr_model : str
+        mass_model : str
             hadronic interaction model used to get the deflection information
         gmf_model : str
             GMF model used to get the deflection information
         """
         new_uhecr = Uhecr()
-        new_uhecr.load_from_data_file(filename, label, hadr_model, gmf_model=gmf_model)
+        new_uhecr.load_from_data_file(filename, label, mass_model, gmf_model=gmf_model)
 
         # define uhecr object
         self.uhecr = new_uhecr

@@ -56,7 +56,7 @@ class Uhecr:
         self: Self,
         filename: str,
         label: str,
-        hadr_model: str = "EPOS-LHC",
+        mass_model: str = "EPOS-LHC",
         gmf_model: str = "JF12",
     ) -> None:
         """
@@ -113,15 +113,15 @@ class Uhecr:
             self.period = self.__find_period()
             self.A = self.__find_area()
 
-            self.hadr_model = hadr_model  # TODO: check why we need this
+            self.mass_model = mass_model  # TODO: check why we need this
             # reading in GMF information
             # first check if
             if "gmf" in data and gmf_model != "None":
                 # only read if data exists for both GMF model key and hadr model key
-                config_key = f"{gmf_model}_{hadr_model}"
+                config_key = f"{gmf_model}_{mass_model}"
                 if config_key not in list(data["gmf"].keys()):
                     raise KeyError(
-                        f"GMF data for configuration {gmf_model}, {hadr_model} is not found."
+                        f"GMF data for configuration {gmf_model}, {mass_model} is not found."
                     )
 
                 glons_gb = data["gmf"][config_key]["glons_gb"][()]

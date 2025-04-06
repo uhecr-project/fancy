@@ -296,6 +296,19 @@ class Detector:
             self.lnA_params[:, 0] * np.log10(energy) + self.lnA_params[:, 1]
         )
         return mu_lnA, sigma_lnA
+    
+    def sample_energies(self : Self, energy : float, n_samples : int = 1000) -> np.ndarray:
+        """
+        Sample the energies based on the energy uncertainty.
+
+        Parameters
+        ----------
+        energy : float
+            the true energy of the UHECR in EeV
+        """
+        sigma_en = self.energy_uncertainty * energy
+        a_en, b_en = (self.Eth - energy) / sigma_en, (np.inf - energy) / sigma_en
+        return stats.truncnorm.rvs(a_en, b_en, loc=energy, scale=sigma_en, size=n_samples)
 
     def get_p_Edet(self: Self, energies: np.ndarray) -> np.ndarray:
         """

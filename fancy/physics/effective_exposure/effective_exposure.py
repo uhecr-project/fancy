@@ -9,12 +9,17 @@ import numpy as np
 from astropy.coordinates import SkyCoord
 from joblib import Parallel, delayed
 from typing_extensions import Self
+from tqdm import tqdm
 
 from fancy import Data
 from fancy.detector.exposure import m_dec
 from fancy.physics.gmf import GMFLensing
 from fancy.utils.package_data import (
     get_path_to_energy_loss_tables,
+    get_path_to_exposure_tables
+)
+from fancy.utils.helpers import (
+    theta_igmf, vMF, bounded_power_law
 )
 
 
@@ -44,6 +49,7 @@ class EffectiveExposure:
         self.detector_type = data.detector.label
         self.mass_model = data.detector.mass_model
         self.gmf_model = gmf_model
+        self.gmf_lens = GMFLensing(gmf_model=self.gmf_model)
 
         # parameters otherwised used here
         self.Bigmf_grid = None
@@ -52,7 +58,6 @@ class EffectiveExposure:
         self.NBigmfs = None
         self.NRs = None
         self.Nsrcs = len(self.data.source.distance)
-        self.gmf_lens = GMFLensing(gmf_model=gmf_model)
 
         self.delta_ang = None
         self.coords_healpy = None
@@ -237,12 +242,13 @@ class EffectiveExposure:
         ]
 
         # only run paralllelisation if more than one source
+        src_exp_results = []
         if self.Nsrcs == 1:
             src_exp_results = [self.compute_single_source_exposure(exp_args[0])]
         else:
-            src_exp_results = Parallel(n_jobs=n_jobs)(
-                delayed(self.compute_single_source_exposure)(arg) for arg in exp_args
-            )
+            # opting to not parallelise over distances due to pickling issue with GMF lensing.
+            for iarg in tqdm(range(len(exp_args)), desc="Iterating over all distances: ", total=self.Nsrcs):
+                src_exp_results.append(self.compute_single_source_exposure(exp_args[iarg]))
 
         self.source_exposure = (
             np.zeros((self.Nsrcs, self.NEearths, self.NBigmfs)) * u.km**2 * u.yr
@@ -336,7 +342,7 @@ class EffectiveExposure:
         for ir in range(self.NRs):
             # map lensed map
             _, lensed_map = self.calculate_lensed_map(
-                src_uv=np.array([0, 0, 1]), R=self.rigidity_grid[ir], kappa_igmf=0.0
+                src_uv=np.array([0, 0, 1]), R=self.rigidity_grid[ir], kappa_igmf=0.0, 
             )
 
             # compute effective exposure
@@ -379,7 +385,7 @@ class EffectiveExposure:
         """
         self.coords_healpy.representation_type = "cartesian"
         weighted_map = (
-            self.vMF(self.coords_healpy.cartesian.xyz.value, src_uv, kappa_igmf)
+            vMF(self.coords_healpy.cartesian.xyz.value, src_uv, kappa_igmf)
             * self.delta_ang
         )
         weighted_map /= np.sum(
@@ -447,7 +453,7 @@ class EffectiveExposure:
         assert outfile.find(".h5") > 0, (
             f"Output file {outfile} needs to have a .h5 extension."
         )
-        with h5py.File(outfile, "a") as f:
+        with h5py.File(str(get_path_to_exposure_tables(outfile)), "a") as f:
             config_label = f"{self.source_type}_{self.detector_type}_{self.mass_model}_{self.gmf_model}"
             if config_label in f.keys():
                 del f[config_label]
@@ -478,82 +484,3 @@ class EffectiveExposure:
                 "log10_integrated_background_exposure",
                 data=np.log10(self.int_background_exposure.to_value(u.km**2 * u.yr)),
             )
-
-    def vMF(self: Self, x: np.array, mu: np.array, kappa: float) -> np.ndarray:
-        """
-        Return a vMF distribution.
-
-        NB: shape of x must be (N, 3)
-
-        Parameters
-        ----------
-        x: np.array
-            array of cartesian coordinates
-        mu: np.array
-            array of cartesian coordinates for the mean direction
-        kappa: float
-            deflection parameter
-        """
-        if kappa > 100:
-            return np.exp(
-                kappa * np.dot(x.T, mu) + np.log(kappa) - np.log(4 * np.pi / 2) - kappa
-            )
-        elif kappa < 1e-5:  # L'Hopital's rule
-            return (
-                (1 + kappa * np.dot(x.T, mu))
-                / (4 * np.pi * np.cosh(kappa))
-                * np.exp(kappa * np.dot(x.T, mu))
-            )
-        else:
-            return (
-                kappa / (4 * np.pi * np.sinh(kappa)) * np.exp(kappa * np.dot(x.T, mu))
-            )
-
-
-def theta_igmf(R: float, Bigmf: float, D: float, lc: float = 1) -> float:
-    """
-    Deflection angle for IGMF in degrees.
-
-    Parameters
-    ----------
-    R: float
-        rigidity in EV
-    Bigmf: float
-        IGMF magnetic field strength in nG
-    D: float
-        distance of the source in Mpc
-    lc: float
-         coherence length in Mpc (default 1 Mpc)
-    """
-    return (
-        2.3
-        * (50 * u.EV / R)
-        * (Bigmf / (1 * u.nG))
-        * np.sqrt(D / (10 * u.Mpc))
-        * np.sqrt(lc)
-    ) * u.deg
-
-
-def bounded_power_law(
-    x: np.ndarray, alpha: float, xmin: float, xmax: float
-) -> np.ndarray:
-    """
-    Bounded power law in both directions.
-
-    Parameters
-    ----------
-    x: np.ndarray
-        array of rigidities in EV
-    alpha: float
-        spectral index
-    xmin: float
-        minimum rigidity in EV
-    xmax: float
-        maximum rigidity in EV
-    """
-    if alpha != 1.0:
-        norm = (1.0 - alpha) / (xmax ** (1.0 - alpha) - xmin ** (1.0 - alpha))
-    else:
-        norm = 1.0 / (np.log(xmax) - np.log(xmin))
-
-    return norm * x ** (-alpha)
