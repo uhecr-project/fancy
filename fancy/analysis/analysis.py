@@ -224,7 +224,7 @@ class Analysis:
         warmup: Union[int, None] = None,
         show_progress: bool = True,
         **kwargs: dict,
-    ) -> cmdstanpy.stanfit.mcmc.CmdStanMCMC:
+    ):
         """
         Fit a model.
 

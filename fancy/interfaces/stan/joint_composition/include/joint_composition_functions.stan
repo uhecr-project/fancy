@@ -8,41 +8,41 @@
 /**
  * Arrival rigidity spectrum for a single source, interpolated from look-up tables.
  * .
- * @param R : rigidity in RV
+ * @param Eearth : energy at earth in EeV
  * @param alpha : source spectral index
- * @param log10_arr_spectrum : log_e(arrival rigidity spectrum(alpha, R))
+ * @param log_Eearth_spectrum : log_e(arrival energy spectrum(alpha, R))
  * @param alpha_grid : grid of alphas for interpolation grid
- * @param log10_Rgrid : grid of log10(rigidities) for interpolation grid
+ * @param log10_Eearth : grid of log10(rigidities) for interpolation grid
  */
-real arrival_spectrum_lpdf(real R, real alpha, array[ , ] real log_arr_spectrum, array [] real alpha_grid, array [] real log10_Rgrid) 
+real arrival_spectrum_lpdf(real Eearth, real alpha, array[ , ] real log_Eearth_spectrum, array [] real alpha_grid, array [] real log10_Eearth) 
  {
-  real log10_R = log10(R);
+  real log10_Eearth = log10(Eearth);
   /* 2-D interpolatoin of arrival spectrum  */
-  return interp2d(log10_R, alpha, log10_Rgrid, alpha_grid, log_arr_spectrum);
+  return interp2d(log10_Eearth, alpha, log10_Eearth, alpha_grid, log_Eearth_spectrum);
 }
 
 /**
  * Arrival rigidity spectrum for isotropic background sources.
  * .
- * @param R : rigidity in RV
+ * @param Eearth : energy at earth in EeV
  * @param alpha : background spectral index
- * @param Rmin : minimum rigidity in sample, must match min(R_grid)
- * @param Rmax : maximum rigidity in sample, must match max(R_grid)
+ * @param Emin : minimum rigidity in sample, must match min(Eearth_grid)
+ * @param Emax : maximum rigidity in sample, must match max(Eearth_grid)
  */
-real background_spectrum_lpdf(real R, real alpha, real Rmin, real Rmax)
+real background_spectrum_lpdf(real Eearth, real alpha, real Emin, real Emax)
 {
   real N;
   real p;
   if(alpha != 1.0)
   {
-    N = ((1.0-alpha)/((Rmax^(1.0-alpha))-(Rmin^(1.0-alpha))));
+    N = ((1.0-alpha)/((Emax^(1.0-alpha))-(Emin^(1.0-alpha))));
   }
   else
   {
-    N = (1.0/(log(Rmax)-log(Rmin)));
+    N = (1.0/(log(Emax)-log(Emin)));
   }
 
-  p = (N * pow(R, (-alpha)));
+  p = (N * pow(Eearth, (-alpha)));
   return log(p);
 }
 
