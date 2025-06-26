@@ -84,7 +84,7 @@ class GMFBackPropagation:
         )
 
     def __get_time_delay(
-        self: Self, c: cr.Candidate, pos_earth: cr.Vector3d
+        self: Self, c, pos_earth
     ) -> np.ndarray:
         """
         Return delay between entering the galactic disc and arrival at Earth through magnetic field.
@@ -106,7 +106,7 @@ class GMFBackPropagation:
             / (60 * 60 * 24 * 365)
         )
 
-    def __setup_simulation(self: Self, obs: cr.Observer, mt_num: int) -> cr.ModuleList:
+    def __setup_simulation(self: Self, obs, mt_num: int):
         """
         Prepare the crpropa backtracking simulation.
 
