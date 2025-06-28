@@ -8,6 +8,7 @@ from typing_extensions import Self
 
 from fancy.plotting import AllSkyMapCartopy as AllSkyMap
 from fancy.utils.coordinates import get_coordinates, uv_to_coord
+from fancy.utils.package_data import get_path_to_datafiles
 
 __all__ = ["Uhecr"]
 
@@ -54,10 +55,10 @@ class Uhecr:
 
     def load_from_data_file(
         self: Self,
-        filename: str,
         label: str,
         mass_model: str = "EPOS-LHC",
         gmf_model: str = "JF12",
+        filename: str = "UHECRdata.h5",
     ) -> None:
         """
         Define UHECR from data file of original information.
@@ -66,19 +67,26 @@ class Uhecr:
         effective areas assuming the UHECR are detected
         by the Pierre Auger Observatory or TA.
 
-        filename: str
-            name of the data file
         label: str
             reference label for the UHECR data set
         hadr_model: str
             label for hadronic interaction model
         gmf_model: str
             label for GMF model
+        filename: str
+            name of the data file
 
         """
         self.label = label
 
-        with h5py.File(filename, "r") as f:
+        # use the default path for the datafiles if 
+        # uhecr data is not simulation
+        if filename.find("sim") < 0:
+            path_to_data = get_path_to_datafiles(filename)
+        else:
+            path_to_data = filename
+
+        with h5py.File(path_to_data, "r") as f:
             data = f[self.label]
 
             # timing & angle information

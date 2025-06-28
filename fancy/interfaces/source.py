@@ -6,6 +6,7 @@ import h5py
 from typing_extensions import Self, Union
 
 from fancy.utils.coordinates import get_coordinates, uv_to_coord, coord_to_uv
+from fancy.utils.package_data import get_path_to_datafiles
 
 from fancy.plotting import AllSkyMapCartopy as AllSkyMap
 
@@ -26,20 +27,21 @@ class Source:
         self.unit_vector = None
         self.names = None
 
-    def load_from_data_file(self, filename: str, label: str = "M82") -> None:
+    def load_from_data_file(self, label: str = "M82", filename: str = "sourcedata.h5") -> None:
         """
         Store the data and parameters for sources.
 
         Parameters
         ----------
-        filename: str
-            file containing source data
         label: str
             identifier
+        filename: str
+            file containing source data
         """
         self.label = label
+        path_to_source_data = get_path_to_datafiles(filename)
 
-        with h5py.File(filename, "r") as f:
+        with h5py.File(path_to_source_data, "r") as f:
             data = f[self.label]
             self.distance = data["D"][()]
             self.N = len(self.distance)

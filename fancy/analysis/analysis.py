@@ -10,6 +10,7 @@ from cmdstanpy import CmdStanModel
 from typing_extensions import Self  # change to typing for py>3.11
 
 from fancy.interfaces.data import Data
+from fancy.physics import EnergyLossModel
 from fancy.utils.package_data import (
     get_path_to_kappa_theta,
     get_path_to_stan_file,
@@ -22,6 +23,7 @@ class Analysis:
 
     # pre-defined analysis types
     arr_dir_type = "arrival_direction"
+    energy_type = "energy_loss"
     joint_type = "joint"
     gmf_type = "joint_gmf"
     composition_type = "joint_composition"
@@ -50,6 +52,12 @@ class Analysis:
         self.stan_model = None
         self.fit_input = None
         self.fit = None
+
+    def load_grids(
+        self : Self,
+
+    ) -> None:
+        pass
 
     def use_tables(
         self: Self,
@@ -123,6 +131,11 @@ class Analysis:
             path_to_stan_file = get_path_to_stan_file(
                 "arrival_direction", "arrival_direction_model.stan"
             )
+        elif self.analysis_type == "energy_loss":
+            stan_path = get_path_to_stan_includes("energy_loss")
+            path_to_stan_file = get_path_to_stan_file(
+                "energy_loss", "energy_model_with_sys.stan"
+            )
         elif self.analysis_type == "joint":
             stan_path = get_path_to_stan_includes("joint")
             path_to_stan_file = get_path_to_stan_file("joint", "joint_model.stan")
@@ -147,18 +160,21 @@ class Analysis:
     def prepare_fit_inputs(self: Self) -> None:
         """Gather inputs from Model, Data and IntegrationTables."""
         # prepare fit inputs
-        self.fit_input = {
-            "Ns": self.data.source.N,
-            "varpi": self.data.source.coord.cartesian.xyz.value.T,
-            "D": self.data.source.distance,
-            "N": self.data.uhecr.N,
-            "zenith_angle": self.data.uhecr.zenith_angle,
-            "alpha_T": self.data.detector.alpha_T,
-        }
+        
+        if self.analysis_type == self.energy_type:
+            pass
 
         if self.analysis_type in set(
             [self.composition_type, self.gmf_composition_type]
         ):
+            self.fit_input = {
+                "Ns": self.data.source.N,
+                "varpi": self.data.source.coord.cartesian.xyz.value.T,
+                "D": self.data.source.distance,
+                "N": self.data.uhecr.N,
+                "zenith_angle": self.data.uhecr.zenith_angle,
+                "alpha_T": self.data.detector.alpha_T,
+            }
             # arrival direction parameters
             if self.analysis_type == self.gmf_composition_type:  # coordinates at GB
                 self.fit_input["arrival_direction"] = self.data.uhecr.unit_vector_gb
@@ -222,7 +238,7 @@ class Analysis:
         chains: int = 4,
         seed: Union[int, None] = None,
         warmup: Union[int, None] = None,
-        show_progress: bool = True,
+        inits : Union[dict, None] = None,
         **kwargs: dict,
     ):
         """
@@ -240,9 +256,9 @@ class Analysis:
             output directory for raw stan outputs
         warmup : int, default=None
             number of iterations used for warmup
-        show_progress: bool, default=True
-            to show the progress of the fits in a tqdm progress
-            bar or not.
+        inits : Union[dict, None], default=None
+            initial values for the parameters.
+            If None, the default initial values are used.
         kwargs : dict
             additional arguments to pass to the fit method
 
@@ -261,9 +277,26 @@ class Analysis:
         for more details.
         """
         # make sure that the fit inputs are prepared
-        if self.fit_input == {}:
+        if self.fit_input is None:
             raise ValueError("Run `prepare_fit_inputs` first.")
-
+        
+        # set the default init values
+        if inits is None:
+            if self.analysis_type == self.energy_type:
+                inits={
+                    "alphas" : [-1, -1],
+                    "mass_fracs" : np.full((self.fit_input["N"]+1, self.fit_input["NAsrcs"]), 1 / self.fit_input["NAsrcs"]),
+                    "Etrue" : np.full(self.fit_input['NEs'], np.median(self.fit_input["Edet"])),
+                    "f_s" : [0.2, 0.8],
+                    "log10_Ftot" : -2,
+                    "delta_mulnA_sys" : 0.0,
+                    "delta_varlnA_sys" : 0.0,
+                    "delta_logE_sys" : 0.0
+                }
+            else:
+                NotImplementedError(
+                    f"Initial values for analysis type {self.analysis_type} are not implemented."
+                )
         # fit
         print("Performing fitting...")
         self.fit = self.stan_model.sample(
@@ -271,7 +304,6 @@ class Analysis:
             iter_sampling=iterations,
             chains=chains,
             seed=seed,
-            show_progress=show_progress,
             iter_warmup=warmup,
             **kwargs,
         )
@@ -279,6 +311,7 @@ class Analysis:
         # Diagnositics
         print("Checking all diagnostics...")
         print(self.fit.diagnose())
+        print(self.fit.summary())
 
         self.chain = self.fit.stan_variables()
         print("Done!")

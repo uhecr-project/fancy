@@ -2,9 +2,12 @@
 
 import numpy as np
 import astropy.units as u
+from scipy.stats import lognorm
+
+km_per_Mpc = 3.08567758e19 
 
 
-def theta_igmf(R: float, Bigmf: float, D: float, lc: float = 1) -> float:
+def theta_igmf(R: float, beta_egmf: float, D: float, lc_mpc: float = 1) -> float:
     """
     Deflection angle for IGMF in degrees.
 
@@ -12,23 +15,23 @@ def theta_igmf(R: float, Bigmf: float, D: float, lc: float = 1) -> float:
     ----------
     R: float
         rigidity in EV
-    Bigmf: float
-        IGMF magnetic field strength in nG
+    beta_egmf: float
+        EGMF magnetic field spread in nG Mpc^1/2
     D: float
         distance of the source in Mpc
-    lc: float
-         coherence length in Mpc (default 1 Mpc)
+    lc_mpc: float
+        coherence length normalized to 1 Mpc
     """
     return (
         2.3
         * (50 * u.EV / R)
-        * (Bigmf / (1 * u.nG))
+        * (beta_egmf / (1 * u.nG * u.Mpc**1/2))
         * np.sqrt(D / (10 * u.Mpc))
-        * np.sqrt(lc)
+        * np.sqrt(lc_mpc)
     ) * u.deg
 
-def theta_igmfs(Rs : np.ndarray, Bigmf : float, D : float, lc : float=1) -> np.ndarray:
-    return np.array([theta_igmf(R, Bigmf, D, lc).to_value(u.deg) for R in Rs])
+def theta_igmfs(Rs : np.ndarray, beta_egmf : float, D : float, lc_mpc : float=1) -> np.ndarray:
+    return np.array([theta_igmf(R, beta_egmf, D, lc_mpc).to_value(u.deg) for R in Rs])
 
 
 def bounded_power_law(
@@ -84,3 +87,22 @@ def vMF(x: np.array, mu: np.array, kappa: float) -> np.ndarray:
             return (
                 kappa / (4 * np.pi * np.sinh(kappa)) * np.exp(kappa * np.dot(x.T, mu))
             )
+    
+
+def truncated_lognormal_sample(mu, sigma, a, b):
+
+    # Convert to scipy's lognorm parameters
+    s = sigma                  # shape parameter (std dev in log space)
+    scale = np.exp(mu)        # scale = exp(mu)
+
+    # Get CDF values for truncation bounds
+    lower_cdf = lognorm.cdf(a, s=s, scale=scale)
+    upper_cdf = lognorm.cdf(b, s=s, scale=scale)
+
+    # Sample uniformly in truncated CDF range
+    u = np.random.uniform(lower_cdf, upper_cdf, size=1)
+
+    # Invert CDF to get samples
+    samples = lognorm.ppf(u, s=s, scale=scale)
+
+    return samples

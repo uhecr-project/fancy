@@ -26,7 +26,7 @@ class Data:
         self.source = None
         self.detector = None
 
-    def add_source(self: Self, filename: str, label: str = "M82") -> None:
+    def add_source(self: Self, label: str = "M82", filename: str = "sourcedata.h5") -> None:
         """
         Add a source object to the data cotainer from file.
 
@@ -38,31 +38,31 @@ class Data:
             reference label for the source object
         """
         new_source = Source()
-        new_source.load_from_data_file(filename, label)
+        new_source.load_from_data_file(label, filename)
 
         # define source object
         self.source = new_source
 
     def add_uhecr(
         self: Self,
-        filename: str,
         label: str = "TA2015",
         mass_model: str = "EPOS-LHC",
         gmf_model: str = "JF12",
+        filename: str = "UHECRdata.h5",
     ) -> None:
         """
         Add a uhecr object to the data container from file.
 
         Parameters
         ----------
-        filename: str
-            name of the file containing the object's data
         label: str
             reference label for the uhecr dataset
         mass_model : str
             hadronic interaction model used to get the deflection information
         gmf_model : str
             GMF model used to get the deflection information
+        filename: str
+            name of the file containing the object's data
         """
         new_uhecr = Uhecr()
         new_uhecr.load_from_data_file(filename, label, mass_model, gmf_model=gmf_model)

@@ -1,0 +1,632 @@
+"""Class to manage simulation of energy + mass model."""
+
+import os
+import pickle as pickle
+import tempfile
+
+import astropy.units as u
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import truncnorm
+from scipy.interpolate import CubicSpline, RegularGridInterpolator
+from typing_extensions import ClassVar, List, Self, Tuple, Union
+
+from fancy import Data
+from fancy.physics import EnergyLossModel
+from fancy.utils.helpers import km_per_Mpc, truncated_lognormal_sample
+
+
+def get_Edet(log_Etrue, en_unc, Eth, Emax):
+    """Get the detected energies given true energy and energy uncertainty."""
+    # assuming Gaussian uncertainty
+    Edet = truncated_lognormal_sample(log_Etrue, sigma=en_unc, a=Eth, b=Emax)
+    return Edet
+
+
+def get_mean_lnA_det(mean_lnA_true, mean_lnA_unc=2):
+    """Get the detected mean lnA given true mean lnA and uncertainty."""
+    # assuming Gaussian uncertainty
+    a = -(mean_lnA_true) / mean_lnA_unc
+    b = np.inf
+    mean_lnA_det = truncnorm.rvs(a, b, loc=mean_lnA_true, scale=mean_lnA_unc, size=1)
+    return mean_lnA_det
+
+
+def get_var_lnA_det(var_lnA_true, var_lnA_unc=0.5):
+    """Get the detected var lnA given true var lnA and uncertainty."""
+    # assuming Gaussian uncertainty
+    a = (-1 - (var_lnA_true)) / var_lnA_unc
+    b = np.inf
+    var_lnA_det = truncnorm.rvs(a, b, loc=var_lnA_true, scale=var_lnA_unc, size=1)
+    return var_lnA_det
+
+
+class EnergySimulation:
+    """Handles the generation of simulation samples."""
+
+    __truth_input_keys: ClassVar[list] = [
+        "alphas",
+        "mass_fracs",
+        "Nex",
+        "Nex_src",
+        "src_frac",
+        "delta_mulnA_sys",
+        "delta_varlnA_sys",
+        "delta_logE_sys",
+    ]
+
+    def __init__(
+        self,
+        data: Data,
+    ) -> None:
+        """
+        Handle the generation of simulation samples.
+
+        data: fancy.interfaces.Data
+            Data object from fancy
+        energy_loss_table_file: str
+            file for energy tables
+        exposure_table_file: str
+            file where exposure tables are contained
+        gmf_model : str, default="None"
+            the GMF model to use when generating the simulations.
+            Default to None, i.e. we dont perform GMF lensing
+        """
+        self.detector_type = data.detector.label
+        self.mass_model = data.detector.mass_model
+        self.source_type = data.source.label
+
+        # source parameters
+        self.Nsrcs = data.source.N
+
+        # data object that encompasses detector & source information
+        self.data = data
+
+        # other objects we store for later
+        self.energy_grid = None
+        self.lnA_energy_grid = None
+        self.alpha_grid = None
+        self.mass_ids_grid = None
+        self.truths = {}
+        self.config = {}
+
+        # injection solver results
+        self.spectrum_grid = None
+        self.mean_lnA_grid = None
+        self.var_lnA_grid = None
+        self.detection_rates_grid = None
+
+        # shape parameters
+        self.NEs = 0
+        self.NElnAs = 0
+        self.Nalphas = 0
+        self.Nmass_fracs = 0
+
+    def initialise_grids(
+        self: Self,
+        energy_grid: np.ndarray,
+        energy_grid_widths: np.ndarray,
+        lnA_energy_grid: np.ndarray,
+        src_inj_kwargs: dict = {
+            "dinits": [4],
+            "Rmax": 1.7,
+        },
+        bg_inj_kwargs: dict = {
+            "z_max": 3.0,
+            "source_evo": "SFR",
+            "Rmax": 1.7,
+        },
+        energy_loss_model_kwargs: dict = {},
+    ) -> None:
+        """
+        Initialise the energy and lnA grids from the injection solver results from Prince.
+
+        The energies here are default to be in EV. The src and bg_inj_kwargs are used to read off
+        the source and background injection solver results from the Prince run. Modify them as you see fit.
+
+        Parameters
+        ----------
+        energy_grid : np.ndarray
+            the energy grid to use for the simulation
+        lnA_energy_grid : np.ndarray
+            the energy grid for lnA to use for the simulation
+        src_inj_kwargs : dict, optional
+            keyword arguments for the source injection solver, by default {"dinits": [4], "Rmax": 1.7}
+            TODO: add some option where the source label is used automatically / has a choice to do so.
+        bg_inj_kwargs : dict, optional
+            keyword arguments for the background injection solver, by default {"z_max": 3.0, "source_evo": "SFR", "Rmax": 1.7}
+        energy_loss_model_kwargs : dict, optional
+            keyword arguments for the energy loss model, by default {}.
+            What you can enter here is like the cross section model, alpha grid, mass IDs used
+        """
+        self.energy_grid = energy_grid
+        self.energy_grid_widths = energy_grid_widths
+        self.lnA_energy_grid = lnA_energy_grid
+
+        # assert that the dinit is set correctly to the data.source model
+        if "dinits" not in src_inj_kwargs:
+            src_inj_kwargs["dinits"] = self.data.source.label
+            print(f"Using dinit={src_inj_kwargs['dinits']} from data.source.label")
+
+        # TODO: some way to check the dinit
+        # else:
+        #     if src_inj_kwargs["dinit"] != self.data.source.label:
+        #         raise ValueError(f"dinit={src_inj_kwargs['dinit']} does not match data.source.label={self.data.source.label}")
+
+        # initalise the energy loss model
+        energy_loss_model = EnergyLossModel(**energy_loss_model_kwargs)
+        energy_loss_model.load_injection_solvers(
+            src_inj_config=src_inj_kwargs, bg_inj_config=bg_inj_kwargs
+        )
+
+        # store the grids for later use
+        spectra, lnAs = energy_loss_model.compute_spectrum_and_lnA(
+            egrid=self.energy_grid,
+            egrid_lnA=self.lnA_energy_grid,
+            egrid_widths = self.energy_grid_widths
+        )
+
+        # store the injection solver results
+        # NB: shapes are in (Ngrid, Nalphas, Nmass_fracs, Nsrcs)
+        self.spectrum_grid = spectra
+        self.mean_lnA_grid = lnAs[0, ...]
+        self.var_lnA_grid = lnAs[1, ...]
+        self.alpha_grid = energy_loss_model.alphas
+        self.mass_ids_grid = energy_loss_model.massids
+
+        # store the shape parameters
+        self.NEs = self.spectrum_grid.shape[0]
+        self.Nalphas = self.spectrum_grid.shape[1]
+        self.Nmass_fracs = self.spectrum_grid.shape[2]
+        self.NElnAs = self.mean_lnA_grid.shape[0]
+
+        # also compute the detection rate grid here
+        self.detection_rates_grid = np.trapz(
+            self.spectrum_grid, x=self.energy_grid, axis=0
+        )
+
+        # store all these in the config dictionary
+        self.config["energy_grid"] = self.energy_grid
+        self.config["energy_grid_widths"] = self.energy_grid_widths
+        self.config["lnA_energy_grid"] = self.lnA_energy_grid
+        self.config["spectrum_grid"] = self.spectrum_grid
+        self.config["mean_lnA_grid"] = self.mean_lnA_grid
+        self.config["var_lnA_grid"] = self.var_lnA_grid
+        self.config["detection_rates_grid"] = self.detection_rates_grid
+        self.config["alpha_grid"] = self.alpha_grid
+        self.config["mass_ids_grid"] = self.mass_ids_grid
+        self.config["Nsrcs"] = self.Nsrcs
+        self.config["NEs"] = self.NEs
+        self.config["NElnAs"] = self.NElnAs
+        self.config["Nalphas"] = self.Nalphas
+        self.config["Nmass_fracs"] = self.Nmass_fracs
+
+    def set_truths(
+        self: Self,
+        mass_fracs: np.ndarray,
+        alphas: np.ndarray,
+        source_fraction: float = 0.5,
+        Nevents: int = 200,
+        sys_params: dict = {
+            "logE": 0.1,
+            "mean_lnA": 0.1,
+            "var_lnA": 0.1,
+        },
+    ) -> dict:
+        """
+        Set the truth values for the simulation.
+
+        Parameters
+        ----------
+        mass_fracs : np.ndarray
+            the mass fractions for the sources
+        alphas : np.ndarray
+            the spectral indices for the sources
+        source_fraction : float, optional
+            fraction of sources to use, by default 0.5
+        Nevents : int, optional
+            number of events to simulate, by default 200
+        sys_params : dict, optional
+            systematics parameters for the simulation, by default {
+                "logE" : 0.1,
+                "mulnA" : 0.1,
+                "varlnA" : 0.1,
+            }
+
+        Returns
+        -------
+        dict
+            dictionary with truth values for the simulation.
+        """
+        # ensure that we have the correct shape for the mass fractions and alphas
+        if mass_fracs.shape[0] != self.Nmass_fracs:
+            raise ValueError(f"mass_fracs must have shape {self.Nmass_fracs}")
+
+        if (mass_fracs.shape[1] != self.Nsrcs+1) or (alphas.shape[0] != self.Nsrcs+1):
+            raise ValueError(
+                f"mass_fracs and alphas must have shape {self.Nsrcs+1} in second axis"
+            )
+
+        # set the truth values based on the input parameters
+        fit_truths = {
+            "alphas": alphas,
+            "mass_fracs": mass_fracs,
+            "Nex": Nevents,
+            "Nex_src": int(source_fraction * Nevents),
+            "Nex_bg": Nevents - int(source_fraction * Nevents),
+            "src_frac": source_fraction,
+            "delta_mulnA_sys": sys_params["mean_lnA"],
+            "delta_varlnA_sys": sys_params["var_lnA"],
+            "delta_logE_sys": sys_params["logE"],
+        }
+
+        fit_truths = self.__compute_flux_truths(
+            fit_truths
+        )
+
+        # set it as an object
+        self.truths = fit_truths
+
+        return fit_truths
+
+    def __compute_flux_truths(self: Self, truths: dict) -> dict:
+        """
+        Compute the truths related to the fluxes and store this in the truths dictionary.
+
+        Parameters
+        ----------
+        truths : dict
+            dictionary with truth values for the simulation.
+        """
+        alpha_T = self.data.detector.alpha_T
+
+        # extending the mass fractions to include alpha axis
+        # summing over mass fraction axis here.
+        Nexes_per_fluxes_grid = np.sum(
+            self.detection_rates_grid
+            * truths["mass_fracs"][np.newaxis, :, :]
+            * alpha_T,
+            axis=1,
+        )
+        f_Nex_per_flux = CubicSpline(self.alpha_grid, Nexes_per_fluxes_grid, axis=0)
+        Nex_per_flux = np.array(
+            [f_Nex_per_flux(truths["alphas"][k])[k] for k in range(self.Nsrcs)]
+        )
+
+        Fsrcs_truths = np.zeros(self.Nsrcs)  # excluding the background source
+        Qsrcs_truths = np.zeros(self.Nsrcs)
+        for k in range(self.Nsrcs):
+            Fsrcs_truths[k] = truths["Nex_src"] / Nex_per_flux[k]
+            Qsrcs_truths[k] = (
+                truths["Nex_src"]
+                / Nex_per_flux[k]
+                * (4 * np.pi * (self.data.source.distance[k] * km_per_Mpc) ** 2)
+            )
+
+        truths["Qsrcs"] = Qsrcs_truths
+        truths["log10_Qsrcs"] = np.log10(truths["Qsrcs"])
+
+        # also compute the background flux
+        truths["F0"] = truths["Nex_bg"] / Nex_per_flux[-1]
+        truths["log10_F0"] = np.log10(truths["F0"])
+
+        truths["Ftot"] = np.sum(Fsrcs_truths) + truths["F0"]
+        truths["log10_Ftot"] = np.log10(truths["Ftot"])
+
+        truths["Nex_per_src"] = (
+            np.concatenate([Fsrcs_truths, [truths["F0"]]]).T * Nex_per_flux
+        ).astype(int)
+
+        # double check that the calculation makes sense
+        Nex_expected = np.sum(
+            Fsrcs_truths * Nex_per_flux[:-1] + truths["F0"] * Nex_per_flux[-1]
+        )
+
+        # print(f"Nex_expected: {Nex_expected} compared to true Nex: {truths['Nex']}")
+
+        return truths
+
+    def generate_samples(
+        self: Self, seed: Union[int, None] = None
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Generate samples (energy truths, lnA truths) from the simulation.
+
+        Parameters
+        ----------
+        seed : int or None, optional
+            random seed for reproducibility, by default None
+        """
+        rng = np.random.default_rng(seed=seed)
+
+        Etruths = np.zeros(self.truths["Nex"])
+        mean_lnA_truths = np.zeros(self.NElnAs)
+        var_lnA_truths = np.zeros(self.NElnAs)
+
+        # calculatig mass fraction weighted values
+        energy_spect_mf = np.sum(
+            self.spectrum_grid
+            * self.truths["mass_fracs"][np.newaxis, np.newaxis, :, :],
+            axis=2,
+        )
+        mean_lnA_mfs = np.sum(
+            self.mean_lnA_grid
+            * self.truths["mass_fracs"][np.newaxis, np.newaxis, :, :],
+            axis=2,
+        )
+        var_lnA_mfs = np.sum(
+            self.var_lnA_grid * self.truths["mass_fracs"][np.newaxis, np.newaxis, :, :],
+            axis=2,
+        )
+
+        # create an 2-D interpolation grid
+        f_log_espect = RegularGridInterpolator(
+            (np.log10(self.energy_grid), self.alpha_grid), np.log(energy_spect_mf)
+        )
+
+        f_mulnA = CubicSpline(y=mean_lnA_mfs, x=self.alpha_grid, axis=1)
+        f_varlnA = CubicSpline(y=var_lnA_mfs, x=self.alpha_grid, axis=1)
+
+        N_prev_idx = 0
+        
+        for k in range(self.Nsrcs+1): # +1 for the background source
+            alpha_truth = self.truths["alphas"][k]
+            en_spect = np.exp(
+                f_log_espect((np.log10(self.energy_grid), alpha_truth))[:, k]
+            )
+            en_prob = (en_spect * self.energy_grid_widths) / np.sum(
+                en_spect * self.energy_grid_widths
+            )
+
+            Nex_per_src = self.truths["Nex_per_src"][k]
+            N_next_idx = Nex_per_src + N_prev_idx
+            en_samples_src = rng.choice(
+                self.energy_grid, size=Nex_per_src, p=en_prob
+            )
+            Etruths[N_prev_idx:N_next_idx] = en_samples_src
+
+            N_prev_idx = Nex_per_src
+
+            # ideally this would be calcualted via number of expected events per flux * flux
+            # which would be evaluated per distance
+            # but since we just have a two-source model, we just use the source fraction
+            # for sake of conveninencec
+            # fac = self.truths['src_frac'] if k < len(distances) else (1 - self.truths['src_frac'])
+            mean_lnA_truths += Nex_per_src * f_mulnA(alpha_truth)[:, k] / self.truths['Nex']
+            var_lnA_truths += Nex_per_src * f_varlnA(alpha_truth)[:, k] / self.truths['Nex']
+
+        # now we have the energy truths, mean lnA truths and var lnA truths
+        self.truths["Etruths"] = Etruths
+        self.truths["mean_lnA_truths"] = mean_lnA_truths
+        self.truths["var_lnA_truths"] = var_lnA_truths
+
+        return Etruths, mean_lnA_truths, var_lnA_truths
+
+    def apply_detector_response(
+        self: Self,
+        mean_lnA_unc: Union[float, np.ndarray],
+        var_lnA_unc: Union[float, np.ndarray],
+        energy_unc: Union[float, None] = None,
+    ) -> None:
+        """
+        Apply the detector response to the simulation truths.
+
+        Parameters
+        ----------
+        mean_lnA_unc : Union[np.ndarray, float]
+            uncertainty in the mean lnA values. If float, assumes a universal value for
+            all bins, otherwise takes in a different value for each bin.
+            Shape should be (NlnA_bins,) 
+        var_lnA_unc : Union[np.ndarray, float]
+            uncertainty in the variance of lnA values. If float, assumes a universal value for
+            all bins, otherwise takes in a different value for each bin.
+            Shape should be (NlnA_bins,) 
+        energy_unc : float
+            uncertainty in the logarithm of energy values, in percentage of the truth.
+        """
+        if isinstance(mean_lnA_unc, float):
+            mean_lnA_unc = np.full(self.NElnAs, mean_lnA_unc)
+        
+        if isinstance(var_lnA_unc, float):
+            var_lnA_unc = np.full(self.NElnAs, var_lnA_unc)
+
+        # if None then use the energy uncertainty reported in 
+        # data.detector
+        if energy_unc is None:
+            energy_unc = self.data.detector.f_E
+
+        # apply the uncertainties to the truths
+        Edets = np.array(
+            [
+                get_Edet(
+                    np.log(en) + self.truths["delta_logE_sys"],
+                    en_unc=energy_unc,
+                    Eth=np.min(self.energy_grid),
+                    Emax=np.max(self.energy_grid),
+                )
+                for en in self.truths["Etruths"]
+            ]
+        ).flatten()
+        mean_lnA_dets = np.array(
+            [
+                get_mean_lnA_det(
+                    mean_lnA + self.truths["delta_mulnA_sys"],
+                    mean_lnA_unc=mean_lnA_unc[ibin],
+                )
+                for ibin, mean_lnA in enumerate(self.truths["mean_lnA_truths"])
+            ]
+        ).flatten()
+        var_lnA_dets = np.array(
+            [
+                get_var_lnA_det(
+                    var_lnA + self.truths["delta_varlnA_sys"],
+                    var_lnA_unc=var_lnA_unc[ibin],
+                )
+                for ibin, var_lnA in enumerate(self.truths["var_lnA_truths"])
+            ]
+        ).flatten()
+
+        # store the detected values in the truths dictionary
+        self.truths["Edets"] = Edets
+        self.truths["mean_lnA_dets"] = mean_lnA_dets
+        self.truths["var_lnA_dets"] = var_lnA_dets
+
+        # also set the uncertainties here
+        self.config["mean_lnA_unc"] = mean_lnA_unc
+        self.config["var_lnA_unc"] = var_lnA_unc
+        self.config["energy_unc"] = energy_unc
+
+        return Edets, mean_lnA_dets, var_lnA_dets
+
+    def save_truths(self: Self, filename: str = None) -> None:
+        """
+        Save the truths to a file.
+
+        Parameters
+        ----------
+        filename : str, optional
+            filename to save the truths to, by default None.
+            If None, a temporary file will be created.
+        """
+        if filename is None:
+            # create a temporary file
+            fd, filename = tempfile.mkstemp(suffix=".pkl")
+            os.close(fd)
+
+        # save the truths to the file
+        with open(filename, "wb") as f:
+            pickle.dump(self.truths, f)
+
+        print(f"Saved truths to {filename}")
+
+    def plot_samples(self: Self) -> None:
+        """
+        Plot the energy spectrum and lnA distributions of the samples.
+
+        This will plot the energy spectrum and lnA distributions of the samples.
+        It will also plot the total energy spectrum and lnA distributions.
+
+        This function is meant to be a quick way to check if the code is doing the
+        right thing. If you want something more advanced then use the outputs directly.
+        """
+        fig, axs = plt.subplots(3, 1, gridspec_kw={'height_ratios': [3, 1, 1]}, figsize=(10,10))
+
+        dis_labels = ["src", "bg"]
+        dis_lss = ["--", ":"]
+
+        tot_espect = np.zeros_like(self.energy_grid)
+
+        for k in range(self.Nsrcs+1):
+            alpha_idx = np.digitize(self.truths["alphas"][k], self.alpha_grid) - 1
+            for ims, massid in enumerate(self.mass_ids_grid):
+                # get the energy grid
+                axs[0].loglog(
+                    self.energy_grid,
+                    self.spectrum_grid[:, alpha_idx, ims, k]
+                    * self.truths["mass_fracs"][ims, k],
+                    color=f"C{ims}",
+                    ls=dis_lss[k],
+                    label=f"{massid}, {dis_labels[k]}",
+                )
+
+                # get the lnA grid
+                axs[1].semilogx(
+                    self.lnA_energy_grid,
+                    self.mean_lnA_grid[:, alpha_idx, ims, k]
+                    * self.truths["mass_fracs"][ims, k],
+                    color=f"C{ims}",
+                    ls=dis_lss[k],
+                    label=f"{massid}, {dis_labels[k]}",
+                )
+                axs[2].semilogx(
+                    self.lnA_energy_grid,
+                    self.var_lnA_grid[:, alpha_idx, ims, k]
+                    * self.truths["mass_fracs"][ims, k],
+                    color=f"C{ims}",
+                    ls=dis_lss[k],
+                    label=f"{massid}, {dis_labels[k]}",
+                )
+
+            axs[1].semilogx(
+                self.lnA_energy_grid,
+                np.sum(
+                    self.mean_lnA_grid[:, alpha_idx, :, k]
+                    * self.truths["mass_fracs"][None, :, k],
+                    axis=1,
+                ),
+                color="k",
+                ls=dis_lss[k],
+                lw=2,
+                label=f"total, {dis_labels[k]}",
+            )
+            axs[2].semilogx(
+                self.lnA_energy_grid,
+                np.sum(
+                    self.var_lnA_grid[:, alpha_idx, :, k]
+                    * self.truths["mass_fracs"][None, :, k],
+                    axis=1,
+                ),
+                color="k",
+                ls=dis_lss[k],
+                lw=2,
+                label=f"total, {dis_labels[k]}",
+            )
+
+            tot_espect_per_d = np.sum(
+                self.spectrum_grid[:, alpha_idx, :, k] * self.truths['mass_fracs'][np.newaxis, :, k],
+                axis=-1,
+            )
+
+            axs[0].loglog(
+                self.energy_grid,
+                tot_espect_per_d,
+                color="k",
+                ls=dis_lss[k],
+                lw=2,
+                label=f"total, {dis_labels[k]}",
+            )
+            axs[1].semilogx(
+                self.lnA_energy_grid,
+                self.truths["mean_lnA_truths"],
+                color="k",
+                ls="-",
+                lw=3,
+                label="total",
+            )
+            axs[2].semilogx(
+                self.lnA_energy_grid,
+                self.truths["var_lnA_truths"],
+                color="k",
+                ls="-",
+                lw=3,
+                label="total",
+            )
+
+            tot_espect += self.truths["Nex_per_src"][k] * tot_espect_per_d / self.truths["Nex"]
+
+        # plot total spectrum
+        axs[0].loglog(
+            self.energy_grid, tot_espect, color="k", ls="-", lw=3, label="total"
+        )
+
+        # histogram the samples
+        hist_vals, ebinedges = np.histogram(
+            self.truths["Etruths"], bins=20, density=False
+        )
+        yvals = hist_vals / np.sum(hist_vals) / np.diff(ebinedges)
+        yerr = np.sqrt(hist_vals) / np.sum(hist_vals) / np.diff(ebinedges)  # Error bars
+        axs[0].errorbar(
+            np.sqrt(ebinedges[:-1] * ebinedges[1:]),
+            yvals,
+            yerr=yerr,
+            fmt="o",
+            label="sampled",
+            color="gray",
+        )
+
+        axs[2].set_xlabel(r"$E$ [EeV]")
+        axs[0].set_ylabel("energy spectrum")
+        axs[1].set_ylabel("mean lnA")
+        axs[2].set_ylabel("var lnA")
+        axs[0].legend()
+        axs[0].set_ylim(ymin=1e-7, ymax=1)
