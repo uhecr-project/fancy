@@ -7,6 +7,7 @@ import tempfile
 import astropy.units as u
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 from scipy.stats import truncnorm
 from scipy.interpolate import CubicSpline, RegularGridInterpolator
 from typing_extensions import ClassVar, List, Self, Tuple, Union
@@ -39,6 +40,20 @@ def get_var_lnA_det(var_lnA_true, var_lnA_unc=0.5):
     b = np.inf
     var_lnA_det = truncnorm.rvs(a, b, loc=var_lnA_true, scale=var_lnA_unc, size=1)
     return var_lnA_det
+
+charge_massid_map = {
+    101 : 1,
+    402 : 2,
+    1407 : 7,
+    2814 : 14,
+    5626 : 26
+}
+
+def source_spectrum(energy, alpha, charge, Rmax = 1.7):
+    """Return the source spectrum."""
+    Emax = charge * Rmax
+    exp_cutoff = np.where(energy > Emax, np.exp(1 - energy / Emax), 1.0)
+    return energy**-alpha * exp_cutoff
 
 
 class EnergySimulation:
@@ -173,6 +188,9 @@ class EnergySimulation:
         self.var_lnA_grid = lnAs[1, ...]
         self.alpha_grid = energy_loss_model.alphas
         self.mass_ids_grid = energy_loss_model.massids
+        charges = np.array(
+            [charge_massid_map[massid] for massid in self.mass_ids_grid]
+        )
 
         # store the shape parameters
         self.NEs = self.spectrum_grid.shape[0]
@@ -181,8 +199,23 @@ class EnergySimulation:
         self.NElnAs = self.mean_lnA_grid.shape[0]
 
         # also compute the detection rate grid here
+        self.src_spectrum_grid = source_spectrum(
+            self.energy_grid[:, np.newaxis, np.newaxis, np.newaxis],
+            self.alpha_grid[np.newaxis, :, np.newaxis, np.newaxis],
+            charges[np.newaxis, np.newaxis, :, np.newaxis],
+            Rmax=src_inj_kwargs["Rmax"],
+        )
+        # this gives the fraction of detected events for a given source 
+        # at given alpha for each mass ID
         self.detection_rates_grid = np.trapz(
             self.spectrum_grid, x=self.energy_grid, axis=0
+        )
+        self.src_detection_rates_grid = np.trapz(
+            self.src_spectrum_grid, x=self.energy_grid, axis=0
+        )
+
+        self.esrc_ratio_grid = np.trapz(y=self.energy_grid[:,None,None,None] * self.src_spectrum_grid, x=self.energy_grid, axis=0) / np.trapz(
+            y=self.src_spectrum_grid, x=self.energy_grid, axis=0
         )
 
         # store all these in the config dictionary
@@ -193,6 +226,8 @@ class EnergySimulation:
         self.config["mean_lnA_grid"] = self.mean_lnA_grid
         self.config["var_lnA_grid"] = self.var_lnA_grid
         self.config["detection_rates_grid"] = self.detection_rates_grid
+        self.config["src_spectrum_grid"] = self.src_spectrum_grid
+        self.config["esrc_ratio_grid"] = self.esrc_ratio_grid
         self.config["alpha_grid"] = self.alpha_grid
         self.config["mass_ids_grid"] = self.mass_ids_grid
         self.config["Nsrcs"] = self.Nsrcs
@@ -206,7 +241,8 @@ class EnergySimulation:
         mass_fracs: np.ndarray,
         alphas: np.ndarray,
         source_fraction: float = 0.5,
-        Nevents: int = 200,
+        Lsrcs: Union[np.ndarray, None] = None,
+        Nex : Union[int, None] = None,
         sys_params: dict = {
             "logE": 0.1,
             "mean_lnA": 0.1,
@@ -224,8 +260,12 @@ class EnergySimulation:
             the spectral indices for the sources
         source_fraction : float, optional
             fraction of sources to use, by default 0.5
-        Nevents : int, optional
-            number of events to simulate, by default 200
+        Lsrc: np.ndarray, optional, default = None
+            luminosity of the sources, by default None
+            If None, then Nex must be provided.
+        Nex : int, optional
+            total number of expected events in the simulation, by default None
+            If None, then Lsrcs must be provided.
         sys_params : dict, optional
             systematics parameters for the simulation, by default {
                 "logE" : 0.1,
@@ -247,13 +287,21 @@ class EnergySimulation:
                 f"mass_fracs and alphas must have shape {self.Nsrcs+1} in second axis"
             )
 
+        if (Lsrcs is None) and (Nex is None):
+            raise ValueError(
+                "Either Lsrcs or Nex must be provided. Both cannot be None."
+            )
+        if (Lsrcs is not None) and (Nex is not None):
+            raise ValueError(
+                "Either Lsrcs or Nex must be provided. Both cannot be provided."
+            )
+
         # set the truth values based on the input parameters
         fit_truths = {
             "alphas": alphas,
             "mass_fracs": mass_fracs,
-            "Nex": Nevents,
-            "Nex_src": int(source_fraction * Nevents),
-            "Nex_bg": Nevents - int(source_fraction * Nevents),
+            "Lsrcs" : Lsrcs,
+            "Nex" : Nex,
             "src_frac": source_fraction,
             "delta_mulnA_sys": sys_params["mean_lnA"],
             "delta_varlnA_sys": sys_params["var_lnA"],
@@ -282,47 +330,118 @@ class EnergySimulation:
 
         # extending the mass fractions to include alpha axis
         # summing over mass fraction axis here.
-        Nexes_per_fluxes_grid = np.sum(
+        earth_flux_det_rate = np.sum(
             self.detection_rates_grid
             * truths["mass_fracs"][np.newaxis, :, :]
             * alpha_T,
             axis=1,
         )
-        f_Nex_per_flux = CubicSpline(self.alpha_grid, Nexes_per_fluxes_grid, axis=0)
-        Nex_per_flux = np.array(
-            [f_Nex_per_flux(truths["alphas"][k])[k] for k in range(self.Nsrcs)]
+        f_earth_flux_det = CubicSpline(self.alpha_grid, earth_flux_det_rate, axis=0)
+        earth_flux_det_rate = np.array(
+            [f_earth_flux_det(truths["alphas"][k])[k] for k in range(self.Nsrcs)]
         )
 
-        Fsrcs_truths = np.zeros(self.Nsrcs)  # excluding the background source
-        Qsrcs_truths = np.zeros(self.Nsrcs)
-        for k in range(self.Nsrcs):
-            Fsrcs_truths[k] = truths["Nex_src"] / Nex_per_flux[k]
-            Qsrcs_truths[k] = (
-                truths["Nex_src"]
-                / Nex_per_flux[k]
-                * (4 * np.pi * (self.data.source.distance[k] * km_per_Mpc) ** 2)
+        src_flux_det_rate = np.sum(
+            self.src_detection_rates_grid
+            * truths["mass_fracs"][np.newaxis, :, :]
+            * alpha_T,
+            axis=1,
+        )
+        f_src_flux_det = CubicSpline(self.alpha_grid, src_flux_det_rate, axis=0)
+        src_flux_det_rate = np.array(
+            [f_src_flux_det(truths["alphas"][k])[k] for k in range(self.Nsrcs)]
+        )
+
+        # calculate conversion from L -> Q
+        f_en_ratio = CubicSpline(
+            self.alpha_grid, 
+            np.sum(
+                self.esrc_ratio_grid * truths["mass_fracs"][np.newaxis, :, :], axis=1), axis=0
+        )
+
+        # now calculate truths based on if we have Nex or Lsrcs or not
+        if truths["Nex"] is not None:
+            Nex = truths["Nex"] 
+            Nex_src = int(truths["Nex"] * truths["src_frac"])
+            Nex_bg = truths["Nex"] - Nex_src
+
+            # here: calculate the total flux from the source at Earth
+            Fearth_tot = Nex_src / alpha_T
+
+            # then calcualte the particle rate by multiplying by distance factor
+            Qearths_truths = Fearth_tot * (4 * np.pi * (self.data.source.distance * km_per_Mpc) ** 2)
+
+            # convert to source particle rate 
+            Qsrcs_truths = Qearths_truths * src_flux_det_rate / earth_flux_det_rate
+            Fsrcs_truths = Qsrcs_truths / (4 * np.pi * (self.data.source.distance * km_per_Mpc) ** 2)
+
+            # now we can calculate the relative contribution of each source to the flux at Earth
+            Fearths_truths = Qearths_truths / (4 * np.pi * (self.data.source.distance * km_per_Mpc) ** 2)
+            
+            # luminosity simply calculated via multiplying with Eex
+            Lsrcs = Qsrcs_truths * np.array([f_en_ratio(truths["alphas"][k])[k] for k in range(self.Nsrcs)])
+
+            truths["Lsrcs"]= Lsrcs
+            truths["log10_Lsrcs"] = np.log10(Lsrcs)
+            truths["Nex_src"] = Nex_src
+            truths["Nex_bg"] = Nex_bg
+
+        elif truths["Lsrcs"] is not None:
+            Qsrcs_truths = truths["Lsrcs"] / np.array([f_en_ratio(truths["alphas"][k])[k] for k in range(self.Nsrcs)]
+            )
+            Qearths_truths = Qsrcs_truths * earth_flux_det_rate / src_flux_det_rate 
+            
+            Fsrcs_truths = np.zeros(self.Nsrcs)  # excluding the background source
+            Fearths_truths = np.zeros(self.Nsrcs)  # including the background source
+            Nex_src = 0.0
+            for k in range(self.Nsrcs):
+                Fsrcs_truths[k] = Qsrcs_truths[k] / (4 * np.pi * (self.data.source.distance[k] * km_per_Mpc) ** 2) 
+                Fearths_truths[k] = Qearths_truths[k] / (4 * np.pi * (self.data.source.distance[k] * km_per_Mpc) ** 2)
+                # Nex_src += Fearths_truths[k] * Nex_per_flux[k] 
+                Nex_src += Fearths_truths[k] * alpha_T
+
+            Nex_src = int(Nex_src)
+            Nex = int(Nex_src / truths["src_frac"])
+            Nex_bg = Nex - Nex_src
+
+            truths["Nex"] = Nex
+            truths["Nex_src"] = Nex_src
+            truths["Nex_bg"] = Nex_bg
+            truths["log10_Lsrcs"] = np.log10(truths["Lsrcs"])
+        else:
+            raise ValueError(
+                "Either Nex or Lsrcs must be provided in the truths dictionary."
             )
 
-        truths["Qsrcs"] = Qsrcs_truths
-        truths["log10_Qsrcs"] = np.log10(truths["Qsrcs"])
+        print(f"Total number of expected events: {Nex} (src: {Nex_src}, bg: {Nex_bg})")
+   
+        
 
-        # also compute the background flux
-        truths["F0"] = truths["Nex_bg"] / Nex_per_flux[-1]
+        truths["Qsrcs"] = Qsrcs_truths
+        truths["Qearths"] = Qearths_truths
+        truths["Fsrcs"] = Fsrcs_truths
+        truths["log10_Fsrcs"] = np.log10(Fsrcs_truths)
+
+        truths["Fearths"] = Fearths_truths
+        truths["log10_Fearths"] = np.log10(Fearths_truths)
+
+        truths["F0"] = Nex_bg / alpha_T
         truths["log10_F0"] = np.log10(truths["F0"])
 
-        truths["Ftot"] = np.sum(Fsrcs_truths) + truths["F0"]
+        truths["Ftot"] = np.sum(Fearths_truths) + truths["F0"]
         truths["log10_Ftot"] = np.log10(truths["Ftot"])
 
+        print(Fearths_truths)
         truths["Nex_per_src"] = (
-            np.concatenate([Fsrcs_truths, [truths["F0"]]]).T * Nex_per_flux
+            np.concatenate([Fearths_truths, [truths["F0"]]]).T * alpha_T
         ).astype(int)
 
         # double check that the calculation makes sense
         Nex_expected = np.sum(
-            Fsrcs_truths * Nex_per_flux[:-1] + truths["F0"] * Nex_per_flux[-1]
+            (Fearths_truths + truths["F0"]) * alpha_T
         )
 
-        # print(f"Nex_expected: {Nex_expected} compared to true Nex: {truths['Nex']}")
+        print(f"Nex_expected: {Nex_expected} compared to true Nex: {truths['Nex']}")
 
         return truths
 
@@ -499,7 +618,7 @@ class EnergySimulation:
 
         print(f"Saved truths to {filename}")
 
-    def plot_samples(self: Self) -> None:
+    def plot_samples(self: Self) -> Tuple[mpl.figure.Figure, mpl.axes.Axes]:
         """
         Plot the energy spectrum and lnA distributions of the samples.
 
@@ -630,3 +749,5 @@ class EnergySimulation:
         axs[2].set_ylabel("var lnA")
         axs[0].legend()
         axs[0].set_ylim(ymin=1e-7, ymax=1)
+
+        return fig, axs
