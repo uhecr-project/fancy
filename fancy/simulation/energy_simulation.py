@@ -243,11 +243,6 @@ class EnergySimulation:
         source_fraction: float = 0.5,
         Lsrcs: Union[np.ndarray, None] = None,
         Nex : Union[int, None] = None,
-        sys_params: dict = {
-            "logE": 0.1,
-            "mean_lnA": 0.1,
-            "var_lnA": 0.1,
-        },
     ) -> dict:
         """
         Set the truth values for the simulation.
@@ -266,12 +261,6 @@ class EnergySimulation:
         Nex : int, optional
             total number of expected events in the simulation, by default None
             If None, then Lsrcs must be provided.
-        sys_params : dict, optional
-            systematics parameters for the simulation, by default {
-                "logE" : 0.1,
-                "mulnA" : 0.1,
-                "varlnA" : 0.1,
-            }
 
         Returns
         -------
@@ -303,9 +292,6 @@ class EnergySimulation:
             "Lsrcs" : Lsrcs,
             "Nex" : Nex,
             "src_frac": source_fraction,
-            "delta_mulnA_sys": sys_params["mean_lnA"],
-            "delta_varlnA_sys": sys_params["var_lnA"],
-            "delta_logE_sys": sys_params["logE"],
         }
 
         fit_truths = self.__compute_flux_truths(
@@ -523,43 +509,53 @@ class EnergySimulation:
 
     def apply_detector_response(
         self: Self,
-        mean_lnA_unc: Union[float, np.ndarray],
-        var_lnA_unc: Union[float, np.ndarray],
-        energy_unc: Union[float, None] = None,
+        mean_lnA_stat: Union[float, np.ndarray],
+        var_lnA_stat: Union[float, np.ndarray],
+        logE_stat: Union[float, None] = None,
+        mean_lnA_sys : float = 0.0,
+        var_lnA_sys : float = 0.0,
+        logE_sys : float = 0.0,
     ) -> None:
         """
         Apply the detector response to the simulation truths.
 
         Parameters
         ----------
-        mean_lnA_unc : Union[np.ndarray, float]
+        mean_lnA_stat : Union[np.ndarray, float]
             uncertainty in the mean lnA values. If float, assumes a universal value for
             all bins, otherwise takes in a different value for each bin.
             Shape should be (NlnA_bins,) 
-        var_lnA_unc : Union[np.ndarray, float]
+        var_lnA_stat : Union[np.ndarray, float]
             uncertainty in the variance of lnA values. If float, assumes a universal value for
             all bins, otherwise takes in a different value for each bin.
             Shape should be (NlnA_bins,) 
         energy_unc : float
             uncertainty in the logarithm of energy values, in percentage of the truth.
+            If None, then uses the energy uncertainty reported in data.detector.f_E.
+        mean_lnA_sys : float, optional
+            global systematic uncertainty in the mean lnA values, by default 0.0
+        var_lnA_sys : float, optional
+            global systematic uncertainty in the variance of lnA values, by default 0.0
+        logE_sys : float, optional
+            global systematic uncertainty in the logarithm of energy values, by default 0.0
         """
-        if isinstance(mean_lnA_unc, float):
-            mean_lnA_unc = np.full(self.NElnAs, mean_lnA_unc)
+        if isinstance(mean_lnA_stat, float):
+            mean_lnA_stat = np.full(self.NElnAs, mean_lnA_stat)
         
-        if isinstance(var_lnA_unc, float):
-            var_lnA_unc = np.full(self.NElnAs, var_lnA_unc)
+        if isinstance(var_lnA_stat, float):
+            var_lnA_stat = np.full(self.NElnAs, var_lnA_stat)
 
         # if None then use the energy uncertainty reported in 
         # data.detector
-        if energy_unc is None:
-            energy_unc = self.data.detector.f_E
+        if logE_stat is None:
+            logE_stat = self.data.detector.f_E
 
         # apply the uncertainties to the truths
         Edets = np.array(
             [
                 get_Edet(
-                    np.log(en) + self.truths["delta_logE_sys"],
-                    en_unc=energy_unc,
+                    np.log(en) + logE_sys,
+                    en_unc=logE_stat,
                     Eth=np.min(self.energy_grid),
                     Emax=np.max(self.energy_grid),
                 )
@@ -569,8 +565,8 @@ class EnergySimulation:
         mean_lnA_dets = np.array(
             [
                 get_mean_lnA_det(
-                    mean_lnA + self.truths["delta_mulnA_sys"],
-                    mean_lnA_unc=mean_lnA_unc[ibin],
+                    mean_lnA + mean_lnA_sys,
+                    mean_lnA_unc=mean_lnA_stat[ibin],
                 )
                 for ibin, mean_lnA in enumerate(self.truths["mean_lnA_truths"])
             ]
@@ -578,8 +574,8 @@ class EnergySimulation:
         var_lnA_dets = np.array(
             [
                 get_var_lnA_det(
-                    var_lnA + self.truths["delta_varlnA_sys"],
-                    var_lnA_unc=var_lnA_unc[ibin],
+                    var_lnA + var_lnA_sys,
+                    var_lnA_unc=var_lnA_stat[ibin],
                 )
                 for ibin, var_lnA in enumerate(self.truths["var_lnA_truths"])
             ]
@@ -591,9 +587,12 @@ class EnergySimulation:
         self.truths["var_lnA_dets"] = var_lnA_dets
 
         # also set the uncertainties here
-        self.config["mean_lnA_unc"] = mean_lnA_unc
-        self.config["var_lnA_unc"] = var_lnA_unc
-        self.config["energy_unc"] = energy_unc
+        self.config["mean_lnA_stat"] = mean_lnA_stat
+        self.config["var_lnA_stat"] = var_lnA_stat
+        self.config["logE_stat"] = logE_stat
+        self.config["mean_lnA_sys"] = mean_lnA_sys
+        self.config["var_lnA_sys"] = var_lnA_sys
+        self.config["logE_sys"] = logE_sys
 
         return Edets, mean_lnA_dets, var_lnA_dets
 

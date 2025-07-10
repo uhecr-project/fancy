@@ -54,18 +54,12 @@ class PPCEnergy:
             "mass_fracs",
             "Nex",
             "source_fraction",
-            "logE",
-            "mean_lnA",
-            "var_lnA",
         ]
         hyperparams_fit = [
             "alphas",
             "mass_fracs",
             "Nex",
             "src_frac",
-            "delta_logE_sys",
-            "delta_mulnA_sys",
-            "delta_varlnA_sys",
         ]
 
         energy_ppcs = []
@@ -81,30 +75,19 @@ class PPCEnergy:
 
             # get the hyperparameters
             hyperparams_vals = {}
-            sys_params = {}
             for ihp, hp in enumerate(hyperparams_fit):
                 param = self.fit.stan_variables()[hp][pos_idx]
                 if hp == "Nex":
                     param = int(param)
-                    print(param)
-
-                    # param /= 0.05076991387177731 
                     hyperparams_vals[hyperparams[ihp]] = param
                 elif hp == "mass_fracs":
                     param = param.T
                     hyperparams_vals[hyperparams[ihp]] = param
-                if "delta" in hp:
-                    sys_params[hyperparams[ihp]] = param
                 else:
                     hyperparams_vals[hyperparams[ihp]] = param
 
             # get the energy, mean lnA and var lnA
-            self.energy_simulation.set_truths(**hyperparams_vals, sys_params=sys_params)
-
-            # if self.energy_simulation.truths["Nex"] <= 10 or self.energy_simulation.truths["Nex"] > 300:
-            #     # skip this sample if Nex is not in a reasonable range
-            #     print(f"Skipping sample {ippc} with Nex={self.energy_simulation.truths['Nex']}.")
-            #     continue
+            self.energy_simulation.set_truths(**hyperparams_vals)
 
             # run the energy simulation
             try:
@@ -113,9 +96,12 @@ class PPCEnergy:
                 # get the forward foldede PPC results
                 Edets, mean_lnA_det, var_lnA_det = (
                     self.energy_simulation.apply_detector_response(
-                        self.energy_simulation.config["mean_lnA_unc"],
-                        self.energy_simulation.config["var_lnA_unc"],
-                        self.energy_simulation.config["energy_unc"],
+                        self.energy_simulation.config["mean_lnA_stat"],
+                        self.energy_simulation.config["var_lnA_stat"],
+                        self.energy_simulation.config["logE_stat"],
+                        self.energy_simulation.config["mean_lnA_sys"],
+                        self.energy_simulation.config["var_lnA_sys"],
+                        self.energy_simulation.config["logE_sys"],
                     )
                 )
             except OverflowError:
