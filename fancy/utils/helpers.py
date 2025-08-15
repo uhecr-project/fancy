@@ -25,7 +25,7 @@ def theta_igmf(R: float, beta_egmf: float, D: float, lc_mpc: float = 1) -> float
     return (
         2.3
         * (50 * u.EV / R)
-        * (beta_egmf / (1 * u.nG * u.Mpc**1/2))
+        * (beta_egmf / (1 * u.nG * u.Mpc**(1/2)))
         * np.sqrt(D / (10 * u.Mpc))
         * np.sqrt(lc_mpc)
     ) * u.deg

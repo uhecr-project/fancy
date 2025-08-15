@@ -101,7 +101,7 @@ class EffectiveExposure:
             np.log10(beta_egmf_gridparams[0]),
             np.log10(beta_egmf_gridparams[1]),
             beta_egmf_gridparams[2],
-        ) * (u.nG * u.Mpc**1 / 2)
+        ) * (u.nG * u.Mpc**(1 / 2))
         self.Nbeta_egmfs = len(self.beta_egmf_grid)
 
         # similarly generate a rigidity grid in EV
@@ -149,6 +149,7 @@ class EffectiveExposure:
         self: Self,
         kappa_max: float = 1e6,
         exposure_min: float = 1e-30,
+        dsrc_max : float = 1000,
         n_jobs: int = 4,
     ) -> None:
         """
@@ -163,6 +164,9 @@ class EffectiveExposure:
             maximum threshold value for kappa computation
         exposure_min: float, default=1e-30
             minimum threshold value for exposure in km^2 yr
+        dsrc_max : float, default=500
+            maximum distance of the source in Mpc.
+            Beyond this distance, we set the kappa_igmf to be 0.
         Nsamples : int, default=1000
             the number of samples used for sampling lnA
         n_jobs : int, default=4
@@ -177,29 +181,26 @@ class EffectiveExposure:
                 self.data.source.unit_vector[dis_idx],
                 kappa_max,
                 exposure_min,
+                dsrc_max
             )
             for dis_idx in range(self.Nsrcs)
         ]
 
-        # append the background model, which is effectively the same as the source model but with kappa == 0, i.e. can set distance = inf -> kappa \propto inv(theta(D=inf)) -> 0
+        # append the background model, which is effectively the same as the source model but with kappa == 0, i.e. can set distance = 1000 -> kappa \propto inv(theta(D=inf)) -> 0
         exp_args.append(
-            (self.Nsrcs, np.inf, np.array([0, 0, 1]), kappa_max, exposure_min)
+            (self.Nsrcs, 3000, np.array([0, 0, 1]), kappa_max, exposure_min, dsrc_max)
         )
 
         # only run paralllelisation if more than one source
-        eff_exp_results = []
-        if self.Nsrcs == 1:
-            eff_exp_results = [self.compute_single_effective_exposure(exp_args[0])]
-        else:
-            # opting to not parallelise over distances due to pickling issue with GMF lensing.
+        # opting to not parallelise over distances due to pickling issue with GMF lensing.
+        eff_exp_results = [
+            self.compute_single_effective_exposure(exp_args[iarg])
             for iarg in tqdm(
                 range(len(exp_args)),
                 desc="Iterating over all distances: ",
                 total=self.Nsrcs + 1,
-            ):
-                eff_exp_results.append(
-                    self.compute_single_effective_exposure(exp_args[iarg])
-                )
+            )
+        ]
 
         self.effective_exposure = (
             np.zeros((self.Nsrcs + 1, self.NRs, self.Nbeta_egmfs)) * u.km**2 * u.yr
@@ -221,7 +222,7 @@ class EffectiveExposure:
         args : tuple
 
         """
-        dis_idx, dsrc, src_uv, kappa_max, exposure_min = args
+        dis_idx, dsrc, src_uv, kappa_max, exposure_min, dsrc_max = args
 
         eff_exps = np.zeros((self.NRs, self.Nbeta_egmfs)) * u.km**2 * u.yr
 
@@ -237,13 +238,16 @@ class EffectiveExposure:
                         theta_igmf(
                             self.rigidity_grid[ir],
                             beta_egmf,
-                            dsrc,
+                            dsrc * u.Mpc,
                         )
                         / (1 * u.deg)
                     ).value
                     ** -2
                 )
                 kigmf = min(kigmf, kappa_max)
+                # if the source is too far away, we set kappa_igmf to 0
+                if dsrc > dsrc_max:
+                    kigmf = 0.0
 
                 # map lensed map
                 _, lensed_map = self.calculate_lensed_map(
