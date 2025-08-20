@@ -65,7 +65,7 @@ class Data:
             name of the file containing the object's data
         """
         new_uhecr = Uhecr()
-        new_uhecr.load_from_data_file(filename, label, mass_model, gmf_model=gmf_model)
+        new_uhecr.load_from_data_file(label=label, mass_model=mass_model, gmf_model=gmf_model, filename=filename)
 
         # define uhecr object
         self.uhecr = new_uhecr

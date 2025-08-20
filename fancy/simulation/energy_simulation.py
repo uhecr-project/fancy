@@ -15,60 +15,18 @@ from typing_extensions import ClassVar, List, Self, Tuple, Union
 from fancy import Data
 from fancy.physics import EnergyLossModel
 from fancy.utils.helpers import km_per_Mpc, truncated_lognormal_sample
+from fancy.simulation.helpers import (
+    get_Edet,
+    get_mean_lnA_det,
+    get_var_lnA_det,
+    source_spectrum,
+)
 
-
-def get_Edet(log_Etrue, en_unc, Eth, Emax):
-    """Get the detected energies given true energy and energy uncertainty."""
-    # assuming Gaussian uncertainty
-    Edet = truncated_lognormal_sample(log_Etrue, sigma=en_unc, a=Eth, b=Emax)
-    return Edet
-
-
-def get_mean_lnA_det(mean_lnA_true, mean_lnA_unc=2):
-    """Get the detected mean lnA given true mean lnA and uncertainty."""
-    # assuming Gaussian uncertainty
-    a = -(mean_lnA_true) / mean_lnA_unc
-    b = np.inf
-    mean_lnA_det = truncnorm.rvs(a, b, loc=mean_lnA_true, scale=mean_lnA_unc, size=1)
-    return mean_lnA_det
-
-
-def get_var_lnA_det(var_lnA_true, var_lnA_unc=0.5):
-    """Get the detected var lnA given true var lnA and uncertainty."""
-    # assuming Gaussian uncertainty
-    a = (-1 - (var_lnA_true)) / var_lnA_unc
-    b = np.inf
-    var_lnA_det = truncnorm.rvs(a, b, loc=var_lnA_true, scale=var_lnA_unc, size=1)
-    return var_lnA_det
-
-charge_massid_map = {
-    101 : 1,
-    402 : 2,
-    1407 : 7,
-    2814 : 14,
-    5626 : 26
-}
-
-def source_spectrum(energy, alpha, charge, Rmax = 1.7):
-    """Return the source spectrum."""
-    Emax = charge * Rmax
-    exp_cutoff = np.where(energy > Emax, np.exp(1 - energy / Emax), 1.0)
-    return energy**-alpha * exp_cutoff
+charge_massid_map = {101: 1, 402: 2, 1407: 7, 2814: 14, 5626: 26}
 
 
 class EnergySimulation:
     """Handles the generation of simulation samples."""
-
-    __truth_input_keys: ClassVar[list] = [
-        "alphas",
-        "mass_fracs",
-        "Nex",
-        "Nex_src",
-        "src_frac",
-        "delta_mulnA_sys",
-        "delta_varlnA_sys",
-        "delta_logE_sys",
-    ]
 
     def __init__(
         self,
@@ -178,7 +136,7 @@ class EnergySimulation:
         spectra, lnAs = energy_loss_model.compute_spectrum_and_lnA(
             egrid=self.energy_grid,
             egrid_lnA=self.lnA_energy_grid,
-            egrid_widths = self.energy_grid_widths
+            egrid_widths=self.energy_grid_widths,
         )
 
         # store the injection solver results
@@ -188,9 +146,7 @@ class EnergySimulation:
         self.var_lnA_grid = lnAs[1, ...]
         self.alpha_grid = energy_loss_model.alphas
         self.mass_ids_grid = energy_loss_model.massids
-        charges = np.array(
-            [charge_massid_map[massid] for massid in self.mass_ids_grid]
-        )
+        charges = np.array([charge_massid_map[massid] for massid in self.mass_ids_grid])
 
         # store the shape parameters
         self.NEs = self.spectrum_grid.shape[0]
@@ -205,7 +161,7 @@ class EnergySimulation:
             charges[np.newaxis, np.newaxis, :, np.newaxis],
             Rmax=src_inj_kwargs["Rmax"],
         )
-        # this gives the fraction of detected events for a given source 
+        # this gives the fraction of detected events for a given source
         # at given alpha for each mass ID
         self.detection_rates_grid = np.trapz(
             self.spectrum_grid, x=self.energy_grid, axis=0
@@ -214,9 +170,11 @@ class EnergySimulation:
             self.src_spectrum_grid, x=self.energy_grid, axis=0
         )
 
-        self.esrc_ratio_grid = np.trapz(y=self.energy_grid[:,None,None,None] * self.src_spectrum_grid, x=self.energy_grid, axis=0) / np.trapz(
-            y=self.src_spectrum_grid, x=self.energy_grid, axis=0
-        )
+        self.esrc_ratio_grid = np.trapz(
+            y=self.energy_grid[:, None, None, None] * self.src_spectrum_grid,
+            x=self.energy_grid,
+            axis=0,
+        ) / np.trapz(y=self.src_spectrum_grid, x=self.energy_grid, axis=0)
 
         # store all these in the config dictionary
         self.config["energy_grid"] = self.energy_grid
@@ -242,7 +200,7 @@ class EnergySimulation:
         alphas: np.ndarray,
         source_fraction: float = 0.5,
         Lsrcs: Union[np.ndarray, None] = None,
-        Nex : Union[int, None] = None,
+        Nex: Union[int, None] = None,
     ) -> dict:
         """
         Set the truth values for the simulation.
@@ -271,9 +229,11 @@ class EnergySimulation:
         if mass_fracs.shape[0] != self.Nmass_fracs:
             raise ValueError(f"mass_fracs must have shape {self.Nmass_fracs}")
 
-        if (mass_fracs.shape[1] != self.Nsrcs+1) or (alphas.shape[0] != self.Nsrcs+1):
+        if (mass_fracs.shape[1] != self.Nsrcs + 1) or (
+            alphas.shape[0] != self.Nsrcs + 1
+        ):
             raise ValueError(
-                f"mass_fracs and alphas must have shape {self.Nsrcs+1} in second axis"
+                f"mass_fracs and alphas must have shape {self.Nsrcs + 1} in second axis"
             )
 
         if (Lsrcs is None) and (Nex is None):
@@ -289,14 +249,12 @@ class EnergySimulation:
         fit_truths = {
             "alphas": alphas,
             "mass_fracs": mass_fracs,
-            "Lsrcs" : Lsrcs,
-            "Nex" : Nex,
+            "Lsrcs": Lsrcs,
+            "Nex": Nex,
             "src_frac": source_fraction,
         }
 
-        fit_truths = self.__compute_flux_truths(
-            fit_truths
-        )
+        fit_truths = self.__compute_flux_truths(fit_truths)
 
         # set it as an object
         self.truths = fit_truths
@@ -340,14 +298,16 @@ class EnergySimulation:
 
         # calculate conversion from L -> Q
         f_en_ratio = CubicSpline(
-            self.alpha_grid, 
+            self.alpha_grid,
             np.sum(
-                self.esrc_ratio_grid * truths["mass_fracs"][np.newaxis, :, :], axis=1), axis=0
+                self.esrc_ratio_grid * truths["mass_fracs"][np.newaxis, :, :], axis=1
+            ),
+            axis=0,
         )
 
         # now calculate truths based on if we have Nex or Lsrcs or not
         if truths["Nex"] is not None:
-            Nex = truths["Nex"] 
+            Nex = truths["Nex"]
             Nex_src = int(truths["Nex"] * truths["src_frac"])
             Nex_bg = truths["Nex"] - Nex_src
 
@@ -355,35 +315,48 @@ class EnergySimulation:
             Fearth_tot = Nex_src / alpha_T
 
             # then calcualte the particle rate by multiplying by distance factor
-            Qearths_truths = Fearth_tot * (4 * np.pi * (self.data.source.distance * km_per_Mpc) ** 2)
+            Qearths_truths = Fearth_tot * (
+                4 * np.pi * (self.data.source.distance * km_per_Mpc) ** 2
+            )
 
-            # convert to source particle rate 
+            # convert to source particle rate
             Qsrcs_truths = Qearths_truths * src_flux_det_rate / earth_flux_det_rate
-            Fsrcs_truths = Qsrcs_truths / (4 * np.pi * (self.data.source.distance * km_per_Mpc) ** 2)
+            Fsrcs_truths = Qsrcs_truths / (
+                4 * np.pi * (self.data.source.distance * km_per_Mpc) ** 2
+            )
 
             # now we can calculate the relative contribution of each source to the flux at Earth
-            Fearths_truths = Qearths_truths / (4 * np.pi * (self.data.source.distance * km_per_Mpc) ** 2)
-            
-            # luminosity simply calculated via multiplying with Eex
-            Lsrcs = Qsrcs_truths * np.array([f_en_ratio(truths["alphas"][k])[k] for k in range(self.Nsrcs)])
+            Fearths_truths = Qearths_truths / (
+                4 * np.pi * (self.data.source.distance * km_per_Mpc) ** 2
+            )
 
-            truths["Lsrcs"]= Lsrcs
+            # luminosity simply calculated via multiplying with Eex
+            Lsrcs = Qsrcs_truths * np.array(
+                [f_en_ratio(truths["alphas"][k])[k] for k in range(self.Nsrcs)]
+            )
+
+            truths["Lsrcs"] = Lsrcs
             truths["log10_Lsrcs"] = np.log10(Lsrcs)
             truths["Nex_src"] = Nex_src
             truths["Nex_bg"] = Nex_bg
 
         elif truths["Lsrcs"] is not None:
-            Qsrcs_truths = truths["Lsrcs"] / np.array([f_en_ratio(truths["alphas"][k])[k] for k in range(self.Nsrcs)]
+            Qsrcs_truths = truths["Lsrcs"] / np.array(
+                [f_en_ratio(truths["alphas"][k])[k] for k in range(self.Nsrcs)]
             )
-            Qearths_truths = Qsrcs_truths * earth_flux_det_rate / src_flux_det_rate 
-            
+            Qearths_truths = Qsrcs_truths * earth_flux_det_rate / src_flux_det_rate
+
             Fsrcs_truths = np.zeros(self.Nsrcs)  # excluding the background source
             Fearths_truths = np.zeros(self.Nsrcs)  # including the background source
             Nex_src = 0.0
             for k in range(self.Nsrcs):
-                Fsrcs_truths[k] = Qsrcs_truths[k] / (4 * np.pi * (self.data.source.distance[k] * km_per_Mpc) ** 2) 
-                Fearths_truths[k] = Qearths_truths[k] / (4 * np.pi * (self.data.source.distance[k] * km_per_Mpc) ** 2)
-                # Nex_src += Fearths_truths[k] * Nex_per_flux[k] 
+                Fsrcs_truths[k] = Qsrcs_truths[k] / (
+                    4 * np.pi * (self.data.source.distance[k] * km_per_Mpc) ** 2
+                )
+                Fearths_truths[k] = Qearths_truths[k] / (
+                    4 * np.pi * (self.data.source.distance[k] * km_per_Mpc) ** 2
+                )
+                # Nex_src += Fearths_truths[k] * Nex_per_flux[k]
                 Nex_src += Fearths_truths[k] * alpha_T
 
             Nex_src = int(Nex_src)
@@ -400,8 +373,6 @@ class EnergySimulation:
             )
 
         print(f"Total number of expected events: {Nex} (src: {Nex_src}, bg: {Nex_bg})")
-   
-        
 
         truths["Qsrcs"] = Qsrcs_truths
         truths["Qearths"] = Qearths_truths
@@ -417,17 +388,12 @@ class EnergySimulation:
         truths["Ftot"] = np.sum(Fearths_truths) + truths["F0"]
         truths["log10_Ftot"] = np.log10(truths["Ftot"])
 
-        print(Fearths_truths)
         truths["Nex_per_src"] = (
             np.concatenate([Fearths_truths, [truths["F0"]]]).T * alpha_T
         ).astype(int)
 
         # double check that the calculation makes sense
-        Nex_expected = np.sum(
-            (Fearths_truths + truths["F0"]) * alpha_T
-        )
-
-        print(f"Nex_expected: {Nex_expected} compared to true Nex: {truths['Nex']}")
+        # Nex_expected = np.sum((Fearths_truths + truths["F0"]) * alpha_T)
 
         return truths
 
@@ -473,8 +439,8 @@ class EnergySimulation:
         f_varlnA = CubicSpline(y=var_lnA_mfs, x=self.alpha_grid, axis=1)
 
         N_prev_idx = 0
-        
-        for k in range(self.Nsrcs+1): # +1 for the background source
+
+        for k in range(self.Nsrcs + 1):  # +1 for the background source
             alpha_truth = self.truths["alphas"][k]
             en_spect = np.exp(
                 f_log_espect((np.log10(self.energy_grid), alpha_truth))[:, k]
@@ -485,9 +451,7 @@ class EnergySimulation:
 
             Nex_per_src = self.truths["Nex_per_src"][k]
             N_next_idx = Nex_per_src + N_prev_idx
-            en_samples_src = rng.choice(
-                self.energy_grid, size=Nex_per_src, p=en_prob
-            )
+            en_samples_src = rng.choice(self.energy_grid, size=Nex_per_src, p=en_prob)
             Etruths[N_prev_idx:N_next_idx] = en_samples_src
 
             N_prev_idx = Nex_per_src
@@ -497,8 +461,12 @@ class EnergySimulation:
             # but since we just have a two-source model, we just use the source fraction
             # for sake of conveninencec
             # fac = self.truths['src_frac'] if k < len(distances) else (1 - self.truths['src_frac'])
-            mean_lnA_truths += Nex_per_src * f_mulnA(alpha_truth)[:, k] / self.truths['Nex']
-            var_lnA_truths += Nex_per_src * f_varlnA(alpha_truth)[:, k] / self.truths['Nex']
+            mean_lnA_truths += (
+                Nex_per_src * f_mulnA(alpha_truth)[:, k] / self.truths["Nex"]
+            )
+            var_lnA_truths += (
+                Nex_per_src * f_varlnA(alpha_truth)[:, k] / self.truths["Nex"]
+            )
 
         # now we have the energy truths, mean lnA truths and var lnA truths
         self.truths["Etruths"] = Etruths
@@ -512,9 +480,9 @@ class EnergySimulation:
         mean_lnA_stat: Union[float, np.ndarray],
         var_lnA_stat: Union[float, np.ndarray],
         logE_stat: Union[float, None] = None,
-        mean_lnA_sys : float = 0.0,
-        var_lnA_sys : float = 0.0,
-        logE_sys : float = 0.0,
+        mean_lnA_sys: float = 0.0,
+        var_lnA_sys: float = 0.0,
+        logE_sys: float = 0.0,
     ) -> None:
         """
         Apply the detector response to the simulation truths.
@@ -524,11 +492,11 @@ class EnergySimulation:
         mean_lnA_stat : Union[np.ndarray, float]
             uncertainty in the mean lnA values. If float, assumes a universal value for
             all bins, otherwise takes in a different value for each bin.
-            Shape should be (NlnA_bins,) 
+            Shape should be (NlnA_bins,)
         var_lnA_stat : Union[np.ndarray, float]
             uncertainty in the variance of lnA values. If float, assumes a universal value for
             all bins, otherwise takes in a different value for each bin.
-            Shape should be (NlnA_bins,) 
+            Shape should be (NlnA_bins,)
         energy_unc : float
             uncertainty in the logarithm of energy values, in percentage of the truth.
             If None, then uses the energy uncertainty reported in data.detector.f_E.
@@ -541,11 +509,11 @@ class EnergySimulation:
         """
         if isinstance(mean_lnA_stat, float):
             mean_lnA_stat = np.full(self.NElnAs, mean_lnA_stat)
-        
+
         if isinstance(var_lnA_stat, float):
             var_lnA_stat = np.full(self.NElnAs, var_lnA_stat)
 
-        # if None then use the energy uncertainty reported in 
+        # if None then use the energy uncertainty reported in
         # data.detector
         if logE_stat is None:
             logE_stat = self.data.detector.f_E
@@ -627,14 +595,16 @@ class EnergySimulation:
         This function is meant to be a quick way to check if the code is doing the
         right thing. If you want something more advanced then use the outputs directly.
         """
-        fig, axs = plt.subplots(3, 1, gridspec_kw={'height_ratios': [3, 1, 1]}, figsize=(10,10))
+        fig, axs = plt.subplots(
+            3, 1, gridspec_kw={"height_ratios": [3, 1, 1]}, figsize=(10, 10)
+        )
 
         dis_labels = ["src", "bg"]
         dis_lss = ["--", ":"]
 
         tot_espect = np.zeros_like(self.energy_grid)
 
-        for k in range(self.Nsrcs+1):
+        for k in range(self.Nsrcs + 1):
             alpha_idx = np.digitize(self.truths["alphas"][k], self.alpha_grid) - 1
             for ims, massid in enumerate(self.mass_ids_grid):
                 # get the energy grid
@@ -691,7 +661,8 @@ class EnergySimulation:
             )
 
             tot_espect_per_d = np.sum(
-                self.spectrum_grid[:, alpha_idx, :, k] * self.truths['mass_fracs'][np.newaxis, :, k],
+                self.spectrum_grid[:, alpha_idx, :, k]
+                * self.truths["mass_fracs"][np.newaxis, :, k],
                 axis=-1,
             )
 
@@ -720,7 +691,9 @@ class EnergySimulation:
                 label="total",
             )
 
-            tot_espect += self.truths["Nex_per_src"][k] * tot_espect_per_d / self.truths["Nex"]
+            tot_espect += (
+                self.truths["Nex_per_src"][k] * tot_espect_per_d / self.truths["Nex"]
+            )
 
         # plot total spectrum
         axs[0].loglog(

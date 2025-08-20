@@ -67,6 +67,12 @@ def get_path_to_injection_solvers(file_name : str = "injection_solvers.pkl") -> 
     )
     return Path(injection_solvers_path)
 
+def get_path_to_loss_length_tables(file_name : str = "loss_length_tables.pkl") -> Path:
+    loss_length_tables_path = resource_filename(
+        "fancy", "physics/energy_loss/loss_length_tables/{0:s}".format(file_name)
+    )
+    return Path(loss_length_tables_path)
+
 def get_path_to_datafiles(file_name : str = "sourcedata.h5") -> Path:
 
     data_path = resource_filename(

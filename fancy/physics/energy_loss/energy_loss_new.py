@@ -6,10 +6,6 @@ import pickle as pickle
 import astropy.units as u
 import h5py
 import numpy as np
-from astropy.cosmology import WMAP9, Planck18, z_at_value
-from joblib import Parallel, delayed
-from scipy.interpolate import UnivariateSpline
-from scipy.optimize import Bounds, minimize
 from tqdm import tqdm
 from typing_extensions import Self, Union  # change to typing for py>3.11
 
@@ -27,8 +23,7 @@ try:
     from prince_cr.cr_sources import CosmicRaySource
     from prince_cr.solvers import UHECRPropagationSolverBDF
 
-    from .prince_helpers import SingleInjectionSolver, TruncatedPropagationSolver
-    from .prince_helpers import NoInjection, TruncatedInjectionSource
+    from .prince_helpers import SingleInjectionSolver, TruncatedPropagationSolver, NoInjection, TruncatedInjectionSource, create_distance_tables, create_kernel
 except ImportError:
     pcr = None
 
@@ -56,11 +51,6 @@ class EnergyLossModel:
         20,
         21,
     ]  # as well as ignoring all secondary particles
-
-    # photon fields, combined CMB & EBL from Gilmore
-    pf_gilmore = photonfields.CombinedPhotonField(
-        [photonfields.CMBPhotonSpectrum, photonfields.CIBGilmore2D]
-    )
 
     def __init__(
         self: Self,
@@ -105,7 +95,7 @@ class EnergyLossModel:
         # get the kernel
         if not os.path.exists(get_path_to_prince_config(f"prince_run_{css}.pkl")):
             print("Pre-computing kernel")
-            self.__create_kernel(get_path_to_prince_config(f"prince_run_{css}.pkl"))
+            create_kernel(get_path_to_prince_config(css, f"prince_run_{css}.pkl"))
 
         self.prince_run = pickle.load(
             open(get_path_to_prince_config(f"prince_run_{css}.pkl"), "rb")
@@ -116,7 +106,7 @@ class EnergyLossModel:
             get_path_to_prince_config("redshift_tables_Planck_WMAP.pkl")
         ):
             print("Pre-computing redshift <-> distance table")
-            self.__create_distance_tables(
+            create_distance_tables(
                 get_path_to_prince_config("redshift_tables_Planck_WMAP.pkl")
             )
 
@@ -227,6 +217,8 @@ class EnergyLossModel:
         ---------
         egrid : np.ndarray
             energy grid used for energy spectra in EV
+        egrid_widths : np.ndarray
+            spacing between energy bins in EV
         egrid_lnA : np.ndarray
             energy grid used for mean & var lnA in EV
         """
@@ -283,66 +275,10 @@ class EnergyLossModel:
 
         return espects, lnA_params
 
-    def __create_kernel(self: Self, path_to_kernel: str) -> None:
-        """Create kernel and save the results if not yet done so."""
-
-        # cross section class, either use TALYS or PSB
-        cs = cross_sections.CompositeCrossSection(
-            [
-                (0.0, cross_sections.TabulatedCrossSection, (self.css,)),
-                (0.14, cross_sections.SophiaSuperposition, ()),
-            ]
-        )
-
-        # generate kernel
-        prince_run = core.PriNCeRun(
-            max_mass=56, photon_field=self.pf_gilmore, cross_sections=cs
-        )
-
-        # pickle dump the results
-        pickle.dump(prince_run, open(path_to_kernel, "wb"), protocol=-1)
-
-    def __create_distance_tables(self: Self, path_to_distance_tables: str) -> None:
-        """Create conversion table from redshift to Mpc if not yet done so."""
-
-        distance_grid_mpc = np.logspace(-1, np.log10(5000), 1000)
-
-        redshift_grid_plk = [
-            z_at_value(Planck18.comoving_distance, d * u.Mpc) for d in distance_grid_mpc
-        ]
-        redshift_grid_wmap = [
-            z_at_value(WMAP9.comoving_distance, d * u.Mpc) for d in distance_grid_mpc
-        ]
-
-        # Fix the zeros
-        redshift_grid_plk.insert(0, 0.0)
-        redshift_grid_wmap.insert(0, 0.0)
-        distance_grid_mpc = np.hstack([[0], distance_grid_mpc])
-
-        # computing both z-> d and d -> z
-        spl_z_to_d_plk = UnivariateSpline(
-            redshift_grid_plk, distance_grid_mpc, s=0, k=2
-        )
-        spl_d_to_z_plk = UnivariateSpline(
-            distance_grid_mpc, redshift_grid_plk, s=0, k=2
-        )
-        spl_z_to_d_wmap = UnivariateSpline(
-            redshift_grid_wmap, distance_grid_mpc, s=0, k=2
-        )
-        spl_d_to_z_wmap = UnivariateSpline(
-            distance_grid_mpc, redshift_grid_wmap, s=0, k=2
-        )
-
-        # dump
-        pickle.dump(
-            (spl_z_to_d_plk, spl_d_to_z_plk, spl_z_to_d_wmap, spl_d_to_z_wmap),
-            open(path_to_distance_tables, "wb"),
-        )
-
     def run_source_injection_solver(
         self: Self,
         dinits: Union[list, str] = "M82",
-        Rmax: float = 1.7,
+        Rmax: float = 1.7,  # in EV
     ) -> None:
         """
         Run the injection solver.
@@ -353,13 +289,9 @@ class EnergyLossModel:
         ----------
         dinits : list[float] or str, default=M82
             the initial distances to inject from.
-            Default is 3.8 Mpc (CenA), but we can input as many as we wish.
+            Default is 3.8 Mpc (M82), but we can input as many as we wish.
 
             If string, then it will use a pre-defined set of distances within sourcedata.h5.
-
-        reset: bool
-            flag to reset the pre-computation or not.
-            If True, then the matrix will be computed again.
         Rmax : float, default=1.7  EV
             the maximal rigidity set in the source spectrum in EV.
             Default is 1.7 EV, which is the approximate value from

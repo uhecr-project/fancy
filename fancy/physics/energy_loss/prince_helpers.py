@@ -2,17 +2,27 @@
 
 import numpy as np
 import matplotlib.pyplot as plt
+import pickle
+import astropy.units as u
+from astropy.cosmology import WMAP9, Planck18, z_at_value
+from joblib import Parallel, delayed
+from scipy.interpolate import UnivariateSpline
+from scipy.optimize import Bounds, minimize
 
 # simply try to import prince, if it doesnt exist and we
 # just want to fit then these imports will simply be skipped
 try:
     from prince_cr import util as pru
     from prince_cr.cr_sources import CosmicRaySource, AugerFitSource
+    from prince_cr import core, cross_sections, photonfields
     from prince_cr.solvers import UHECRPropagationSolverBDF
 except ImportError:
     pass
 
-
+ # photon fields, combined CMB & EBL from Gilmore
+pf_gilmore = photonfields.CombinedPhotonField(
+    [photonfields.CMBPhotonSpectrum, photonfields.CIBGilmore2D]
+)
 
 class SingleInjectionSolver(UHECRPropagationSolverBDF):
     """
@@ -160,3 +170,69 @@ class TruncatedInjectionSource(AugerFitSource):
             return super().injection_rate(z)
         else:
             return np.zeros_like(self.injection_grid)
+        
+def create_kernel(css: str, path_to_kernel: str) -> None:
+    """
+    Create kernel and save the results if not yet done so.
+    
+    Parameters
+    ----------
+    css : str
+        Name of the cross section file.
+        Available options are 'CRP2_TALYS' or 'PSB'.
+    path_to_kernel : str
+        Path to save the generated kernel.
+    """
+
+    # cross section class, either use TALYS or PSB
+    cs = cross_sections.CompositeCrossSection(
+        [
+            (0.0, cross_sections.TabulatedCrossSection, (css,)),
+            (0.14, cross_sections.SophiaSuperposition, ()),
+        ]
+    )
+
+    # generate kernel
+    prince_run = core.PriNCeRun(
+        max_mass=56, photon_field=pf_gilmore, cross_sections=cs
+    )
+
+    # pickle dump the results
+    pickle.dump(prince_run, open(path_to_kernel, "wb"), protocol=-1)
+
+def create_distance_tables(path_to_distance_tables: str) -> None:
+    """Create conversion table from redshift to Mpc if not yet done so."""
+
+    distance_grid_mpc = np.logspace(-1, np.log10(5000), 1000)
+
+    redshift_grid_plk = [
+        z_at_value(Planck18.comoving_distance, d * u.Mpc) for d in distance_grid_mpc
+    ]
+    redshift_grid_wmap = [
+        z_at_value(WMAP9.comoving_distance, d * u.Mpc) for d in distance_grid_mpc
+    ]
+
+    # Fix the zeros
+    redshift_grid_plk.insert(0, 0.0)
+    redshift_grid_wmap.insert(0, 0.0)
+    distance_grid_mpc = np.hstack([[0], distance_grid_mpc])
+
+    # computing both z-> d and d -> z
+    spl_z_to_d_plk = UnivariateSpline(
+        redshift_grid_plk, distance_grid_mpc, s=0, k=2
+    )
+    spl_d_to_z_plk = UnivariateSpline(
+        distance_grid_mpc, redshift_grid_plk, s=0, k=2
+    )
+    spl_z_to_d_wmap = UnivariateSpline(
+        redshift_grid_wmap, distance_grid_mpc, s=0, k=2
+    )
+    spl_d_to_z_wmap = UnivariateSpline(
+        distance_grid_mpc, redshift_grid_wmap, s=0, k=2
+    )
+
+    # dump
+    pickle.dump(
+        (spl_z_to_d_plk, spl_d_to_z_plk, spl_z_to_d_wmap, spl_d_to_z_wmap),
+        open(path_to_distance_tables, "wb"),
+    )

@@ -22,8 +22,10 @@ class GMFLensing:
 
     __lens_names: typing.ClassVar[dict] = {
         "JF12": "JF12full_Gamale",
-        "UF23": "UF23_all",
-        "UF23Turb": "UF23Turb_all",
+        "UF23all": "UF23_all",
+        "UF23allTurb": "UF23Turb_all",
+        "UF23base" : "UF23_base",
+        "UF23baseTurb" : "UF23Turb_base",
     }
     __npix: int = 49152  # pixelisation of order 6
 

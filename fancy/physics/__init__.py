@@ -1,2 +1,2 @@
 from .effective_exposure import EffectiveExposure
-from .energy_loss import EnergyLossModel
+from .energy_loss import EnergyLossModel, LossLengthModel

@@ -1,522 +1,868 @@
-"""Class to manage simulations for UHECR propagation & detector effects"""
+"""Simulation class for energy + mass + spatial"""
 
-import datetime
 import os
-import pickle as pickle
+import pickle
 import tempfile
-
-import astropy.units as u
 import h5py
+
+from astropy.coordinates import SkyCoord
+from astropy.coordinates import concatenate as concatenate_skycoords
+import astropy.units as u
 import numpy as np
-from astropy.coordinates import AltAz, SkyCoord
-from astropy.time import Time
-from scipy.stats import truncnorm
+import matplotlib as mpl
 from scipy.interpolate import CubicSpline, RegularGridInterpolator
-from typing_extensions import ClassVar, List, Self, Tuple, Union
-from vMF import sample_vMF
+from typing_extensions import List, Self, Tuple, Union
 
 from fancy import Data
-from fancy.detector.exposure import m_dec
-from fancy.physics.gmf import GMFBackPropagation, GMFLensing
-from fancy.utils.helpers import bounded_power_law, theta_igmfs
-from fancy.utils.package_data import (
-    get_path_to_energy_loss_tables,
-    get_path_to_exposure_tables,
+from fancy.physics import EnergyLossModel, EffectiveExposure, LossLengthModel
+from fancy.physics.gmf import GMFLensing, GMFBackPropagation
+from fancy.utils.helpers import km_per_Mpc, theta_igmfs
+from fancy.simulation.helpers import (
+    get_Edet,
+    get_mean_lnA_det,
+    get_var_lnA_det,
+    get_direction_acceptance,
+    source_spectrum,
+    simulate_zenith_angles,
 )
+from fancy.plotting import AllSkyMapCartopy as AllSkyMap
+
+from fancy.simulation.plotters import *
+
+from vMF import sample_vMF
+
+charge_massid_map = {101: 1, 402: 2, 1407: 7, 2814: 14, 5626: 26}
 
 
 class Simulation:
-    """Handles the generation of simulation samples."""
-
-    __truth_input_keys : ClassVar[list] = ["f", "alpha_s", "alpha_b", "log10_L", "Bigmf", "Nex", "F0"]
+    """Class for spatial + energy simulation."""
 
     def __init__(
-        self,
-        data: Data,
-        energy_loss_table_file: str = "energy_tables.h5",
-        exposure_table_file: str = "exposure_tables.h5",
-        gmf_model: str = "None",
-        verbose : bool = False
-    ):
+        self, data: Data, gmf_model: str = "UF23base", n_jobs: Union[int, None] = None
+    ) -> None:
         """
-        Handle the generation of simulation samples.
+        Initialise the full energy + mass + spatial simulation class.
 
-        data: fancy.interfaces.Data
-            Data object from fancy
-        energy_loss_table_file: str
-            file for energy tables
-        exposure_table_file: str
-            file where exposure tables are contained
-        gmf_model : str, default="None"
-            the GMF model to use when generating the simulations. 
-            Default to None, i.e. we dont perform GMF lensing
+        Parameters
+        ----------
+        data: Data
+            Data object containing the simulation information, such as the
+            source position and source distance.
+        gmf_model : str, default "UF23base"
+            The GMF model to use for the simulation.
+        n_jobs : int, optional
+            The number of jobs to use for parallel processing of the
+            effective exposure & GMF backtracking calculation.
+            If None, then by default 3/4 of the available CPUs are used.
         """
         self.detector_type = data.detector.label
         self.mass_model = data.detector.mass_model
         self.source_type = data.source.label
         self.gmf_model = gmf_model
+        self.n_jobs = n_jobs if n_jobs is not None else int(0.75 * os.cpu_count())
 
         # source parameters
         self.Nsrcs = data.source.N
 
+        # stack the source coordinates and add a unit vector for the zenith
+        # for the background model, since it doesnt matter what vector it is
+        self.source_uvs = np.vstack((
+            data.source.coord.cartesian.xyz.value.T,
+            np.array([0,0,1])
+        ))
+
+        # data object that encompasses detector & source information
         self.data = data
-        self.verbose = verbose
+        self.eff_exp = None
 
-        # initialise the grids
-        self._initialise_grids(energy_loss_table_file, exposure_table_file)
+        # other objects we store for later
+        self.truths = {}
+        self.config = {}
 
-    def _initialise_grids(
-        self, energy_loss_table_file: str = "energy_tables.h5", exposure_table_file: str = "exposure_tables.h5"
+        # grid related parameters
+        self.energy_grid = None
+        self.lnA_energy_grid = None
+        self.alpha_grid = None
+        self.mass_ids_grid = None
+        self.beta_egmf_grid = None
+        self.rigidity_grid = None
+
+        self.spectrum_grid = None
+        self.mean_lnA_grid = None
+        self.var_lnA_grid = None
+        self.src_spectrum_grid = None
+        self.esrc_ratio_grid = None
+        self.eff_exp_grid = None
+
+        # shape parameters
+        self.NEs = 0
+        self.NElnAs = 0
+        self.Nalphas = 0
+        self.Nmass_fracs = 0
+        self.Nbeta_egmfs = 0
+        self.Nrigidities = 0
+
+    def initialise_grids(
+        self: Self,
+        beta_egmf_gridparams: tuple = (1e-3, 1, 10),
+        rigidity_gridparams: tuple = (1, 500, 25),
+        energy_gridparams: tuple = (32, 500, 50),
+        lnA_energy_gridparams: tuple = (3, 100, 50),
+        src_inj_kwargs: dict = {
+            "dinits": [4],
+            "Rmax": 1.7,
+        },
+        bg_inj_kwargs: dict = {
+            "z_max": 3.0,
+            "source_evo": "SFR",
+            "Rmax": 1.7,
+        },
+        energy_loss_model_kwargs: dict = {},
     ) -> None:
         """
-        Initialise grids used for simulation.
+        Initialise the grid of the simulation.
 
-        energy_loss_table_file : str
-            file for energy tables
-        exposure_table_file : str
-            path to file where exposure tables are contained
-        """
-        with h5py.File(str(get_path_to_energy_loss_tables(energy_loss_table_file)), "r") as f:
-            # find the relevant group
-            config_label = f"{self.detector_type}_{self.mass_model}"
-            self.alpha_grid = f[config_label]["alpha_grid"][()]
-            self.Eearth_grid = 10**f[config_label]["log10_Eearth_grid"][()] * u.EeV
-            self.dEearth_grid = f[config_label]["dEearth_grid"][()] * u.EeV
-            log10_Eearth_spectrum = f[config_label]["log10_Eearth_spectrum"][()] * (1 / u.EeV)
-
-            # also get the expected energies
-            log10_Esrc = f[config_label]["log10_Esrc"][()] * u.EeV
-
-            # filter out spectrum values that only match within the number of sources
-            # in consideration
-            dis_indices = np.digitize(
-                self.data.source.distance, f[config_label]["distances_grid"][()], right=True
-            )
-            self.log10_Eearth_spectrum = np.take(log10_Eearth_spectrum, indices=dis_indices, axis=0)
-            self.log10_Esrc = np.take(log10_Esrc, indices=dis_indices, axis=0)
-
-        self.Nalphas = len(self.alpha_grid)
-        self.NEearths = len(self.Eearth_grid)
-
-        # now read the exposure table file
-        with h5py.File(str(get_path_to_exposure_tables(exposure_table_file)), "r") as f:
-            # find the relevant group
-            config_label = f"{self.source_type}_{self.detector_type}_{self.mass_model}_{self.gmf_model}"
-            self.log10_Bigmf_grid = f[config_label]["log10_Bigmf_grid"][()] * u.nG
-            self.log10_integrated_source_exposure = (
-                f[config_label]["log10_integrated_source_exposure"][()]
-            )
-            self.log10_integrated_background_exposure = (
-                f[config_label]["log10_integrated_background_exposure"][()]
-            )
-
-        self.NBigmfs = len(self.log10_Bigmf_grid)
-
-    def set_parameters_from_inputs(self, input_dict : dict) -> None:
-        """
-        Set parameters from fit inputs from posteriors.
-
-        Parameter:
-        ----------
-        input_dict : dict
-            dictionary of input parameters that contain all values
-        truth_outfile : str
-            output file for truths
-        """
-        # create dictionaryu of truths
-        self.truth_dict = {
-            "alpha_s": input_dict["alpha_s"],
-            "alpha_b" : input_dict["alpha_b"],
-            "f": input_dict["f"],
-            "L": 10**input_dict["log10_L"],
-            "log10_L": input_dict["log10_L"],
-            "Bigmf": input_dict["Bigmf"],
-            "F0": 10**input_dict["log10_F0"],
-            "log10_F0": 10**input_dict["log10_F0"],
-            "Nex": input_dict["Nex"],
-            "Nsrc": input_dict["Nex"] * input_dict["f"],
-            "Nbg": input_dict["Nex"] * (1 - input_dict["f"]),
-        }
-
-         # convert to integer using np.round (TODO: strictly should be Poisson, edit later)
-        # store as object since we need to use this for sampling
-        self.Nuhecrs_arr = np.zeros(self.Nsrcs + 1, dtype=int)  # type: ignore
-        self.Nuhecrs_arr[: self.Nsrcs] = int(np.round(input_dict["Nex"] * input_dict["f"]))
-        self.Nuhecrs_arr[self.Nsrcs] = int(np.round(input_dict["Nex"] * (1 - input_dict["f"])))
-
-        self.Nuhecrs = np.sum(self.Nuhecrs_arr)
-
-    def set_truths(self : Self, input_dict: dict) -> None:
-        """
-        Set simulation truths based on truths. 
-
-        Parameter:
-        ----------
-        input_dict : dict
-            dictionary of input parameters that contain all values
-        """
-        # first assert that the inputs keys match the ones the class definition
-        # assert np.all(
-        #     [k_input in self.truth_input_keys for k_input in input_dict.keys()]
-        # ), "Truth inputs do not match."
-
-        alpha_s = input_dict["alpha_s"]
-        Bigmf = input_dict["Bigmf"] * u.nG
-        Nex = input_dict["Nex"]
-        f = input_dict["f"]
-        alpha_b = input_dict["alpha_b"]
-
-        # calculate expected events from background using source fraction
-        Nex_src = Nex * f
-        Nex_bg = Nex * (1 - f)
-
-        # calculate the number of expected events from all sources using weighted exposure * total flux
-        wexps_src = np.zeros(self.Nsrcs) * (u.km**2 * u.yr)
-        Fs_per_Ls = np.zeros(self.Nsrcs) * (u.km**-2 * u.EeV**-1)
-
-        for id, Dsrc in enumerate(self.Dsrcs):
-            dmax_idx = np.digitize(Dsrc, self.distances_grid, right=True)
-
-            # TODO: investigate whether doing interpolation is truly alright here
-            f_log10_wexp_src = RegularGridInterpolator(
-                (self.alpha_grid, self.log10_Bigmf_grid),
-                self.log10_integrated_source_exposure[id, ...],
-            )
-            log10_wexp_src = f_log10_wexp_src((alpha_s, np.log10(Bigmf.value)))
-            wexps_src[id] = 10.0**log10_wexp_src * (u.km**2 * u.yr)
-
-            # TODO: same here
-            f_log10_Esrc = CubicSpline(
-                x=self.alpha_grid, y=self.log10_Esrc[dmax_idx, :]
-            )
-            Eex = 10.0 ** f_log10_Esrc(alpha_s) * u.EeV
-            Fs_per_Ls[id] = 1 / (4 * np.pi * Dsrc.to(u.km) ** 2) / Eex
-
-        L = Nex_src / (np.sum(wexps_src * Fs_per_Ls)) / self.Nsrcs
-
-        # convert to integer using np.round (TODO: strictly should be Poisson, edit later)
-        # store as object since we need to use this for sampling
-        self.Nuhecrs_arr = np.zeros(self.Nsrcs + 1, dtype=int)  # type: ignore
-        self.Nuhecrs_arr[: self.Nsrcs] = np.round(L * wexps_src * Fs_per_Ls * self.Nsrcs).astype(int)
-        self.Nuhecrs_arr[self.Nsrcs] = np.round(Nex_bg).astype(int)
-        self.Nuhecrs = np.sum(self.Nuhecrs_arr)
-
-        # now calculate the flux
-        Fs = np.sum(Fs_per_Ls) * L
-        # for background flux, interpolate weighted exposure and calculate using Nex_bg
-        # TODO: same here as well
-        f_log10_wexp_bg = CubicSpline(
-            x=self.alpha_grid, y=self.log10_integrated_background_exposure
-        )  # NB: take any index for Bigmf since no dependence on it
-        F0 = Nex_bg / (10.0 ** f_log10_wexp_bg(alpha_s) * (u.km**2 * u.yr))
-        FT = Fs + F0  # total flux
-
-        if self.verbose:
-            print("Computed parameters from inputs: ")
-            print(f"Luminosity per source: {L:.4e}")
-            print(f"FT: {FT:.3e}, Fs: {Fs:.3e}, F0: {F0:.3e}")
-            print(f"f = {f}")
-            print(f"Nex: {Nex:.3f}, Nex_src: {Nex_src:.3f}, Nex_bg: {Nex_bg:.3f}")
-            print(
-                f"Nuhecrs: {np.sum(self.Nuhecrs_arr):d}, Nuhecrs_src: {np.sum(self.Nuhecrs_arr[:-1]):d}, Nuhecrs_bg: {self.Nuhecrs_arr[-1]:d}"
-            )
-
-        # create dictionaryu of truths
-        self.truth_dict = {
-            "alpha_s": alpha_s,
-            "f": f,
-            "L": L.value,
-            "log10_L": np.log10(L.value),
-            "Bigmf": Bigmf.value,
-            "F0": F0.value,
-            "log10_F0": np.log10(F0.value),
-            "Fs": Fs.value,
-            "FT": FT.value,
-            "Nex": Nex,
-            "Nsrc": Nex_src,
-            "Nbg": Nex_bg,
-            "alpha_b" : alpha_b
-        }
-
-    def sample_events(self : Self, sampling_factor: int = 10) -> Tuple[List, List, List]:
-        """
-        Sample energies, earth mass composition, and arrival directions at the Galactic boundary.
-
-        - The energies are sampled via the arrival energy spectrum pre-computed via the 
-        energy loss module. 
-        - The arrival directions are sampled using the vMF model with deflections from the EGMF model.
-        - The mass composition is sampled via the mass models used in the energy loss module.
-
-        NB: we combine energy & mass to get rigidities since this is what we use for lensing.
+        This means (in practice) to generate the grid of effective exposure
+        through grid parameters of beta_egmf and rigidity.
 
         Parameters
         ----------
-        sampling_factor: int, default=10
-             factor to multiply with number of UHECRs to simulate for sampling
+        beta_egmf_gridparams : tuple
+            The grid parameters for the beta EGMF values.
+            given as (beta_egmf_min, beta_egmf_max, Nbins)
+        rigidity_gridparams : tuple
+            The grid parameters for the rigidity values.
+            given as (R_min, R_max, Nbins)
+        energy_gridparams : tuple, optional
+            The grid parameters for the energy values.
+            given as (E_min, E_max, Nbins), by default (32, 500, 50).
+            The grid will be logarithmically spaced in energy.
+        lnA_energy_gridparams : tuple, optional
+            The grid parameters for the lnA energy values.
+            given as (lnA_min, lnA_max, Nbins), by default (0, 10, 50).
+            The grid will be linearly spaced in lnA.
+        """
+        eff_exposure = EffectiveExposure(data=self.data, gmf_model=self.gmf_model)
+        eff_exposure.initialise_grids(
+            beta_egmf_gridparams=beta_egmf_gridparams, R_gridparams=rigidity_gridparams
+        )
+        eff_exposure.compute_effective_exposure(n_jobs=self.n_jobs)
+
+        # store the effective exposure grid
+        self.eff_exp_grid = (
+            eff_exposure.effective_exposure
+        )  # in shape (Nsrcs+1, NRs, Nbeta_egmfs)
+        self.beta_egmf_grid = eff_exposure.beta_egmf_grid
+        self.rigidity_grid = eff_exposure.rigidity_grid
+        self.Nbeta_egmfs = len(self.beta_egmf_grid)
+        self.Nrigidities = len(self.rigidity_grid)
+
+        # store the results into the config object
+        self.config["eff_exp_grid"] = eff_exposure.effective_exposure
+        self.config["beta_egmf_grid"] = eff_exposure.beta_egmf_grid
+        self.config["rigidity_grid"] = eff_exposure.rigidity_grid
+        self.config["Nbeta_egmfs"] = len(eff_exposure.beta_egmf_grid)
+        self.config["Nrigidities"] = len(eff_exposure.rigidity_grid)
+
+        # store the effective exposure object for later use
+        self.eff_exp = eff_exposure
+
+        energy_grid_binedges = np.logspace(
+            np.log10(energy_gridparams[0]),
+            np.log10(energy_gridparams[1]),
+            energy_gridparams[2] + 1,
+        )
+        self.energy_grid = 10 ** np.sqrt(
+            np.log10(energy_grid_binedges[:-1]) * np.log10(energy_grid_binedges[1:])
+        )
+        self.energy_grid_widths = np.diff(energy_grid_binedges)
+        self.lnA_energy_grid = np.logspace(
+            np.log10(lnA_energy_gridparams[0]),
+            np.log10(lnA_energy_gridparams[1]),
+            lnA_energy_gridparams[2],
+        )
+
+        #  initalise the energy loss model
+        energy_loss_model = EnergyLossModel(**energy_loss_model_kwargs)
+        energy_loss_model.load_injection_solvers(
+            src_inj_config=src_inj_kwargs, bg_inj_config=bg_inj_kwargs
+        )
+
+        # store the grids for later use
+        spectra, lnAs = energy_loss_model.compute_spectrum_and_lnA(
+            egrid=self.energy_grid,
+            egrid_lnA=self.lnA_energy_grid,
+            egrid_widths=self.energy_grid_widths,
+        )
+
+        # store the injection solver results
+        # NB: shapes are in (Ngrid, Nalphas, Nmass_fracs, Nsrcs)
+        self.spectrum_grid = spectra
+        self.mean_lnA_grid = lnAs[0, ...]
+        self.var_lnA_grid = lnAs[1, ...]
+        self.alpha_grid = energy_loss_model.alphas
+        self.mass_ids_grid = energy_loss_model.massids
+        self.charges_grid = np.array(
+            [charge_massid_map[massid] for massid in self.mass_ids_grid]
+        )
+
+        # store the shape parameters
+        self.NEs = self.spectrum_grid.shape[0]
+        self.Nalphas = self.spectrum_grid.shape[1]
+        self.Nmass_fracs = self.spectrum_grid.shape[2]
+        self.NElnAs = self.mean_lnA_grid.shape[0]
+
+        # also compute the src spectrum grid here
+        self.src_spectrum_grid = source_spectrum(
+            self.energy_grid[:, np.newaxis, np.newaxis, np.newaxis],
+            self.alpha_grid[np.newaxis, :, np.newaxis, np.newaxis],
+            self.charges_grid[np.newaxis, np.newaxis, :, np.newaxis],
+            Rmax=src_inj_kwargs["Rmax"],
+        )
+
+        self.esrc_ratio_grid = np.trapz(
+            y=self.energy_grid[:, None, None, None] * self.src_spectrum_grid,
+            x=self.energy_grid,
+            axis=0,
+        ) / np.trapz(y=self.src_spectrum_grid, x=self.energy_grid, axis=0)
+
+        # now calculate grid for flux weights at Earth and source
+        self.wexp_earth_grid = np.zeros(
+            (self.Nsrcs + 1, self.Nbeta_egmfs, self.Nalphas, self.Nmass_fracs)
+        )
+        self.wexp_src_grid = np.zeros(
+            (self.Nsrcs + 1, self.Nbeta_egmfs, self.Nalphas, self.Nmass_fracs)
+        )
+
+        for k in range(self.Nsrcs + 1):
+            f_effexp_rig = CubicSpline(
+                x=self.rigidity_grid, y=self.eff_exp_grid[k, :, :], axis=0
+            )
+            for j in range(self.Nmass_fracs):
+                rig = self.energy_grid / self.charges_grid[j]
+
+                # TODO: update here 
+                self.wexp_earth_grid[k, :, :, j] = np.trapz(
+                    self.spectrum_grid[:, None, :, j, k]
+                    * f_effexp_rig(rig)[:, :, None],
+                    x=self.energy_grid,
+                    axis=0,
+                )
+
+                # here there is a zero indexed since we keep the source spectrum
+                # as the same shape as self.spectrum_grid.
+                # but the source spectrum is identical for all sources + background
+                self.wexp_src_grid[k, :, :, j] = np.trapz(
+                    self.src_spectrum_grid[:, None, :, j, 0]
+                    * f_effexp_rig(rig)[:, :, None],
+                    x=self.energy_grid,
+                    axis=0,
+                )
+
+        # store all these in the config dictionary
+        self.config["energy_grid"] = self.energy_grid
+        self.config["energy_grid_widths"] = self.energy_grid_widths
+        self.config["lnA_energy_grid"] = self.lnA_energy_grid
+        self.config["spectrum_grid"] = self.spectrum_grid
+        self.config["mean_lnA_grid"] = self.mean_lnA_grid
+        self.config["var_lnA_grid"] = self.var_lnA_grid
+        self.config["src_spectrum_grid"] = self.src_spectrum_grid
+        self.config["esrc_ratio_grid"] = self.esrc_ratio_grid
+        self.config["wexp_earth_grid"] = self.wexp_earth_grid
+        self.config["wexp_src_grid"] = self.wexp_src_grid
+        self.config["alpha_grid"] = self.alpha_grid
+        self.config["mass_ids_grid"] = self.mass_ids_grid
+        self.config["charges_grid"] = self.charges_grid
+        self.config["Nsrcs"] = self.Nsrcs
+        self.config["NEs"] = self.NEs
+        self.config["NElnAs"] = self.NElnAs
+        self.config["Nalphas"] = self.Nalphas
+        self.config["Nmass_fracs"] = self.Nmass_fracs
+
+        # finally calculate loss lengths for 
+        # proton case
+        loss_length_model = LossLengthModel()
+        loss_length_model.compute_source_energies(
+            self.energy_grid,
+            dinits=src_inj_kwargs["dinits"],
+            save = False
+        )
+        self.config["proton_Esrc_grid"] = loss_length_model.Esrc_grid
+
+    def set_truths(
+        self: Self,
+        mass_fracs: np.ndarray,
+        alphas: np.ndarray,
+        source_fraction: float = 0.5,
+        beta_egmf: float = 1,
+        Lsrcs: Union[np.ndarray, None] = None,
+        Nex: Union[int, None] = None,
+    ) -> dict:
+        """
+        Set the truths for the simulation.
+
+        Parameters
+        ----------
+        mass_fracs : np.ndarray
+            the mass fractions for the sources.
+            Shape should be (Nmass_fracs, Nsrcs+1)
+        alphas : np.ndarray
+            the spectral indices for the sources
+            Shape should be (Nsrcs+1)
+        source_fraction : float, optional
+            fraction of sources to use, by default 0.5
+        beta_egmf : float, optional
+            the magnetic spread parameter to use.
+            By default set to 1 nG Mpc^1/2
+        Lsrcs: np.ndarray, optional, default = None
+            luminosity of the sources, by default None
+            If None, then Nex must be provided.
+            Shape must be (Nsrcs,)
+        Nex : int, optional
+            total number of expected events in the simulation, by default None
+            If None, then Lsrcs must be provided.
 
         Returns
         -------
-        sampled_energies: list
-            sampled energies at the Galactic boundary
-        sampled_masses: list
-            sampled masses at the Galactic boundary
-        sampled_coords_gb: list
-            sampled arrival directions at the Galactic boundary
+        truths : dict
+            The updated truths dictionary.
         """
-        Nsamples_arr = (
-            np.full(self.Nsrcs + 1, sampling_factor, dtype=int) * self.Nuhecrs_arr
+        # ensure that we have the correct shape for the mass fractions and alphas
+        if mass_fracs.shape[0] != self.Nmass_fracs:
+            raise ValueError(f"mass_fracs must have shape {self.Nmass_fracs}")
+
+        if (mass_fracs.shape[1] != self.Nsrcs + 1) or (
+            alphas.shape[0] != self.Nsrcs + 1
+        ):
+            raise ValueError(
+                f"mass_fracs and alphas must have shape {self.Nsrcs + 1} in second axis"
+            )
+
+        if (Lsrcs is None) and (Nex is None):
+            raise ValueError(
+                "Either Lsrcs or Nex must be provided. Both cannot be None."
+            )
+        if (Lsrcs is not None) and (Nex is not None):
+            raise ValueError(
+                "Either Lsrcs or Nex must be provided. Both cannot be provided."
+            )
+
+        # set the truth values based on the input parameters
+        fit_truths = {
+            "alphas": alphas,
+            "mass_fracs": mass_fracs,
+            "beta_egmf": beta_egmf,
+            "Lsrcs": Lsrcs,
+            "Nex": Nex,
+            "src_frac": source_fraction,
+        }
+
+        # calculate the mean charge at the source per source
+        # NB: sum is enough since sum(mass_fracs) = 1.0
+        fit_truths["Zsrc_mean"] = np.sum(
+            mass_fracs * self.charges_grid[:, np.newaxis],
+            axis=0,
         )
-        # sample using rng.choice
-        rng = np.random.default_rng()
 
-        """Sampling energies & masses at GB"""
-        sampled_energies = []
-        sampled_masses = []
+        fit_truths = self.__calculate_flux_truths(fit_truths)
 
-        for id, Nsamples in enumerate(Nsamples_arr):
+        self.truths = fit_truths
 
-            if id < self.Nsrcs:
-                # sample energies from the arrival spectrum
-                # here we interpolate over all spectral indices and 
-                # evaluate at the truth
-                src_spectrum_grid = 10**CubicSpline(
-                    y=self.log10_Eearth_spectrum[id, :, :],
-                    x=self.alpha_grid,
-                    axis=1,
-                )(self.truth_dict["alpha_s"]) 
+        return fit_truths
 
-                # the probabilities we sample from are normalised by multiplying with
-                # the energy widths
-                probs_energy = (
-                    src_spectrum_grid
-                    * self.dEearth_grid.value
-                    / np.sum(src_spectrum_grid * self.dEearth_grid.value)
+    def __calculate_flux_weights(
+        self: Self, fit_truths: dict
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Calculate the weights related to the flux for the simulation.
+
+        Parameters
+        ----------
+        fit_truths : dict
+            The truths dictionary containing the simulation parameters.
+
+        Returns
+        -------
+        w_exp_earth : np.ndarray
+            The weights for the effective flux at Earth.
+        w_exp_src : np.ndarray
+            The weights for the effective flux at the source.
+        """
+        w_exp_earth = np.zeros(self.Nsrcs + 1)
+        w_exp_src = np.zeros(self.Nsrcs + 1)
+
+        for k in range(self.Nsrcs + 1):
+            for j in range(self.Nmass_fracs):
+                f_A = fit_truths["mass_fracs"][j, k]
+
+                f_wexp_earth = RegularGridInterpolator(
+                    (self.beta_egmf_grid, self.alpha_grid),
+                    self.wexp_earth_grid[k, :, :, j],
+                    bounds_error=False,
+                    # fill_value=0.0,
                 )
 
+                w_exp_earth[k] += (
+                    f_wexp_earth((fit_truths["beta_egmf"], fit_truths["alphas"][k]))
+                    * f_A
+                )
+
+                # # do the same thing with the source spectrum
+                f_wexp_src = RegularGridInterpolator(
+                    (self.beta_egmf_grid, self.alpha_grid),
+                    self.wexp_src_grid[k, :, :, j],
+                    bounds_error=False,
+                    # fill_value=0.0,
+                )
+
+                w_exp_src[k] += (
+                    f_wexp_src((fit_truths["beta_egmf"], fit_truths["alphas"][k])) * f_A
+                )
+
+        return w_exp_earth, w_exp_src
+
+    def __calculate_flux_truths(self: Self, fit_truths: dict) -> dict:
+        """
+        Calculate the truths related to the flux for the simulation.
+
+        Parameters
+        ----------
+        fit_truths : dict
+            The truths dictionary containing the simulation parameters.
+
+        Returns
+        -------
+        truths_dict : dict
+            A dictionary containing the calculated flux truths.
+        """
+        # calculate the weighted effective exposure at Earth and source
+        w_exp_earth, w_exp_src = self.__calculate_flux_weights(fit_truths)
+
+        # calculate conversion from L -> Q
+        f_en_ratio = CubicSpline(
+            self.alpha_grid,
+            np.sum(
+                self.esrc_ratio_grid * fit_truths["mass_fracs"][np.newaxis, :, :],
+                axis=1,
+            ),
+            axis=0,
+        )
+        # now calculate truths based on if we have Nex or Lsrcs or not
+        if fit_truths["Nex"] is not None:
+            Nex = fit_truths["Nex"]
+            Nex_src = int(fit_truths["Nex"] * fit_truths["src_frac"])
+            Nex_bg = fit_truths["Nex"] - Nex_src
+
+            # here: calculate the total flux from the source at Earth
+            Fearth_tot = Nex_src / w_exp_earth
+
+            # then calcualte the particle rate by multiplying by distance factor
+            Qearths_truths = Fearth_tot * (
+                4 * np.pi * (self.data.source.distance * km_per_Mpc) ** 2
+            )
+
+            # convert to source particle rate
+            Qsrcs_truths = Qearths_truths * w_exp_src / w_exp_earth
+            Fsrcs_truths = Qsrcs_truths / (
+                4 * np.pi * (self.data.source.distance * km_per_Mpc) ** 2
+            )
+
+            # now we can calculate the relative contribution of each source to the flux at Earth
+            Fearths_truths = Qearths_truths / (
+                4 * np.pi * (self.data.source.distance * km_per_Mpc) ** 2
+            )
+
+            # luminosity simply calculated via multiplying with Eex
+            Lsrcs = Qsrcs_truths * np.array(
+                [f_en_ratio(fit_truths["alphas"][k])[k] for k in range(self.Nsrcs)]
+            )
+
+            fit_truths["Lsrcs"] = Lsrcs
+            fit_truths["log10_Lsrcs"] = np.log10(Lsrcs)
+            fit_truths["Nex_src"] = Nex_src
+            fit_truths["Nex_bg"] = Nex_bg
+
+        elif fit_truths["Lsrcs"] is not None:
+            Qsrcs_truths = fit_truths["Lsrcs"] / np.array(
+                [f_en_ratio(fit_truths["alphas"][k])[k] for k in range(self.Nsrcs)]
+            )
+            Qearths_truths = Qsrcs_truths * w_exp_earth / w_exp_src
+
+            Fsrcs_truths = np.zeros(self.Nsrcs)  # excluding the background source
+            Fearths_truths = np.zeros(self.Nsrcs)  # including the background source
+            Nex_src = 0.0
+            for k in range(self.Nsrcs):
+                Fsrcs_truths[k] = Qsrcs_truths[k] / (
+                    4 * np.pi * (self.data.source.distance[k] * km_per_Mpc) ** 2
+                )
+                Fearths_truths[k] = Qearths_truths[k] / (
+                    4 * np.pi * (self.data.source.distance[k] * km_per_Mpc) ** 2
+                )
+                Nex_src += Fearths_truths[k] * w_exp_earth[k]
+
+            Nex_src = int(Nex_src)
+            Nex = int(Nex_src / fit_truths["src_frac"])
+            Nex_bg = Nex - Nex_src
+
+            fit_truths["Nex"] = Nex
+            fit_truths["Nex_src"] = Nex_src
+            fit_truths["Nex_bg"] = Nex_bg
+            fit_truths["log10_Lsrcs"] = np.log10(fit_truths["Lsrcs"])
+        else:
+            raise ValueError(
+                "Either Nex or Lsrcs must be provided in the truths dictionary."
+            )
+
+        print(f"Total number of expected events: {Nex} (src: {Nex_src}, bg: {Nex_bg})")
+
+        fit_truths["Qsrcs"] = Qsrcs_truths
+        fit_truths["Qearths"] = Qearths_truths
+        fit_truths["Fsrcs"] = Fsrcs_truths
+        fit_truths["log10_Fsrcs"] = np.log10(Fsrcs_truths)
+
+        fit_truths["Fearths"] = Fearths_truths
+        fit_truths["log10_Fearths"] = np.log10(Fearths_truths)
+
+        fit_truths["F0"] = Nex_bg / w_exp_earth[-1]
+        fit_truths["log10_F0"] = np.log10(fit_truths["F0"])
+
+        fit_truths["Ftot"] = np.sum(Fearths_truths) + fit_truths["F0"]
+        fit_truths["log10_Ftot"] = np.log10(fit_truths["Ftot"])
+
+        fit_truths["Nex_per_src"] = (
+            np.concatenate([Fearths_truths, [fit_truths["F0"]]]).T * w_exp_earth
+        ).astype(int)
+
+        return fit_truths
+
+    def generate_samples(
+        self: Self, seed: Union[int, None] = None, sampling_factor: int = 10
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Generate samples for the simulation.
+
+        In particular, these generate the following:
+        - true energy samples at Earth (in EeV)
+        - true samples of mean and var lnA at Earth, binned in energy
+        - true arrival directions at the Galactic Boundary
+
+        Parameters
+        ----------
+        seed : int, optional
+            The random seed to use for the simulation.
+            If None, then no seed is set.
+        sampling_factor : int, optional
+            The factor by which to increase the number of samples.
+            This is useful for ensuring that we have enough samples
+            for the simulation for the exposure calculation later.
+            By default set to 10.
+        """
+        print(
+            f"Generating samples for the simulation with sampling factor of {sampling_factor}"
+        )
+        rng = np.random.default_rng(seed=seed)
+
+        mean_lnA_truths = np.zeros(self.NElnAs)
+        var_lnA_truths = np.zeros(self.NElnAs)
+
+        skycoord_gb_truths = []
+        Etruths = np.zeros(self.truths["Nex"] * sampling_factor)
+        rigidity_truths = np.zeros(self.truths["Nex"] * sampling_factor)
+        kappa_egmf_truths = np.zeros(self.truths["Nex"] * sampling_factor)
+
+        # calculatig mass fraction weighted values
+        energy_spect_mf = np.sum(
+            self.spectrum_grid
+            * self.truths["mass_fracs"][np.newaxis, np.newaxis, :, :],
+            axis=2,
+        )
+        mean_lnA_mfs = np.sum(
+            self.mean_lnA_grid
+            * self.truths["mass_fracs"][np.newaxis, np.newaxis, :, :],
+            axis=2,
+        )
+        var_lnA_mfs = np.sum(
+            self.var_lnA_grid * self.truths["mass_fracs"][np.newaxis, np.newaxis, :, :],
+            axis=2,
+        )
+
+        # create an 2-D interpolation grid
+        f_log_espect = RegularGridInterpolator(
+            (np.log10(self.energy_grid), self.alpha_grid), np.log(energy_spect_mf)
+        )
+
+        f_mulnA = CubicSpline(y=mean_lnA_mfs, x=self.alpha_grid, axis=1)
+        f_varlnA = CubicSpline(y=var_lnA_mfs, x=self.alpha_grid, axis=1)
+
+        N_prev_idx = 0
+
+        for k in range(self.Nsrcs + 1):  # +1 for the background source
+            Nex_per_src = self.truths["Nex_per_src"][k]
+            N_next_idx = Nex_per_src * sampling_factor + N_prev_idx
+
+            alpha_truth = self.truths["alphas"][k]
+            en_spect = np.exp(
+                f_log_espect((np.log10(self.energy_grid), alpha_truth))[:, k]
+            )
+            en_prob = (en_spect * self.energy_grid_widths) / np.sum(
+                en_spect * self.energy_grid_widths
+            )
+
+            en_samples_src = rng.choice(
+                self.energy_grid, size=Nex_per_src * sampling_factor, p=en_prob
+            )
+            Etruths[N_prev_idx:N_next_idx] = en_samples_src
+
+            # the rigidities at the source can also be easily calculated
+            # since we have the mean charge at the source
+            rigidity_truths[N_prev_idx:N_next_idx] = (
+                en_samples_src / self.truths["Zsrc_mean"][k]
+            )
+
+            # now calcualte the kappa_EGMF from the source
+            if k < self.Nsrcs:
+                kappa_egmfs = (
+                    7552
+                    * (
+                        theta_igmfs(
+                            (en_samples_src / self.truths["Zsrc_mean"][k]) * u.EV,
+                            self.truths["beta_egmf"] * (u.nG * u.Mpc ** (1 / 2)),
+                            self.data.source.distance[k] * u.Mpc,
+                        )
+                        / (1 * u.deg)
+                    ).value
+                    ** -2
+                )
             else:
-                 # precompute background spectrum & its probability
-                bg_spectrum_grid = bounded_power_law(
-                    self.Eearth_grid.value,
-                    self.truth_dict["alpha_b"],
-                    np.min(self.Eearth_grid.value),
-                    np.max(self.Eearth_grid.value),
+                kappa_egmfs = np.zeros(Nex_per_src * sampling_factor)
+
+            kappa_egmf_truths[N_prev_idx:N_next_idx] = kappa_egmfs
+
+            # use this with vMF distribution to get the arrival directions at the GB
+            for i in range(N_prev_idx, N_next_idx):
+                arrdir_gb_truth = sample_vMF(
+                    self.source_uvs[k,:], kappa_egmfs[i - N_prev_idx], num_samples=1
+                ).T
+                skycoord_gb = SkyCoord(
+                    arrdir_gb_truth,
+                    frame="galactic",
+                    representation_type="cartesian",
                 )
-                probs_energy = (
-                    bg_spectrum_grid
-                    * self.dEearth_grid.value
-                    / np.sum(bg_spectrum_grid * self.dEearth_grid.value)
-                )
+                skycoord_gb.representation_type = "unitspherical"
+                skycoord_gb_truths.append(skycoord_gb)
 
-            # then sample energies via rng.choice
-            Ee_samples = rng.choice(self.Ees_grid, size=Nsamples, p=probs_energy)
-            sampled_energies.append(Ee_samples)
+            N_prev_idx = Nex_per_src * sampling_factor
 
-            # now sample for lnA
-            lnA_samples = np.array([self.data.detector.sample_lnAs(energy=Ee * u.EeV, Nsamples=1) for Ee in Ee_samples])
-            sampled_masses.append(np.exp(lnA_samples))
+            # now calculate the mean and var lnA at Earth
+            mean_lnA_truths += (
+                Nex_per_src * f_mulnA(alpha_truth)[:, k] / self.truths["Nex"]
+            )
+            var_lnA_truths += (
+                Nex_per_src * f_varlnA(alpha_truth)[:, k] / self.truths["Nex"]
+            )
 
-        """Sampling for arrival directions"""
-        sampled_coords_gb = []
+        skycoord_gb_truths = concatenate_skycoords(skycoord_gb_truths)
 
-        for id, Nsamples in enumerate(Nsamples_arr):
+        # now we have the energy truths, mean lnA truths and var lnA truths
+        self.truths["Etruths"] = Etruths
+        self.truths["mean_lnA_truths"] = mean_lnA_truths
+        self.truths["var_lnA_truths"] = var_lnA_truths
+        self.truths["skycoord_gb_truths"] = skycoord_gb_truths
+        self.truths["rigidity_truths"] = rigidity_truths
+        self.truths["kappa_egmf_truths"] = kappa_egmf_truths
 
-            if id < self.Nsrcs:
-                # compute kappa_igmf
-                # kappa_igmfs = 10 ** self.f_log10_kappa(
-                #     theta_igmf_vec(
-                #     sampled_rigidities[id] * u.EV,
-                #     self.truth_dict["Bigmf"] * u.nG,
-                #     self.Dsrcs[id],
-                # ))
+        return Etruths, skycoord_gb_truths, mean_lnA_truths, var_lnA_truths
 
-                kappa_igmfs = 7552 * (theta_igmfs(
-                    (sampled_energies[id] / (0.5 * sampled_masses[id])) * u.EV,
-                    self.truth_dict["Bigmf"] * u.nG,
-                    self.Dsrcs[id],
-                    ) / (1 * u.deg)).value**-2
-
-                sampled_vectors_src = np.zeros((Nsamples, 3))
-                for i in range(Nsamples):
-                    sampled_vectors_src[i, :] = sample_vMF(
-                        self.data.source.coord[id].cartesian.xyz.value,
-                        kappa_igmfs[i],
-                        num_samples=1,
-                    )
-
-                sampled_coords_gb.append(
-                    SkyCoord(
-                        sampled_vectors_src,
-                        frame="galactic",
-                        representation_type="cartesian",
-                    )
-                )
-
-            else:
-                sampled_vectors_bg = sample_vMF(
-                    np.array([1, 0, 0]), 0.0, num_samples=Nsamples
-                )  # uniform sampling
-                sampled_coords_gb.append(
-                    SkyCoord(
-                        sampled_vectors_bg,
-                        frame="galactic",
-                        representation_type="cartesian",
-                    )
-                )
-
-        return sampled_energies, sampled_masses, sampled_coords_gb
-
-    def apply_lens(self : Self, sampled_rigidities : List[np.ndarray], sampled_coords : List[SkyCoord]) -> List[SkyCoord]:
+    def get_skycoords_earth(self: Self, skycoords_gb: SkyCoord) -> SkyCoord:
         """
         Apply GMF lens by sampling & re-sampling of particles.
 
         Parameters
         ----------
-        sampled_rigidites: list[np.ndarray]
-            sampled rigidities at the Galactic boundary
-        sampled_coords: list[astropy.coordinate.SkyCoord]
+        rigidities: list[np.ndarray]
+            rigidities at the Galactic boundary
+        skycoords_gb: list[astropy.coordinate.SkyCoord]
             sampled arrival diretions at the Galactic boundary
-        
+
         Returns
         -------
-        sampled_coords_earth: list[astropy.coordinate.SkyCoord]
+        skycoords_earth: list[astropy.coordinate.SkyCoord]
             sampled arrival directions at the Earth after lensing.
         """
         if self.gmf_model == "None":
             print(
-                "GMF is disabled. Will not run this code and return the initial samples"
+                "GMF is disabled. Will not run this code and set the skycoords_earth to the skycoords_gb."
             )
-            return sampled_coords
+            self.truths["skycoord_earth_truths"] = skycoords_gb
+            return skycoords_gb
 
         # initialise gmf lens object
         gmflens = GMFLensing(self.gmf_model)
 
-        # apply lensing to the coordinates at GB for each rigidity
-        sampled_coords_earth = []
-        for id, sampled_coord in enumerate(sampled_coords):
-            sampled_coords_earth.append(
-                gmflens.apply_lens_with_particles(sampled_rigidities[id], sampled_coord)
-            )
-
-        return sampled_coords_earth
-
-    def apply_detector_cuts(
-        self : Self, sampled_energies : List[np.ndarray], sampled_masses : List[np.ndarray], sampled_coords : List[np.ndarray]
-    ) -> Tuple[np.ndarray, np.ndarray, SkyCoord]:
-        """
-        Apply detector cuts to sampled events at Earth.
-        
-        Parameters
-        ----------
-        sampled_energies : List[np.ndarray]
-            energies after sampling (list of np arrays)
-        sampled_masses : List[np.ndarray]
-            masses after sampling (list of np arrays)
-        sampled_coords: List[np.ndarray]
-            coordinates after sampling (list of SkyCoord)
-        """
-        self.energies_det = np.zeros(self.Nuhecrs)
-        self.lnAs_det = np.zeros(self.Nuhecrs)
-        glons_det = np.zeros(self.Nuhecrs)
-        glats_det = np.zeros(self.Nuhecrs)
-        self.exposure_factors = np.zeros(self.Nuhecrs)
-
-        rng_det = np.random.default_rng()
-        uhecr_idx = 0
-
-        for id, Nuhecrs_per_src in enumerate(self.Nuhecrs_arr):
-            if id != len(self.Nuhecrs_arr) - 1:
-                print(f"Current Source: {self.data.source.name[id]}")
-            else:
-                print("Background Case")
-
-            count_per_src = 0
-            iters = 0
-
-            while count_per_src < Nuhecrs_per_src:
-                # shuffle indices from samples
-                sample_idces = np.arange(len(sampled_coords[id]))
-                rng_det.shuffle(sample_idces)
-
-                for i in sample_idces:
-
-                    # angular reconstruction uncertainty
-                    coord_earth = sampled_coords[id][i]
-
-                    # sample reconstruction uncertainty using vMF
-                    reconstr_uv = sample_vMF(
-                        coord_earth.cartesian.xyz.value, self.data.detector.kappa_d, num_samples=1
-                    )[0]
-                    reconstr_uv /= np.linalg.norm(reconstr_uv)
-                    reconst_coord = SkyCoord(
-                        *reconstr_uv, representation_type="cartesian", frame="galactic"
-                    )
-                    reconst_coord.transform_to("icrs")
-
-                    # evaluate exposure function at that declination -> construct pdet
-                    m_omega = m_dec(
-                        reconst_coord.icrs.dec.rad, self.data.detector.params
-                    )
-                    pdet = m_omega / self.data.detector.exposure_max
-                    accept = rng_det.choice(
-                        [0, 1], p=[pdet, 1 - pdet]
-                    )  # use binomial distribution to sample that UHECR
-
-                    # energy reconstruction
-                    # done via truncated normal distribution 
-                    en = sampled_energies[id][i]
-                    reconst_en = self.data.detector.sample_energies(en, 1)
-
-                    # mass reconstruction
-                    # done via truncated normal distribution as well
-                    mass = sampled_masses[id][i]
-                    # reconst_mass = self.data.detector.sam(mass, 1)
-
-                    # if particle is within exposure & within cuts then append
-                    if (
-                        (accept == 0)
-                        and (reconst_en >= self.data.detector.Eth)
-                        # and (reconst_rig <= self.data.detector.Rth_max)
-                    ):
-                        self.energies_det[uhecr_idx] = reconst_en
-                        self.lnAs_det[uhecr_idx] = np.log(mass)
-                        reconst_coord.transform_to("galactic")
-                        reconst_coord.representation_type = "unitspherical"
-                        glons_det[uhecr_idx] = reconst_coord.galactic.l.deg
-                        glats_det[uhecr_idx] = reconst_coord.galactic.b.deg
-                        self.exposure_factors[uhecr_idx] = (
-                            m_omega * self.data.detector.alpha_T / self.data.detector.M
-                        )
-
-                        uhecr_idx += 1
-                        count_per_src += 1
-
-                    # break when we have the UHECRs contributing for this particular source
-                    if count_per_src >= Nuhecrs_per_src:
-                        print(count_per_src)
-                        break
-
-                    iters += 1
-
-                if iters % 100 == 0:
-                    print(f"Counts / src = {count_per_src}")
-
-            if uhecr_idx > self.Nuhecrs:
-                raise ValueError(
-                    f"something wrong with indexing: {uhecr_idx}, {self.Nuhecrs}"
-                )
-
-        self.coords_det = SkyCoord(
-            glons_det * u.deg, glats_det * u.deg, frame="galactic"
+        skycoords_earth = gmflens.apply_lens_with_particles(
+            self.truths["rigidity_truths"],
+            skycoords_gb,
         )
 
-        if np.any(self.energies_det == 0):
-            raise ValueError(
-                f"zero value detected in rigidity computation: {np.where(self.energies_det == 0)}"
-            )
-        
-        return self.energies_det, self.lnAs_det, self.coords_det
+        self.truths["skycoord_earth_truths"] = skycoords_earth
 
-    def backpropagate_events(self : Self, n_samples: int = 100, n_jobs : int=4):
+        return skycoords_earth
+
+    def apply_mass_response(
+        self: Self,
+        mean_lnA_stat: Union[float, np.ndarray],
+        var_lnA_stat: Union[float, np.ndarray],
+        mean_lnA_sys: float = 0.0,
+        var_lnA_sys: float = 0.0,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Apply the detector response to the true values for the mean and variance of lnA.
+
+        Parameter:
+        ----------
+        mean_lnA_stat : float or np.ndarray
+            The statistical uncertainty on the mean lnA.
+            If a single value, then it is applied to all energy bins.
+            If an array, then it must have shape (NElnAs).
+        var_lnA_stat : float or np.ndarray
+            The statistical uncertainty on the variance of lnA.
+            If a single value, then it is applied to all energy bins.
+            If an array, then it must have shape (NElnAs).
+        mean_lnA_sys : float, optional
+            The systematic uncertainty on the mean lnA.
+            Default is 0.0.
+        var_lnA_sys : float, optional
+            The systematic uncertainty on the variance of lnA.
+            Default is 0.0.
+        """
+        if isinstance(mean_lnA_stat, float):
+            mean_lnA_stat = np.full(self.NElnAs, mean_lnA_stat)
+
+        if isinstance(var_lnA_stat, float):
+            var_lnA_stat = np.full(self.NElnAs, var_lnA_stat)
+
+        mean_lnA_dets = np.array(
+            [
+                get_mean_lnA_det(
+                    mean_lnA + mean_lnA_sys,
+                    mean_lnA_unc=mean_lnA_stat[ibin],
+                )
+                for ibin, mean_lnA in enumerate(self.truths["mean_lnA_truths"])
+            ]
+        ).flatten()
+        var_lnA_dets = np.array(
+            [
+                get_var_lnA_det(
+                    var_lnA + var_lnA_sys,
+                    var_lnA_unc=var_lnA_stat[ibin],
+                )
+                for ibin, var_lnA in enumerate(self.truths["var_lnA_truths"])
+            ]
+        ).flatten()
+
+        # store the detected values in the truths dictionary
+        self.truths["mean_lnA_dets"] = mean_lnA_dets
+        self.truths["var_lnA_dets"] = var_lnA_dets
+
+        # also set the uncertainties here
+        self.config["mean_lnA_stat"] = mean_lnA_stat
+        self.config["var_lnA_stat"] = var_lnA_stat
+        self.config["mean_lnA_sys"] = mean_lnA_sys
+        self.config["var_lnA_sys"] = var_lnA_sys
+
+        return mean_lnA_dets, var_lnA_dets
+
+    def apply_energy_directional_response(
+        self: Self,
+        logE_stat: Union[float, None] = None,
+        kappa_det: Union[float, None] = None,
+        logE_sys: float = 0.0,
+    ) -> Tuple[np.ndarray, List[SkyCoord]]:
+        """
+        Apply the detector response to the true values for the energy and direction.
+
+        i.e., we apply response to the unbinned quantities.
+
+        This is treated separately as we do a accept-reject implementation
+        for the direction, which is not the case for the lnA values.
+
+        Parameter:
+        ----------
+        logE_stat : float or None, optional
+            The statistical uncertainty on the log energy.
+            If None, then the uncertainty from data.detector is used.
+        logE_sys : float, optional
+            The systematic uncertainty on the log energy.
+            Default is 0.0.
+        """
+        # if None then use the energy uncertainty reported in
+        # data.detector
+        if logE_stat is None:
+            logE_stat = self.data.detector.energy_uncertainty
+
+        if kappa_det is None:
+            kappa_det = self.data.detector.kappa_d
+
+        skycoord_earth_dets = []
+        exposure_factor = np.zeros(self.truths["Nex"])
+        Edets = np.zeros(self.truths["Nex"])
+
+        uhecr_idx = 0
+
+        for j, skycoord_earth in enumerate(self.truths["skycoord_earth_truths"]):
+            # sample reconstruction uncertainty using vMF
+            # and calculate if the direction is within the
+            # exposure boundary or not.
+
+            # other two arguments returned are the reconstructed direction
+            # and exposure function at that direction (declination)
+            accept, skycoord_earth_det, m_exp = get_direction_acceptance(
+                skycoord_earth.cartesian.xyz.value,
+                kappa_det,
+                detector_params=self.data.detector.params,
+                max_exposure=self.data.detector.exposure_max,
+            )
+
+            if accept != 0:
+                # if the acceptance is not zero, then we have a valid
+                # direction and can store it
+
+                # store the glon and glat
+                # as well as the exposure factor
+                skycoord_earth_dets.append(skycoord_earth_det)
+                exposure_factor[uhecr_idx] = (
+                    m_exp * self.data.detector.alpha_T / self.data.detector.M
+                )
+                Edets[uhecr_idx] = get_Edet(
+                    np.log(self.truths["Etruths"][uhecr_idx]) + logE_sys,
+                    en_unc=logE_stat,
+                    Eth=np.min(self.energy_grid),
+                    Emax=np.max(self.energy_grid),
+                )
+
+                uhecr_idx += 1
+
+            if uhecr_idx >= self.truths["Nex"]:
+                # if we have reached the number of expected events,
+                # then we can stop
+                break
+
+        skycoord_earth_dets = concatenate_skycoords(skycoord_earth_dets)
+
+        # store the detected values in the truths dictionary
+        self.truths["Edets"] = Edets
+        self.truths["skycoord_earth_dets"] = skycoord_earth_dets
+        self.truths["exposure_factor"] = exposure_factor
+
+        # also set the uncertainties here
+        self.config["logE_stat"] = logE_stat
+        self.config["logE_sys"] = logE_sys
+        self.config["kappa_det"] = kappa_det
+
+        return Edets, skycoord_earth_dets
+
+    # add some function to backtrack samples to get the kappa_GMF per mass model
+    def backpropagate_events(self: Self, n_samples: int = 100, n_jobs: int = 4) -> None:
         """
         Backpropagate the sampled & exposure-applied events at Earth back to the GB.
 
@@ -527,40 +873,86 @@ class Simulation:
         n_jobs: int
             the number of jobs to use for parallelisation
         """
+        if self.gmf_model == "None":
+            print(
+                "GMF is disabled. Will not run this code and set the deflection parameters to None."
+            )
+            self.truths["skycoord_gb_truths_bp"] = None
+            self.truths["rigidity_bp"] = None
+
+            # for the kappa gmfs and theta gmfs, we just store the deflection parameters from
+            # the angular reconstruction uncertainty set in the simulation.
+            self.truths["kappa_gmfs"] = None  # no GMF deflection
+            self.truths["theta_gmfs"] = None  # no GMF deflection
+            return
         # first write data to temporary file such that Data can read it
-        outfile = tempfile.mkstemp()[1]
+        outfile = (
+            tempfile.mkstemp()[1] + "sim.h5"
+        )  # add keyword "sim" so that the data UHECR reader knows that the full path should be used instead
         with h5py.File(outfile, "w") as f:
             data_gr = f.create_group(self.detector_type)
+            data_gr.create_dataset("energy", data=self.truths["Edets"])
             data_gr.create_dataset(
-                "energy", data=self.energies_det * self.data.detector.meanZ
+                "glon", data=self.truths["skycoord_earth_dets"].galactic.l.deg
             )
-            data_gr.create_dataset("rigidity", data=self.energies_det / (0.5 * np.exp(self.lnAs_det)))
-            data_gr.create_dataset("exposure", data=self.exposure_factors)
-            data_gr.create_dataset("glon", data=self.coords_det.galactic.l.deg)
-            data_gr.create_dataset("glat", data=self.coords_det.galactic.b.deg)
-            data_gr.create_dataset("theta", data=np.full(self.Nuhecrs, 70))  # stub
+            data_gr.create_dataset(
+                "glat", data=self.truths["skycoord_earth_dets"].galactic.b.deg
+            )
+
+            # following datasets are stubs, as they are not used in the backpropagation
+            data_gr.create_dataset(
+                "exposure_factors", data=np.full(self.truths["Nex"], 1.0)
+            )  # stub
+            data_gr.create_dataset("theta", data=np.full(self.truths["Nex"], 0))  # stub
             data_gr.create_dataset(
                 "year",
-                data=np.full(self.Nuhecrs, self.data.detector.start_year, dtype=int),
+                data=np.full(
+                    self.truths["Nex"], self.data.detector.start_year, dtype=int
+                ),
             )  # stub
-            data_gr.create_dataset("day", data=np.ones(self.Nuhecrs, dtype=int))  # stub
+            data_gr.create_dataset(
+                "day", data=np.ones(self.truths["Nex"], dtype=int)
+            )  # stub
 
-        # add this to the data object
-        self.data.add_uhecr(outfile, label=self.detector_type, hadr_model=self.mass_model, gmf_model="None")
+        # add this to a newly generated data object
+        data_for_bp = Data()
+        data_for_bp.add_detector(label=self.detector_type, mass_model=self.mass_model)
+        data_for_bp.add_uhecr(
+            label=self.detector_type,
+            mass_model=self.mass_model,
+            gmf_model="None",
+            filename=outfile,
+        )
 
         # now perform GMF back propagation
-        gmfbackprop = GMFBackPropagation(self.data, self.gmf_model)
+        gmfbackprop = GMFBackPropagation(data_for_bp, self.gmf_model)
+
+        # setup the "detector response" through the mean and sigma lnA observed at Earth
+        # from our model
+        # NB: we pass in the true mean and variance of lnA at Earth
+        # as opposed to the detected one, since they will have
+        # systematic uncertainties, which can lead to
+        # weird values for mean and variance of lnA
+        gmfbackprop.setup_detector_response(
+            mean_lnA_grid=self.truths["mean_lnA_truths"],
+            var_lnA_grid=self.truths["var_lnA_truths"],
+            E_lnA_grid=self.lnA_energy_grid,
+            logE_stat=self.config["logE_stat"],
+            kappa_det=self.config["kappa_det"],
+            Eth=np.min(self.config["energy_grid"]),
+            Eth_max=np.max(self.config["energy_grid"]),
+        )
         gmfbackprop.run_backpropagation(n_samples, njobs=n_jobs)
         gmfbackprop.compute_kappa_gmf()
 
         # set properties
         if self.gmf_model != "None":
-            self.kappa_gmfs = gmfbackprop.kappa_gmfs
-            self.thetaPs = gmfbackprop.thetaPs
-            self.glons_gb = gmfbackprop.uhecr_coords_gb.galactic.l.deg
-            self.glats_gb = gmfbackprop.uhecr_coords_gb.galactic.b.deg
+            self.truths["rigidity_bp"] = gmfbackprop.mean_rigidity
+            self.truths["kappa_gmfs"] = gmfbackprop.kappa_gmfs
+            self.truths["theta_gmfs"] = np.rad2deg(gmfbackprop.thetaPs)
+            self.truths["skycoord_gb_truths_bp"] = gmfbackprop.uhecr_coords_gb
 
-    def save(self : Self, outfile: str) -> None:
+    def save(self: Self, outfile: str) -> None:
         """
         Save the simulation file as a new UHECR file.
 
@@ -569,17 +961,20 @@ class Simulation:
         outfile: str
             the output file as an UHECR file
         """
-        # simulate for zenith angles for compatibility
-        zeniths_sim, years_sim, days_sim = self._simulate_zenith_angles(
-            self.coords_det.transform_to("icrs")
-        )
-
         # get ra, dec, glon, glat
         glons_det, glats_det = (
-            self.coords_det.galactic.l.deg,
-            self.coords_det.galactic.b.deg,
+            self.truths["skycoord_earth_dets"].galactic.l.deg,
+            self.truths["skycoord_earth_dets"].galactic.b.deg,
         )
-        c_icrs = self.coords_det.transform_to("icrs")
+        # simulate for zenith angles for compatibility
+        c_icrs = self.truths["skycoord_earth_dets"].transform_to("icrs")
+        zeniths_sim, years_sim, days_sim = simulate_zenith_angles(
+            c_icrs,
+            zen_thresh=self.data.detector.threshold_zenith_angle.value,
+            period_start=self.data.detector.period_start,
+            location=self.data.detector.location,
+        )
+
         ras_det, decs_det = c_icrs.ra.deg, c_icrs.dec.deg
 
         with h5py.File(outfile, "a") as file:
@@ -589,14 +984,15 @@ class Simulation:
             simulated_data.create_dataset("day", data=days_sim)
             simulated_data.create_dataset("year", data=years_sim)
             simulated_data.create_dataset("theta", data=zeniths_sim)
-            simulated_data.create_dataset("rigidity", data=self.rigidities_det)
-            simulated_data.create_dataset("energy", data=self.energies_det)
-            simulated_data.create_dataset("mass", data=np.exp(self.lnAs_det))
+            simulated_data.create_dataset("rigidity", data=self.truths["rigidity_bp"])
+            simulated_data.create_dataset("energy", data=self.truths["Edets"])
             simulated_data.create_dataset("ra", data=ras_det)
             simulated_data.create_dataset("dec", data=decs_det)
             simulated_data.create_dataset("glat", data=glats_det)
             simulated_data.create_dataset("glon", data=glons_det)
-            simulated_data.create_dataset("exposure", data=self.exposure_factors)
+            simulated_data.create_dataset(
+                "exposure", data=self.truths["exposure_factor"]
+            )
 
             if self.gmf_model != "None":
                 gmfdefl_datas_grp = simulated_data.create_group("gmf")
@@ -605,65 +1001,52 @@ class Simulation:
                     del gmfdefl_datas_grp[config_key]
                 gmfdefl_datas_config_grp = gmfdefl_datas_grp.create_group(config_key)
                 gmfdefl_datas_config_grp.create_dataset(
-                    "kappa_gmf", data=self.kappa_gmfs
+                    "kappa_gmf", data=self.truths["kappa_gmfs"]
                 )
-                gmfdefl_datas_config_grp.create_dataset("thetaP", data=self.thetaPs)
-                gmfdefl_datas_config_grp.create_dataset("glons_gb", data=self.glons_gb)
-                gmfdefl_datas_config_grp.create_dataset("glats_gb", data=self.glats_gb)
-
-    # convert starting period to decimal year
-    def _year_fraction(self, date):
-        start = datetime.date(date.year, 1, 1).toordinal()
-        year_length = datetime.date(date.year + 1, 1, 1).toordinal() - start
-        return date.year + float(date.toordinal() - start) / year_length
-
-    def _simulate_zenith_angles(self, c_icrs):
-        """Simulate zenith angles, using ICRS SKyCoord"""
-        years = []
-        days = []
-        times = []
-        zenith_angles = []
-        stuck = []
-
-        k = 0
-        first = True
-        for d in c_icrs:
-            za = 99
-            i = 0
-            while za > self.data.detector.threshold_zenith_angle.rad:
-                dt = np.random.exponential(1.0 / self.Nuhecrs)
-                if first:
-                    t = self._year_fraction(self.data.detector.period_start) + dt
-                else:
-                    t = times[-1] + dt
-                tdy = Time(t, format="decimalyear")
-                c_altaz = d.transform_to(
-                    AltAz(obstime=tdy, location=self.data.detector.location)
+                gmfdefl_datas_config_grp.create_dataset(
+                    "thetaP", data=self.truths["theta_gmfs"]
                 )
-                za = np.pi / 2 - c_altaz.alt.rad
+                gmfdefl_datas_config_grp.create_dataset(
+                    "glons_gb", data=self.truths["skycoord_gb_truths_bp"].galactic.l.deg
+                )
+                gmfdefl_datas_config_grp.create_dataset(
+                    "glats_gb",
+                    data=self.truths["skycoord_gb_truths_bp"].galactic.b.deg,
+                )
 
-                i += 1
-                if i > 100:
-                    za = self.data.detector.threshold_zenith_angle.rad
-                    stuck.append(1)
+    def plot_samples(
+        self: Self, plotting_mode: str = "all"
+    ) -> Tuple[mpl.figure.Figure, mpl.axes.Axes]:
+        """
+        Plot the samples of the simulation.
 
-            # convert decimal years to year & days
-            year, year_frac = divmod(t, 1)
-            day = np.round(year_frac * 365.2425)  # round to nearest even value
-            years.append(int(year))
-            days.append(int(day))
+        This function will plot the following things:
+        1. A skymap of the arrival directions at the Galactic boundary, color coded by its rigidity. The EGMF deflections is encoded as a circle in the plots. The source direction is also shown here.
+        2. A skymap of the arrival directions at the Earth, color coded by its energy. The source direction is also shown.
+        3. The energy spectrum, showing the relative contribution of source & background sources, as well as the mass fraction weighted spectrum for each source.
+        4. The mean and variance of lnA at Earth, color coded by the source index.
+        5. The deflection directions from Earth -> GB, along with the deflection angles per UHECR.
 
-            # append time also for the algorithm
-            times.append(t)
-            first = False
-            zenith_angles.append(za)
-            k += 1
-            # print(j , za)
+        Note: this is a simple plotting function and does not include any advanced features. Generate your own plots if you want to do more advanced things.
 
-        if len(stuck) > 1:
-            print(
-                "Warning: % of zenith angles stuck is",
-                len(stuck) / len(zenith_angles) * 100,
+        Parameters
+        ----------
+        plotting_mode : str, optional
+            The plotting mode to use. Can be "all", "skymap", "energy", "mass", or "backprop".
+            By default set to "all".
+        """
+        if plotting_mode not in ["all", "skymap", "energy", "mass", "backprop"]:
+            raise ValueError(
+                f"Invalid plotting mode {plotting_mode}. Choose from 'all', 'skymap', 'energy_mass' or 'backprop'."
             )
 
-        return np.array(zenith_angles), np.array(years), np.array(days)
+        if plotting_mode == "all" or plotting_mode == "skymap":
+            _ = plot_skymap_gb(self.data, self.truths)
+            _ = plot_skymap_earth(self.data, self.truths, self.gmf_model)
+        if plotting_mode == "all" or plotting_mode == "energy":
+            _ = plot_energy(self.data, self.truths, self.config)
+        if plotting_mode == "all" or plotting_mode == "mass":
+            _ = plot_mean_sigma_lnA(self.data, self.truths, self.config)
+        if plotting_mode == "all" or plotting_mode == "backprop":
+            _ = plot_backprop_skymap(self.data, self.truths, self.gmf_model)
+            _ = plot_backprop_rigidities(self.data, self.truths, self.gmf_model)

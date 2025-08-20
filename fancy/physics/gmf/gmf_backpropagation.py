@@ -9,12 +9,13 @@ from astropy.coordinates import SkyCoord
 from cmdstanpy import CmdStanModel
 from joblib import Parallel, delayed
 from scipy.stats import norm
-from typing_extensions import Self
+from typing_extensions import Self, Union
 from vMF import sample_vMF
 
 from fancy.utils.package_data import get_path_to_stan_includes, get_path_to_stan_file
 
 from fancy import Data
+from fancy.utils.helpers import truncated_lognormal_sample
 
 try:
     import crpropa as cr
@@ -27,10 +28,13 @@ class GMFBackPropagation:
 
     __gmf_models: typing.ClassVar[list] = [
         "JF12",
-        "UF23",
-        "UF23Turb",
+        "UF23all",
+        "UF23base",
+        "UF23allTurb",
+        "UF23baseTurb",
         "PT11",
         "TF17",
+        "KST24",  # to include in the future
     ]  # type of GMF models
     __Nmodels_UF23: int = 8  # number of models in UF23
 
@@ -47,6 +51,16 @@ class GMFBackPropagation:
         """
         self.data = data
         self.gmf_model = gmf_model
+
+        # settings for the detector
+        self.mean_lnA_grid = None
+        self.var_lnA_grid = None
+        self.E_lnA_grid = None
+        self.logE_stat = self.data.detector.energy_uncertainty
+        self.kappa_det = self.data.detector.kappa_d  # default value for the detector kappa
+        self.Eth = self.data.detector.Eth  # default value for the threshold energy in EeV
+        self.Eth_max = 1000  # default value for the maximum energy in EeV
+
 
         assert gmf_model in self.__gmf_models, (
             f"GMF model {gmf_model} is not an available GMF model."
@@ -69,6 +83,9 @@ class GMFBackPropagation:
         self.uhecr_energy = data.uhecr.energy
         self.Nuhecrs = len(self.uhecr_energy)
 
+        # store the mean rigidity generated from the backpropagation model
+        self.mean_rigidity = np.zeros(self.Nuhecrs)
+
         # compile vMF model
         self.__compile_vMFmodel()
 
@@ -83,133 +100,170 @@ class GMFBackPropagation:
             stanc_options=stanc_options,
         )
 
-    def __get_time_delay(
-        self: Self, c, pos_earth
-    ) -> np.ndarray:
+    def setup_detector_response(
+        self: Self,
+        mean_lnA_grid: Union[np.ndarray, None] = None,
+        var_lnA_grid: Union[np.ndarray, None] = None,
+        E_lnA_grid : Union[np.ndarray, None] = None,
+        logE_stat: Union[float, None] = None,
+        kappa_det : Union[float, None] = None,
+        Eth: Union[float, None] = None,
+        Eth_max : float = 1000,
+    ) -> None:
         """
-        Return delay between entering the galactic disc and arrival at Earth through magnetic field.
+        Set up the detector response for the backpropagation.
 
         Parameters
         ----------
-        c : cr.Candidate
-            CRPropa candidate object
-        pos_earth : cr.Vector3d
-            position of the Earth in galactic coordinates
-
-        Returns
-        -------
-        time delay in years
+        mean_lnA : np.ndarray, optional
+            mean lnA values for the detector as a function of log10(E).
+            If not provided, will be taken from the detector model.
+        var_lnA : np.ndarray, optional
+            variance of lnA values for the detector as a function of log10(E).
+            If not provided, will be taken from the detector model.
+        E_lnA_grid : np.ndarray, optional
+            energy grid for the lnA values, used to perform the bin search for
+            rigidity values used for backtracking.
+            Must be provided if the mean and variance of the lnA is provided.
+            If None, then the energy grid will be taken with logarithmic spacing
+            from the energy range of the detector model.
+        logE_stat : float, optional
+            logarithm of the statistical energy uncertainty.
+            If not provided, will be taken from the detector model.
+        kappa_det : float, optional
+            the concentration parameter for the von Mises-Fisher distribution
+            used to sample the arrival directions of the UHECRs.
+            Characterises the reconstruction uncertainty of the arrival directions.
+            If not provided, will be taken from the detector model.
+        Eth : float, optional
+            the threshold energy in EeV for the detector.
+            If not provided, will be taken from the detector model.
+        Eth_max : float, default=1000
+            the maximum energy in EeV for the detector.
+            Used for the grid of lnA values if E_lnA_grid is not provided.
         """
-        return (
-            (c.getTrajectoryLength() - c.current.getPosition().getDistanceTo(pos_earth))
-            / cr.c_light
-            / (60 * 60 * 24 * 365)
-        )
+        if Eth is not None:
+            self.Eth = Eth
+        self.Eth_max = Eth_max
 
-    def __setup_simulation(self: Self, obs, mt_num: int):
+        if E_lnA_grid is None:
+            if (mean_lnA_grid is not None and var_lnA_grid is not None):
+                raise ValueError(
+                    "E_lnA_grid must be provided if mean_lnA_grid and var_lnA_grid are provided."
+                )
+            else:
+                # then this is just hardcoded, where Emax is some very large number.
+                # the bins here are also small to reflect the fact that we have an analytical estimate
+                # for lnA.
+                self.E_lnA_grid = np.logspace(Eth, Eth_max, 1000)
+        else:
+            self.E_lnA_grid = E_lnA_grid
+
+        # for the mean and variance of lnA, we just use the linear fit
+        # if they are both set to None.
+        # otherwise we use the values given here.
+        
+        if mean_lnA_grid is not None:
+            self.mean_lnA_grid = mean_lnA_grid
+        else:
+            # otherwise, we use the linear fit from the lnA parameters.
+            # TODO: in the future, we should just use the values directly 
+            # instead of storing a fit function
+            self.mean_lnA_grid = self.data.detector.lnA_params[0,0] * np.log10(
+                self.E_lnA_grid
+            ) + self.data.detector.lnA_params[0,1]
+        
+
+        if var_lnA_grid is not None:
+            self.var_lnA_grid = var_lnA_grid
+        else:
+            self.var_lnA_grid = (self.data.detector.lnA_params[1,0] * np.log10(
+                self.E_lnA_grid
+            ) + self.data.detector.lnA_params[1,1])**2
+
+        # for the energy uncertainty, we just use the detector default value
+        # if it is not provided.
+        if logE_stat is not None:
+            self.logE_stat = logE_stat
+
+        # for the kappa detector, we just use the detector default value
+        if kappa_det is not None:
+            self.kappa_det = kappa_det
+
+    # parallelize for each UHECR
+    def run_backpropagation(
+        self: Self, Nsamples: int = 500, njobs: int = 4, parallel: bool = True
+    ) -> None:
         """
-        Prepare the crpropa backtracking simulation.
-
-        Parameters
-        ----------
-        obs : cr.Observer
-            CRPropa observer object
-        mt_num : int
-            the montel number for the UF23 model
-
-        Returns
-        -------
-        cr.ModuleList
-            the simulation object containing the observer and propagation model
-        """
-        sim = cr.ModuleList()
-        rng = np.random.default_rng()
-
-        # setup magnetic field
-        if self.gmf_model == "JF12":
-            seed = int(rng.integers(low=0, high=10000000))
-            gmf_cr = cr.JF12Field()
-            gmf_cr.randomStriated(seed)
-            gmf_cr.randomTurbulent(seed)
-
-        elif self.gmf_model == "UF23":
-            gmf_cr = cr.UF23Field(mt_num)
-
-        elif self.gmf_model == "UF23Turb":
-            seed = int(rng.integers(low=0, high=10000000))
-
-            gmf_cr = cr.UF23Field(mt_num)
-            gmf_cr.randomStriated(seed)
-            gmf_cr.randomTurbulent(seed)
-        elif self.gmf_model == "PT11":
-            gmf_cr = cr.PT11Field()
-        elif self.gmf_model == "TF17":
-            gmf_cr = cr.TF17Field()
-
-        # Propagation model, parameters: (B-field model, target error, min step, max step)
-        sim.add(cr.PropagationCK(gmf_cr, 1e-4, 0.1 * cr.parsec, 100 * cr.parsec))
-
-        sim.add(obs)  # add observer at galactic boundary
-        return sim
-
-    def __generate_backtracking_arguments(self: Self, Nsamples: int = 500) -> list:
-        """
-        Generate arguments used for backtracking.
-
-        Here we sample the arrival directions and rigidities for each UHECR.
-
-        The arrival directions is sampled via a vMF distribution using the angular
-        reconstruction uncertainty.
-        The energy is sampled via a normal distribution using the energy
-        uncertainty, which is then used to compute the mean lnA & sigma lnA.
-        The composition is sampled for each energy sample, which is then
-        combined to get rigidity samples.
+        Run backpropagation for all UHECRs.
 
         Parameters
         ----------
         Nsamples : int
             number of samples to generate for each UHECR.
-
-        Returns
-        -------
-        a list containing a tuple of arguments for each UHECR.
+        njobs : int, default=4
+            number of jobs to run in parallel. not used if parallel=False
+        parallel : bool
+            flag whether to run in parallel or not.
         """
-        # generate arguments
-        bt_args = []
-        for i in range(self.Nuhecrs):
-            # sample arrival directions via vMF
-            uhecr_sampled_uvs = sample_vMF(
-                self.uhecr_uv[i], self.data.detector.kappa_d, num_samples=Nsamples
+        # if UF23, make sure that number of samples are divisible by
+        # number of models in UF23 (8 models)
+        # such that we have uniform number of samples per model
+        # we just multiply the number of samples by 8
+        if self.gmf_model.find("UF23all") != -1:
+            Nsamples = int(Nsamples * self.__Nmodels_UF23)
+
+        self.arr_sampled_uvs = np.zeros((self.Nuhecrs, Nsamples, 3))
+        self.defl_sampled_uvs = np.zeros((self.Nuhecrs, Nsamples, 3))
+        self.defl_mean_uvs = np.zeros((self.Nuhecrs, 3))
+        self.time_delays = np.zeros((self.Nuhecrs, Nsamples))
+
+        # generate backtrakcing arguments for all uhecrs
+        bt_args = self.__generate_backtracking_arguments(Nsamples)
+
+        # use joblib to run parallel jobs otherwise use serial
+        if parallel:
+            results = Parallel(n_jobs=njobs)(
+                delayed(self.run_single_backpropagation)(arg) for arg in bt_args
+            )
+        else:
+            results = []
+            for arg in bt_args:
+                results.append(self.run_single_backpropagation(arg))
+
+        # append the results
+        for uhecr_idx, ars, dls, dlm, td in results:
+            self.arr_sampled_uvs[uhecr_idx, ...] = ars
+            self.defl_sampled_uvs[uhecr_idx, ...] = dls
+            self.defl_mean_uvs[uhecr_idx, :] = dlm
+            self.time_delays[uhecr_idx, :] = td
+
+        # take care of nans
+        for uhecr_idx in range(self.Nuhecrs):
+            defl_sample_uv = self.defl_sampled_uvs[uhecr_idx, ...]
+            # find a sample vector that is not nan so that we can assign it to a nan vector
+            # since the array is collapsed, we just take the first three elements, which would be one
+            # vector that doesnt have nans
+            a_sample_with_nonans = defl_sample_uv[~np.isnan(defl_sample_uv)][0:3]
+            # assign the deflected unit vectors such that if it is nan, we set it to
+            # a non-NaN vector. Since these are anyways rare and are sampled over for kappa_GMF
+            # setting one to another should not make too much difference
+            self.defl_sampled_uvs[uhecr_idx, ...] = np.where(
+                np.isnan(defl_sample_uv), a_sample_with_nonans, defl_sample_uv
             )
 
-            # to do this, we sample over all energies first with truncated gaussian
-            E_samples = norm.rvs(
-                loc=self.uhecr_energy[i],
-                scale=self.data.detector.energy_uncertainty * self.uhecr_energy[i],
-                size=Nsamples,
-            )  # in EeV
+        self.uhecr_coords_gb = SkyCoord(
+            self.defl_mean_uvs, frame="galactic", representation_type="cartesian"
+        )
+        self.uhecr_coords_gb.representation_type = "unitspherical"
 
-            # # now compute mean lnA, as a function of log10(E / EeV)
-            # mu_sigma_lnAs = (
-            #     self.lnA_params[:, 0, np.newaxis] * np.log10(E_samples)[np.newaxis, :]
-            #     + self.lnA_params[:, 1, np.newaxis]
-            # )
-            # lnA_samples = norm.rvs(loc=mu_sigma_lnAs[0, :], scale=mu_sigma_lnAs[1, :])
-            lnA_samples = np.array(
-                [
-                    self.data.detector.sample_lnAs(
-                        E,
-                        Nsamples,
-                    )
-                    for E in E_samples
-                ]
-            )
-
-            # now compute the rigidities using R = (E / Z) * (Z /A) * (A / (exp(lnA)))
-            uhecr_sampled_Rs = E_samples / (0.5 * np.exp(lnA_samples)) * cr.EeV  # in EV
-
-            bt_args.append((i, uhecr_sampled_uvs, uhecr_sampled_Rs))
-        return bt_args
+    def compute_kappa_gmf(self: Self) -> None:
+        """Compute kappa gmf & theta by fitting to vMF distribution pre-computed via stan."""
+        self.kappa_gmfs = Parallel(n_jobs=2)(
+            delayed(self._get_kappa_gmf)(uhecr_idx) for uhecr_idx in range(self.Nuhecrs)
+        )
+        self.thetaPs = self.f_theta(self.kappa_gmfs)  # for plotting purposes
+    
 
     def run_single_backpropagation(self: Self, bt_arg: tuple) -> tuple:
         """
@@ -293,79 +347,145 @@ class GMFBackPropagation:
             uhecr_time_delays,
         )
 
-    # parallelize for each UHECR
-    def run_backpropagation(
-        self: Self, Nsamples: int = 500, njobs: int = 4, parallel: bool = True
-    ) -> None:
+    def __get_time_delay(self: Self, c, pos_earth) -> np.ndarray:
         """
-        Run backpropagation for all UHECRs.
+        Return delay between entering the galactic disc and arrival at Earth through magnetic field.
+
+        Parameters
+        ----------
+        c : cr.Candidate
+            CRPropa candidate object
+        pos_earth : cr.Vector3d
+            position of the Earth in galactic coordinates
+
+        Returns
+        -------
+        time delay in years
+        """
+        return (
+            (c.getTrajectoryLength() - c.current.getPosition().getDistanceTo(pos_earth))
+            / cr.c_light
+            / (60 * 60 * 24 * 365)
+        )
+
+    def __setup_simulation(self: Self, obs, mt_num: int):
+        """
+        Prepare the crpropa backtracking simulation.
+
+        Parameters
+        ----------
+        obs : cr.Observer
+            CRPropa observer object
+        mt_num : int
+            the montel number for the UF23 model
+
+        Returns
+        -------
+        cr.ModuleList
+            the simulation object containing the observer and propagation model
+        """
+        sim = cr.ModuleList()
+        rng = np.random.default_rng()
+
+        # setup magnetic field
+        if self.gmf_model == "JF12":
+            seed = int(rng.integers(low=0, high=10000000))
+            gmf_cr = cr.JF12Field()
+            gmf_cr.randomStriated(seed)
+            gmf_cr.randomTurbulent(seed)
+
+        elif self.gmf_model == "UF23":
+            gmf_cr = cr.UF23Field(mt_num)
+
+        elif self.gmf_model == "UF23base":
+            gmf_cr = cr.UF23Field(0)
+
+        elif self.gmf_model == "UF23Turb":
+            seed = int(rng.integers(low=0, high=10000000))
+
+            gmf_cr = cr.UF23Field(mt_num)
+            gmf_cr.randomStriated(seed)
+            gmf_cr.randomTurbulent(seed)
+
+        elif self.gmf_model == "UF23Turbbase":
+            seed = int(rng.integers(low=0, high=10000000))
+
+            gmf_cr = cr.UF23Field(0)
+            gmf_cr.randomStriated(seed)
+            gmf_cr.randomTurbulent(seed)
+
+        elif self.gmf_model == "PT11":
+            gmf_cr = cr.PT11Field()
+        elif self.gmf_model == "TF17":
+            gmf_cr = cr.TF17Field()
+
+        # Propagation model, parameters: (B-field model, target error, min step, max step)
+        sim.add(cr.PropagationCK(gmf_cr, 1e-4, 0.1 * cr.parsec, 100 * cr.parsec))
+
+        sim.add(obs)  # add observer at galactic boundary
+        return sim
+
+    def __generate_backtracking_arguments(self: Self, Nsamples: int = 500) -> list:
+        """
+        Generate arguments used for backtracking.
+
+        Here we sample the arrival directions and rigidities for each UHECR.
+
+        The arrival directions is sampled via a vMF distribution using the angular
+        reconstruction uncertainty.
+        The energy is sampled via a normal distribution using the energy
+        uncertainty, which is then used to compute the mean lnA & sigma lnA.
+        The composition is sampled for each energy sample, which is then
+        combined to get rigidity samples.
 
         Parameters
         ----------
         Nsamples : int
             number of samples to generate for each UHECR.
-        njobs : int, default=4
-            number of jobs to run in parallel. not used if parallel=False
-        parallel : bool
-            flag whether to run in parallel or not.
+
+        Returns
+        -------
+        a list containing a tuple of arguments for each UHECR.
         """
-        # if UF23, make sure that number of samples are divisible by
-        # number of models in UF23 (8 models)
-        # such that we have uniform number of samples per model
-        # we just multiply the number of samples by 8
-        if self.gmf_model.find("UF23") != -1:
-            Nsamples = int(Nsamples * self.__Nmodels_UF23)
-
-        self.arr_sampled_uvs = np.zeros((self.Nuhecrs, Nsamples, 3))
-        self.defl_sampled_uvs = np.zeros((self.Nuhecrs, Nsamples, 3))
-        self.defl_mean_uvs = np.zeros((self.Nuhecrs, 3))
-        self.time_delays = np.zeros((self.Nuhecrs, Nsamples))
-
-        # generate backtrakcing arguments for all uhecrs
-        bt_args = self.__generate_backtracking_arguments(Nsamples)
-
-        # use joblib to run parallel jobs otherwise use serial
-        if parallel:
-            results = Parallel(n_jobs=njobs)(
-                delayed(self.run_single_backpropagation)(arg) for arg in bt_args
-            )
-        else:
-            results = []
-            for arg in bt_args:
-                results.append(self.run_single_backpropagation(arg))
-
-        # append the results
-        for uhecr_idx, ars, dls, dlm, td in results:
-            self.arr_sampled_uvs[uhecr_idx, ...] = ars
-            self.defl_sampled_uvs[uhecr_idx, ...] = dls
-            self.defl_mean_uvs[uhecr_idx, :] = dlm
-            self.time_delays[uhecr_idx, :] = td
-
-        # take care of nans
-        for uhecr_idx in range(self.Nuhecrs):
-            defl_sample_uv = self.defl_sampled_uvs[uhecr_idx, ...]
-            # find a sample vector that is not nan so that we can assign it to a nan vector
-            # since the array is collapsed, we just take the first three elements, which would be one
-            # vector that doesnt have nans
-            a_sample_with_nonans = defl_sample_uv[~np.isnan(defl_sample_uv)][0:3]
-            # assign the deflected unit vectors such that if it is nan, we set it to
-            # a non-NaN vector. Since these are anyways rare and are sampled over for kappa_GMF
-            # setting one to another should not make too much difference
-            self.defl_sampled_uvs[uhecr_idx, ...] = np.where(
-                np.isnan(defl_sample_uv), a_sample_with_nonans, defl_sample_uv
+        # generate arguments
+        bt_args = []
+        for i in range(self.Nuhecrs):
+            # sample arrival directions via vMF
+            uhecr_sampled_uvs = sample_vMF(
+                self.uhecr_uv[i], self.kappa_det, num_samples=Nsamples
             )
 
-        self.uhecr_coords_gb = SkyCoord(
-            self.defl_mean_uvs, frame="galactic", representation_type="cartesian"
-        )
-        self.uhecr_coords_gb.representation_type = "unitspherical"
+            # to do this, we sample over all energies first with truncated gaussian
+            E_samples = np.zeros(Nsamples)
+            lnA_samples = np.zeros(Nsamples)
 
-    def compute_kappa_gmf(self: Self) -> None:
-        """Compute kappa gmf & theta by fitting to vMF distribution pre-computed via stan."""
-        self.kappa_gmfs = Parallel(n_jobs=2)(
-            delayed(self._get_kappa_gmf)(uhecr_idx) for uhecr_idx in range(self.Nuhecrs)
-        )
-        self.thetaPs = self.f_theta(self.kappa_gmfs)  # for plotting purposes
+            for j in range(Nsamples):
+                # sample energy from truncated lognormal distribution
+                # TODO: do we want to include the systematic uncertainty?
+                E_samples[j] = truncated_lognormal_sample(
+                    mu=np.log(self.uhecr_energy[i]),
+                    sigma=self.logE_stat,
+                    a=self.Eth,  # minimum energy in EeV
+                    b=self.Eth_max,  # maximum energy in EeV
+                )
+
+                # now compute mean and variance of lnA, as a function of log10(E / EeV)
+                mean_lnA = self.mean_lnA_grid[np.digitize(E_samples[j], self.E_lnA_grid, right=True)-1]
+                var_lnA = self.var_lnA_grid[np.digitize(E_samples[j], self.E_lnA_grid, right=True)-1]
+
+                # generate a single sampled lnA value from the normal distribution
+                lnA_samples[j] = norm.rvs(
+                    loc=mean_lnA, scale=np.sqrt(var_lnA)
+                )
+
+            # now compute the rigidities using R = (E / Z) * (Z /A) * (A / (exp(lnA)))
+            uhecr_sampled_Rs = E_samples / (0.5 * np.exp(lnA_samples)) * cr.EeV  # in EV
+
+            # calculate the mean rigidity for each UHECR for later use
+            self.mean_rigidity[i] = np.mean(uhecr_sampled_Rs)
+
+            bt_args.append((i, uhecr_sampled_uvs, uhecr_sampled_Rs))
+        return bt_args
 
     def _get_kappa_gmf(self: Self, uhecr_idx: int) -> float:
         """

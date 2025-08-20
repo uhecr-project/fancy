@@ -2,3 +2,4 @@ from .composition_matrix import CompositionMatrixContainer
 from .proton_energy_loss import ProtonApproxEnergyLoss
 from .nuclei_energy_loss import NucleiEnergyLoss
 from .energy_loss_new import EnergyLossModel
+from .loss_lengths import LossLengthModel
