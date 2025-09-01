@@ -281,12 +281,15 @@ class Simulation:
 
         # finally calculate loss lengths for 
         # proton case
+        # here we just load it to avoid re-calculating it again
+        # Note that here we read from file with the energy grid defined above
         loss_length_model = LossLengthModel()
-        loss_length_model.compute_source_energies(
-            self.energy_grid,
-            dinits=src_inj_kwargs["dinits"],
-            save = False
-        )
+        loss_length_model.load_loss_length_tables(dinits=src_inj_kwargs["dinits"])
+        # loss_length_model.compute_source_energies(
+        #     self.energy_grid,
+        #     dinits=src_inj_kwargs["dinits"],
+        #     save = False
+        # )
         self.config["proton_Esrc_grid"] = loss_length_model.Esrc_grid
 
     def set_truths(
@@ -862,7 +865,7 @@ class Simulation:
         return Edets, skycoord_earth_dets
 
     # add some function to backtrack samples to get the kappa_GMF per mass model
-    def backpropagate_events(self: Self, n_samples: int = 100, n_jobs: int = 4) -> None:
+    def backpropagate_events(self: Self, n_samples: int = 100, n_jobs: int = 4) -> Tuple[SkyCoord, np.ndarray]:
         """
         Backpropagate the sampled & exposure-applied events at Earth back to the GB.
 
@@ -884,7 +887,7 @@ class Simulation:
             # the angular reconstruction uncertainty set in the simulation.
             self.truths["kappa_gmfs"] = None  # no GMF deflection
             self.truths["theta_gmfs"] = None  # no GMF deflection
-            return
+            return None, None
         # first write data to temporary file such that Data can read it
         outfile = (
             tempfile.mkstemp()[1] + "sim.h5"
@@ -951,6 +954,8 @@ class Simulation:
             self.truths["kappa_gmfs"] = gmfbackprop.kappa_gmfs
             self.truths["theta_gmfs"] = np.rad2deg(gmfbackprop.thetaPs)
             self.truths["skycoord_gb_truths_bp"] = gmfbackprop.uhecr_coords_gb
+
+        return gmfbackprop.uhecr_coords_gb, gmfbackprop.kappa_gmfs
 
     def save(self: Self, outfile: str) -> None:
         """
@@ -1049,4 +1054,7 @@ class Simulation:
             _ = plot_mean_sigma_lnA(self.data, self.truths, self.config)
         if plotting_mode == "all" or plotting_mode == "backprop":
             _ = plot_backprop_skymap(self.data, self.truths, self.gmf_model)
+            _ = plot_kappas(
+                self.data, self.truths, self.gmf_model
+            )
             _ = plot_backprop_rigidities(self.data, self.truths, self.gmf_model)

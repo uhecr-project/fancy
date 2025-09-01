@@ -95,7 +95,7 @@ class EnergyLossModel:
         # get the kernel
         if not os.path.exists(get_path_to_prince_config(f"prince_run_{css}.pkl")):
             print("Pre-computing kernel")
-            create_kernel(get_path_to_prince_config(css, f"prince_run_{css}.pkl"))
+            create_kernel(css, get_path_to_prince_config(f"prince_run_{css}.pkl"))
 
         self.prince_run = pickle.load(
             open(get_path_to_prince_config(f"prince_run_{css}.pkl"), "rb")

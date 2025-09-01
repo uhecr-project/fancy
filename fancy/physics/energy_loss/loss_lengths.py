@@ -139,7 +139,7 @@ class LossLengthModel:
         
         # append the background distance here,
         # for now set to some large distance
-        d_bg = 250  # in Mpc
+        d_bg = 100  # in Mpc, GZK horizon for protons ~ 50 Mpc, so set to 100 Mpc just in case
         self.distances = np.append(self.distances, d_bg)
         
         self.Earr_grid = Earr_grid

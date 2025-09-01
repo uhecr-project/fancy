@@ -280,8 +280,8 @@ def plot_backprop_skymap(data: Data, truths: dict, gmf_model : str):
     skymap_defl.set_gridlines(ypadding=10, fontsize=12)
 
     sc = skymap_defl.scatter(
-        lons=truths["skycoord_earth_truths"].galactic.l.deg,
-        lats=truths["skycoord_earth_truths"].galactic.b.deg,
+        lons=truths["skycoord_earth_dets"].galactic.l.deg,
+        lats=truths["skycoord_earth_dets"].galactic.b.deg,
         c="black",
         marker="o",
         s=10,
@@ -305,7 +305,7 @@ def plot_backprop_skymap(data: Data, truths: dict, gmf_model : str):
     theta_gmf_cmap = mpl.cm.get_cmap("RdPu")
     theta_gmf_norm = mpl.colors.Normalize(
         vmin=0,
-        vmax=120,
+        vmax=50,
     )
 
     sm = mpl.cm.ScalarMappable(
@@ -343,6 +343,33 @@ def plot_backprop_skymap(data: Data, truths: dict, gmf_model : str):
     skymap_defl.fig.suptitle(f"{data.detector.label}, {data.source.label}, {data.detector.mass_model}, {gmf_model}")
 
     return skymap_defl
+
+def plot_kappas(data: Data, truths: dict, gmf_model : str):
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.hist(
+        truths["kappa_egmf_truths"],
+        bins=50,
+        density=True,
+        histtype="step",
+        label="Kappa EGMF at source",
+        color="black",
+    )
+    ax.hist(
+        truths["kappa_gmfs"],
+        bins=50,
+        density=True,
+        histtype="step",
+        label="Kappa GMF from backpropagation",
+        color="blue",
+    )
+    ax.set_xlabel("Kappa")
+    ax.set_ylabel("Density")
+    ax.set_xscale("log")
+    ax.legend()
+
+    fig.suptitle(f"{data.detector.label}, {data.source.label}, {data.detector.mass_model}, {gmf_model}")
+
+    return fig
 
 
 def plot_backprop_rigidities(data: Data, truths: dict, gmf_model : str):
