@@ -394,13 +394,13 @@ class GMFBackPropagation:
             gmf_cr.randomStriated(seed)
             gmf_cr.randomTurbulent(seed)
 
-        elif self.gmf_model == "UF23":
+        elif self.gmf_model == "UF23all":
             gmf_cr = cr.UF23Field(mt_num)
 
         elif self.gmf_model == "UF23base":
             gmf_cr = cr.UF23Field(0)
 
-        elif self.gmf_model == "UF23Turb":
+        elif self.gmf_model == "UF23allTurb":
             seed = int(rng.integers(low=0, high=10000000))
 
             gmf_cr = cr.UF23Field(mt_num)
@@ -418,6 +418,10 @@ class GMFBackPropagation:
             gmf_cr = cr.PT11Field()
         elif self.gmf_model == "TF17":
             gmf_cr = cr.TF17Field()
+        else:
+            raise NotImplementedError(
+                f"GMF model {self.gmf_model} is not implemented yet."
+            )
 
         # Propagation model, parameters: (B-field model, target error, min step, max step)
         sim.add(cr.PropagationCK(gmf_cr, 1e-4, 0.1 * cr.parsec, 100 * cr.parsec))
@@ -482,7 +486,7 @@ class GMFBackPropagation:
             uhecr_sampled_Rs = E_samples / (0.5 * np.exp(lnA_samples)) * cr.EeV  # in EV
 
             # calculate the mean rigidity for each UHECR for later use
-            self.mean_rigidity[i] = np.mean(uhecr_sampled_Rs)
+            self.mean_rigidity[i] = np.mean(uhecr_sampled_Rs / cr.EeV)
 
             bt_args.append((i, uhecr_sampled_uvs, uhecr_sampled_Rs))
         return bt_args

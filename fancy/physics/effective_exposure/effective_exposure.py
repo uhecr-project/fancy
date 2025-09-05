@@ -7,18 +7,17 @@ import h5py
 import healpy
 import numpy as np
 from astropy.coordinates import SkyCoord
-from joblib import Parallel, delayed
 from typing_extensions import Self, Tuple
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 from fancy import Data
 from fancy.detector.exposure import m_dec
 from fancy.physics.gmf import GMFLensing
 from fancy.utils.package_data import (
-    get_path_to_energy_loss_tables,
     get_path_to_exposure_tables,
 )
-from fancy.utils.helpers import theta_igmf, vMF, bounded_power_law
+from fancy.utils.helpers import theta_igmf, vMF
 
 
 class EffectiveExposure:
@@ -302,48 +301,7 @@ class EffectiveExposure:
 
         return weighted_map, lensed_map
 
-    # def _convert_eff_exp_to_energy(
-    #     self: Self, eff_exp_rigidity: np.ndarray, Nsamples: int = 1000
-    # ) -> np.ndarray:
-    #     """
-    #     Convert the rigidity-based effective exposure to function of energy.
-
-    #     This is done by adding earth mass information by lnA sampling.
-
-    #     Parameters
-    #     ----------
-    #     eff_exp_rigidity : np.ndarray
-    #         the effective exposure in km^2 yr as a function of rigidity
-
-    #     Returns
-    #     -------
-    #     same but as a function of energy after convolving with lnA information
-    #     """
-    #     eff_exp_energy = np.zeros(self.NEearths) * u.km**2 * u.yr
-
-    #     for iEe, Eearth in enumerate(self.Eearth_grid):
-    #         lnA_samples = self.data.detector.sample_lnAs(
-    #             energy=Eearth.value,
-    #             Nsamples=Nsamples,
-    #             lnA_min=1,
-    #             lnA_max=np.log(self.As).max(),
-    #         )
-
-    #         # now iterate over each sample
-    #         # and histogram the contribution
-    #         for lnA in lnA_samples:
-    #             # compute the rigidity for each energy + sampled composition
-    #             R = (Eearth.value / (0.5 * np.exp(lnA))) * u.EV
-    #             # find the corresponding bin
-    #             Rbin_idx = np.digitize(R, self.rigidity_grid, right=True)
-
-    #         eff_exp_energy[iEe] += eff_exp_rigidity[Rbin_idx]
-
-    #     eff_exp_energy[iEe] /= Nsamples
-
-    # return eff_exp_energy
-
-    def save(self: Self, outfile: str) -> None:
+    def save(self: Self, outfile: str = "effective_exposure_tables.h5") -> None:
         """
         Save tabulated results to h5py File.
 
@@ -371,3 +329,87 @@ class EffectiveExposure:
                 "log10_effective_exposure",
                 data=np.log10(self.effective_exposure.to_value(u.km**2 * u.yr)),
             )
+
+    def plot_heatmap(self : Self, source : str = "all") -> plt.Figure:
+        """
+        Plot heatmap of the effective exposure as a function of rigidity and beta_egmf.
+
+        Parameter:
+        ----------
+        source : str, default="all"
+            which source to plot. Default is "all", which plots all sources.
+            Other options include:
+            - "background": plots the background model
+            - name of the individual source in the catalogue
+        """
+        if self.effective_exposure is None:
+            raise ValueError("Effective exposure has not been computed yet.")
+        if source == "all":
+            nsources = self.Nsrcs + 1
+            fig, axes = plt.subplots(
+                nrows=int(np.ceil((nsources) / 2)),
+                ncols=2,
+                figsize=(12, 4 * int(np.ceil((nsources) / 2))),
+                constrained_layout=True,
+            )
+            axes = axes.flatten()
+            for isrc in range(nsources):
+                ax = axes[isrc]
+                im = ax.imshow(
+                    np.log10(self.effective_exposure[isrc].to_value(u.km**2 * u.yr)),
+                    aspect="auto",
+                    origin="lower",
+                    extent=[
+                        np.log10(self.beta_egmf_grid.to_value(u.nG * u.Mpc**(1 / 2))).min(),
+                        np.log10(self.beta_egmf_grid.to_value(u.nG * u.Mpc**(1 / 2))).max(),
+                        np.log10(self.rigidity_grid.to_value(u.EV)).min(),
+                        np.log10(self.rigidity_grid.to_value(u.EV)).max(),
+                    ],
+                    cmap="viridis",
+                    vmin=np.log10(self.effective_exposure.to_value(u.km**2 * u.yr).min()),
+                    vmax=np.log10(self.effective_exposure.to_value(u.km**2 * u.yr).max()),
+                )
+                cbar = fig.colorbar(im, ax=ax)
+                cbar.set_label(r"$\log_{10}(\epsilon_\mathrm{eff} \: / \: \mathrm{km}^2 \,\mathrm{yr})$")
+                if isrc < self.Nsrcs:
+                    ax.set_title(f"Source {isrc}: {self.data.source.names[isrc]}")
+                else:
+                    ax.set_title("Background")
+                ax.set_xlabel(r"$\log_{10}(\beta_{\mathrm{EGMF}} / \mathrm{nG\,Mpc}^{1/2})$")
+                ax.set_ylabel(r"$\log_{10}(R / \mathrm{EV})$")
+            
+            return fig
+
+        else:
+            if source == "background":
+                src_idx = self.Nsrcs
+                title = "Background"
+            elif source in self.data.source.names:
+                src_idx = self.data.source.names.index(source)
+                title = f"Source: {source}"
+            else:
+                raise ValueError(f"Source {source} not found in catalogue.")
+            fig, ax = plt.subplots(figsize=(8, 6), constrained_layout=True)
+            im = ax.imshow(
+                np.log10(self.effective_exposure[src_idx].to_value(u.km**2 * u.yr)),
+                aspect="auto",
+                origin="lower",
+                extent=[
+                    np.log10(self.beta_egmf_grid.to_value(u.nG * u.Mpc**(1 / 2))).min(),
+                    np.log10(self.beta_egmf_grid.to_value(u.nG * u.Mpc**(1 / 2))).max(),
+                    np.log10(self.rigidity_grid.to_value(u.EV)).min(),
+                    np.log10(self.rigidity_grid.to_value(u.EV)).max(),
+                ],
+                cmap="viridis",
+                vmin=np.log10(self.effective_exposure.to_value(u.km**2 * u.yr).min()),
+                vmax=np.log10(self.effective_exposure.to_value(u.km**2 * u.yr).max()),
+            )
+            cbar = fig.colorbar(im, ax=ax)
+            cbar.set_label(r"$\log_{10}(\epsilon_\mathrm{eff} \: / \: \mathrm{km}^2 \,\mathrm{yr})$")
+            ax.set_title(title)
+            ax.set_xlabel(r"$\log_{10}(\beta_{\mathrm{EGMF}} / \mathrm{nG\,Mpc}^{1/2})$")
+            ax.set_ylabel(r"$\log_{10}(R / \mathrm{EV})$")
+            
+            return fig
+
+

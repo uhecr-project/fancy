@@ -106,3 +106,33 @@ def truncated_lognormal_sample(mu, sigma, a, b):
     samples = lognorm.ppf(u, s=s, scale=scale)
 
     return samples
+
+def truncated_lognorm_ccdf(x, mu, sigma, a, b):
+    """
+    CCDF of a truncated lognormal distribution.
+
+    Parameters
+    ----------
+    x : float or array
+        Point(s) at which to evaluate the CCDF.
+    s : float
+        Shape parameter (sigma) of the underlying lognormal.
+    scale : float, optional
+        Scale parameter exp(mu). Default = 1.
+    a, b : float, optional
+        Truncation bounds [a, b]. Default is [0, inf).
+    """
+    # Convert to scipy's lognorm parameters
+    s = sigma                  # shape parameter (std dev in log space)
+    scale = np.exp(mu)        # scale = exp(mu)
+
+    # Original lognormal distribution
+    dist = lognorm(s=s, scale=scale)
+
+    # Survival function of untruncated lognormal
+    Sa = dist.sf(a)
+    Sb = dist.sf(b)
+    Sx = dist.sf(x)
+
+    # Normalize to account for truncation
+    return (Sx - Sb) / (Sa - Sb)

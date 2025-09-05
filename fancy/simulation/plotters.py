@@ -20,6 +20,8 @@ def plot_skymap_gb(data: Data, truths: dict):
         s=10,
         label="GB samples",
         alpha=0.5,
+        vmin=1, 
+        vmax=100
     )
 
     # for kappa egmf, draw a circle around it, color coded with the theta value
@@ -56,10 +58,10 @@ def plot_skymap_gb(data: Data, truths: dict):
         zorder=10,
     )
     # add double colorbars for the energy and kappa_egmf
-    cbar = skymap_gb.fig.colorbar(sc, ax=skymap_gb.ax, orientation="horizontal")
-    cbar.set_label("Rigidity (EV)")
+    cbar = skymap_gb.fig.colorbar(sc, ax=skymap_gb.ax, orientation="horizontal", shrink=0.7)
+    cbar.set_label("log10(Rigidity / EV)")
     cbar2 = skymap_gb.fig.colorbar(
-        sm, ax=skymap_gb.ax, orientation="horizontal", pad=0.05
+        sm, ax=skymap_gb.ax, orientation="horizontal", pad=0.05, shrink=0.7
     )
     cbar2.set_label("EGMF deflection angle (deg)")
 
@@ -154,21 +156,21 @@ def plot_mean_sigma_lnA(data: Data, truths: dict, config: dict):
             ls=dis_lss[k],
             lw=2,
         )
-        axs[0].semilogx(
-            config["lnA_energy_grid"],
-            truths["mean_lnA_truths"],
-            color="k",
-            ls="-",
-            lw=3,
-            label="total",
-        )
-        axs[1].semilogx(
-            config["lnA_energy_grid"],
-            truths["var_lnA_truths"],
-            color="k",
-            ls="-",
-            lw=3,
-        )
+    axs[0].semilogx(
+        config["lnA_energy_grid"],
+        truths["mean_lnA_truths"],
+        color="k",
+        ls="-",
+        lw=3,
+        label="total",
+    )
+    axs[1].semilogx(
+        config["lnA_energy_grid"],
+        truths["var_lnA_truths"],
+        color="k",
+        ls="-",
+        lw=3,
+    )
     axs[0].set_ylabel("mean lnA")
     axs[1].set_ylabel("var lnA")
     axs[1].set_xlabel(r"$E$ [EeV]")
@@ -220,7 +222,7 @@ def plot_energy(data: Data, truths: dict, config: dict):
 
         # also plot histogrammed energy samples per source
         axs[1].hist(
-            truths["Etruths"][N_prev_idx : truths["Nex_per_src"][k]],
+            truths["Etruths"][N_prev_idx : truths["Nex_per_src"][k]*10],
             bins=20,
             density=False,
             ls=dis_lss[k],
@@ -228,7 +230,7 @@ def plot_energy(data: Data, truths: dict, config: dict):
             label=dis_labels[k],
         )
 
-        N_prev_idx = truths["Nex_per_src"][k] + N_prev_idx
+        N_prev_idx = truths["Nex_per_src"][k]*10 + N_prev_idx
 
     # plot total spectrum
     axs[0].loglog(
@@ -273,6 +275,92 @@ def plot_energy(data: Data, truths: dict, config: dict):
     fig.suptitle(f"{data.detector.label}, {data.source.label}, {data.detector.mass_model}")
 
     return fig, axs
+
+def plot_detected_events(data: Data, truths: dict, gmf_model : str, config: dict):
+    skymap_earth = AllSkyMap()
+    skymap_earth.set_gridlines(ypadding=10, fontsize=12)
+
+    sc = skymap_earth.scatter(
+        lons=truths["skycoord_earth_dets"].galactic.l.deg,
+        lats=truths["skycoord_earth_dets"].galactic.b.deg,
+        c=truths["Edets"],
+        cmap="viridis",
+        s=10,
+        label="Truths",
+        alpha=0.5,
+    )
+
+    # add the source direction
+    skymap_earth.scatter(
+        lons=data.source.coord.galactic.l.deg,
+        lats=data.source.coord.galactic.b.deg,
+        c="red",
+        s=50,
+        label="Source",
+        marker="*",
+    )
+
+    # add colorbar for the energy
+    cbar = skymap_earth.fig.colorbar(sc, ax=skymap_earth.ax, orientation="horizontal", shrink=0.7)
+    cbar.set_label("Energy (EeV)")
+
+    skymap_earth.ax.legend(loc="upper right")
+
+    skymap_earth.fig.suptitle(f"{data.detector.label}, {data.source.label}, {data.detector.mass_model}, {gmf_model}")
+
+    fig_lnA, axs = plt.subplots(2, 1, figsize=(8, 6))
+    axs[0].semilogx(
+        config["lnA_energy_grid"],
+        truths["mean_lnA_truths"],
+        color="k",
+        ls="-",
+        lw=2,
+        label="true",
+    )
+    axs[1].semilogx(
+        config["lnA_energy_grid"],
+        truths["var_lnA_truths"],
+        color="k",
+        ls="-",
+        lw=2,
+        label="true",
+    )
+
+    axs[0].semilogx(
+        config["lnA_energy_grid"],
+        truths["mean_lnA_dets"],
+        color="r",
+        ls="--",
+        lw=2,
+        label="det",
+    )
+    axs[1].semilogx(
+        config["lnA_energy_grid"],
+        truths["var_lnA_dets"],
+        color="r",
+        ls="--",
+        lw=2,
+        label="det",
+    )
+
+    axs[0].set_ylabel("mean lnA")
+    axs[1].set_ylabel("var lnA")
+    axs[1].set_xlabel(r"$E$ [EeV]")
+    axs[0].legend(loc="upper right")
+
+    fig_en, ax = plt.subplots(figsize=(8, 6))
+    ax.hist(
+        truths["Edets"],
+        bins=20,
+        density=False,
+        histtype="step",
+        label="Detected energies",
+    )
+    ax.set_xlabel("Energy (EeV)")
+    ax.set_ylabel("Counts")
+    ax.legend()
+    ax.set_yscale("log")
+    return skymap_earth, fig_en, fig_lnA
 
 
 def plot_backprop_skymap(data: Data, truths: dict, gmf_model : str):
@@ -348,7 +436,7 @@ def plot_kappas(data: Data, truths: dict, gmf_model : str):
     fig, ax = plt.subplots(figsize=(8, 6))
     ax.hist(
         truths["kappa_egmf_truths"],
-        bins=50,
+        bins=20,
         density=True,
         histtype="step",
         label="Kappa EGMF at source",
@@ -356,7 +444,7 @@ def plot_kappas(data: Data, truths: dict, gmf_model : str):
     )
     ax.hist(
         truths["kappa_gmfs"],
-        bins=50,
+        bins=20,
         density=True,
         histtype="step",
         label="Kappa GMF from backpropagation",
@@ -364,7 +452,25 @@ def plot_kappas(data: Data, truths: dict, gmf_model : str):
     )
     ax.set_xlabel("Kappa")
     ax.set_ylabel("Density")
-    ax.set_xscale("log")
+    # ax.set_xscale("log")
+    ax.legend()
+
+    fig.suptitle(f"{data.detector.label}, {data.source.label}, {data.detector.mass_model}, {gmf_model}")
+
+    return fig
+
+def plot_thetas(data: Data, truths: dict, gmf_model : str):
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.hist(
+        truths["theta_gmfs"],
+        bins=20,
+        density=True,
+        histtype="step",
+        label="Theta GMF from backpropagation",
+        color="blue",
+    )
+    ax.set_xlabel("Theta / deg")
+    ax.set_ylabel("Density")
     ax.legend()
 
     fig.suptitle(f"{data.detector.label}, {data.source.label}, {data.detector.mass_model}, {gmf_model}")
@@ -376,7 +482,7 @@ def plot_backprop_rigidities(data: Data, truths: dict, gmf_model : str):
     fig, ax = plt.subplots(figsize=(8, 6))
     ax.hist(
         truths["rigidity_truths"],
-        bins=50,
+        bins=20,
         density=True,
         histtype="step",
         label="Rigidity at source",
@@ -384,7 +490,7 @@ def plot_backprop_rigidities(data: Data, truths: dict, gmf_model : str):
     )
     ax.hist(
         truths["rigidity_bp"],
-        bins=50,
+        bins=20,
         density=True,
         histtype="step",
         label="Rigidity from backpropagation",

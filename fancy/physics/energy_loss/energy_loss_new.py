@@ -128,6 +128,7 @@ class EnergyLossModel:
         # other parameters that we set on the way
         self.distances = None
         self.dmins = None
+        self.solvers_loaded = False
 
     def load_injection_solvers(
         self: Self,
@@ -204,6 +205,8 @@ class EnergyLossModel:
                 "massids do not match!"
             )
             # print(f"Loaded {bg_solver_file}")
+
+        self.solvers_loaded = True
 
     def compute_spectrum_and_lnA(
         self: Self, egrid: np.ndarray, egrid_widths: np.ndarray, egrid_lnA: np.ndarray
