@@ -510,7 +510,7 @@ class Simulation:
 
     def generate_samples(
         self: Self, seed: Union[int, None] = None, sampling_factor: int = 10
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ) -> Tuple[np.ndarray, SkyCoord, np.ndarray, np.ndarray]:
         """
         Generate samples for the simulation.
 
@@ -608,6 +608,8 @@ class Simulation:
             # and simply assume rigidity conservation
 
             # we then just sample normally to get lnA
+            #TODO: should investigate whether we should extend the binning to incorporate
+            # all energies valid within the energy uncertainty
             mean_lnAs = mean_lnA_truths[np.digitize(en_samples_src, self.lnA_energy_grid)-1]
             var_lnAs = var_lnA_truths[np.digitize(en_samples_src, self.lnA_energy_grid)-1]
             lnA_samples = rng.normal(mean_lnAs, np.sqrt(var_lnAs), Nex_per_src * sampling_factor)
@@ -785,9 +787,14 @@ class Simulation:
 
         Parameter:
         ----------
+        kappa_det : float, optional
+            The concentration parameter for the vMF distribution
+            that quantifies the uncertainty of the directional reconstruction.
+            If None, then the value from the data.detector is used.
         logE_sys : float, optional
             The systematic uncertainty on the log energy.
             Default is 0.0.
+            TODO: move this to when initialising the grid for the weighted exposure calculation.
         """
         if kappa_det is None:
             kappa_det = self.data.detector.kappa_d
@@ -860,14 +867,12 @@ class Simulation:
                 if Nex_per_src_idx >= self.truths["Nex_per_src"][k]:
                     # if we have reached the number of events for this source,
                     # then we can stop
-                    print(uhecr_idx, N_starting_idx, Nsample_per_src)
                     N_starting_idx += Nsample_per_src
                     break
 
             if uhecr_idx >= self.truths["Nex"]:
                 # if we have reached the number of expected events,
                 # then we can stop
-                print(uhecr_idx, N_starting_idx, Nsample_per_src)
                 break
 
         skycoord_earth_dets = concatenate_skycoords(skycoord_earth_dets)

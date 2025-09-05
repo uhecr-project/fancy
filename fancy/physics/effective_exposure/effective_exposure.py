@@ -62,11 +62,10 @@ class EffectiveExposure:
         # exposure parameters
         self.effective_exposure = None
 
-        print(
-            f"Configuration: {self.source_type}, {self.detector_type}, {self.mass_model}, {self.gmf_model}"
-        )
-
         if verbose:
+            print(
+                f"Configuration: {self.source_type}, {self.detector_type}, {self.mass_model}, {self.gmf_model}"
+            )
             print(f"Sources: {data.source.name}")
             print(f"Distances: {data.source.distance * u.Mpc}")
             print(f"Coordinates: {data.source.coord}")
