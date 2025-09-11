@@ -17,6 +17,7 @@ from fancy import Data
 from fancy.physics import EnergyLossModel, EffectiveExposure, LossLengthModel
 from fancy.physics.gmf import GMFLensing, GMFBackPropagation
 from fancy.physics.effective_exposure import WeightedExposure
+from fancy.interfaces.grid_generator import GridGenerator
 from fancy.utils.helpers import km_per_Mpc, theta_igmfs, truncated_lognorm_ccdf
 from fancy.simulation.helpers import (
     get_Edet,
@@ -83,6 +84,7 @@ class Simulation:
         # grid related parameters
         self.energy_grid = None
         self.lnA_energy_grid = None
+        self.energy_grid_widths = None
         self.alpha_grid = None
         self.mass_ids_grid = None
         self.beta_egmf_grid = None
@@ -94,6 +96,8 @@ class Simulation:
         self.src_spectrum_grid = None
         self.esrc_ratio_grid = None
         self.eff_exp_grid = None
+        self.wexp_earth_grid = None
+        self.wexp_src_grid = None
 
         # shape parameters
         self.NEs = 0
@@ -107,9 +111,8 @@ class Simulation:
         self: Self,
         energy_gridparams: tuple = (32, 500, 50),
         lnA_energy_gridparams: tuple = (3, 100, 50),
-        logE_stat : Union[float, None] = None,
         effexp_model_kwargs : dict = {
-            "beta_egmf_gridparams" : (1e-3, 1, 10),
+            "beta_egmf_gridparams" : (1e-3, 5, 25),
             "R_gridparams" : (1, 500, 25),
         },
         src_inj_kwargs: dict = {
@@ -139,137 +142,78 @@ class Simulation:
             The grid parameters for the lnA energy values.
             given as (lnA_min, lnA_max, Nbins), by default (0, 10, 50).
             The grid will be linearly spaced in lnA.
+        effexp_model_kwargs : dict, optional
+            The keyword arguments for the effective exposure model.
+            By default set to:
+            {
+                "beta_egmf_gridparams" : (1e-3, 1, 10),
+                "R_gridparams" : (1, 500, 25),
+            }
+            where beta_egmf_gridparams are the grid parameters for the
+            beta_egmf values (in nG Mpc^1/2) and R_gridparams are the grid
+            parameters for the rigidity values (in EV).
+        src_inj_kwargs : dict, optional
+            The keyword arguments for the source injection model.
+            By default set to:
+            {
+                "dinits": [4],
+                "Rmax": 1.7,
+            }
+            where dinits are the distances of the sources (in Mpc)
+            and Rmax is the maximum rigidity (in EV).
+        bg_inj_kwargs : dict, optional
+            The keyword arguments for the background injection model.
+            By default set to:
+            {
+                "z_max": 3.0,
+                "source_evo": "SFR",
+                "Rmax": 1.7,
+            }
+            where z_max is the maximum redshift of the background sources,
+            source_evo is the source evolution model (only "SFR" is implemented),
+            and Rmax is the maximum rigidity (in EV).
         """
-        eff_exposure = EffectiveExposure(data=self.data, gmf_model=self.gmf_model)
-        eff_exposure.initialise_grids(
-            **effexp_model_kwargs
-        )
-        eff_exposure.compute_effective_exposure(n_jobs=self.n_jobs)
+        grid_generator = GridGenerator(data=self.data, gmf_model=self.gmf_model)
 
-        # store the effective exposure grid
-        self.eff_exp_grid = (
-            eff_exposure.effective_exposure
-        )  # in shape (Nsrcs+1, NRs, Nbeta_egmfs)
-        self.beta_egmf_grid = eff_exposure.beta_egmf_grid
-        self.rigidity_grid = eff_exposure.rigidity_grid
-        self.Nbeta_egmfs = len(self.beta_egmf_grid)
-        self.Nrigidities = len(self.rigidity_grid)
-
-        # store the results into the config object
-        self.config["eff_exp_grid"] = eff_exposure.effective_exposure
-        self.config["beta_egmf_grid"] = eff_exposure.beta_egmf_grid
-        self.config["rigidity_grid"] = eff_exposure.rigidity_grid
-        self.config["Nbeta_egmfs"] = len(eff_exposure.beta_egmf_grid)
-        self.config["Nrigidities"] = len(eff_exposure.rigidity_grid)
-
-        # store the effective exposure object for later use
-        self.eff_exp = eff_exposure
-
-        energy_grid_binedges = np.logspace(
-            np.log10(energy_gridparams[0]),
-            np.log10(energy_gridparams[1]),
-            energy_gridparams[2] + 1,
-        )
-        self.energy_grid = 10 ** np.sqrt(
-            np.log10(energy_grid_binedges[:-1]) * np.log10(energy_grid_binedges[1:])
-        )
-        self.energy_grid_widths = np.diff(energy_grid_binedges)
-        self.lnA_energy_grid = np.logspace(
-            np.log10(lnA_energy_gridparams[0]),
-            np.log10(lnA_energy_gridparams[1]),
-            lnA_energy_gridparams[2],
+        grid_generator.get_effective_exposure_grid(
+            effexp_model_kwargs, self.n_jobs
         )
 
-        #  initalise the energy loss model
-        energy_loss_model = EnergyLossModel(**energy_loss_model_kwargs)
-        energy_loss_model.load_injection_solvers(
-            src_inj_config=src_inj_kwargs, bg_inj_config=bg_inj_kwargs
+        grid_generator.get_energy_mass_grid(
+            energy_gridparams,
+            lnA_energy_gridparams,
+            src_inj_kwargs,
+            bg_inj_kwargs,
+            energy_loss_model_kwargs,
+            compute_source=True
         )
 
-        # store the grids for later use
-        spectra, lnAs = energy_loss_model.compute_spectrum_and_lnA(
-            egrid=self.energy_grid,
-            egrid_lnA=self.lnA_energy_grid,
-            egrid_widths=self.energy_grid_widths,
-        )
+        grid_generator.get_weighted_exposure()
 
-        # store the injection solver results
-        # NB: shapes are in (Ngrid, Nalphas, Nmass_fracs, Nsrcs)
-        self.spectrum_grid = spectra
-        self.mean_lnA_grid = lnAs[0, ...]
-        self.var_lnA_grid = lnAs[1, ...]
-        self.alpha_grid = energy_loss_model.alphas
-        self.mass_ids_grid = energy_loss_model.massids
-        self.charges_grid = np.array(
-            [charge_massid_map[massid] for massid in self.mass_ids_grid]
-        )
+        self.config = grid_generator.store_grids_to_dict()
 
-        # store the shape parameters
-        self.NEs = self.spectrum_grid.shape[0]
-        self.Nalphas = self.spectrum_grid.shape[1]
-        self.Nmass_fracs = self.spectrum_grid.shape[2]
-        self.NElnAs = self.mean_lnA_grid.shape[0]
+        self.energy_grid = self.config["energy_grid"]
+        self.lnA_energy_grid = self.config["lnA_energy_grid"]
+        self.energy_grid_widths = self.config["energy_grid_widths"]
+        self.alpha_grid = self.config["alpha_grid"]
+        self.mass_ids_grid = self.config["mass_ids_grid"]
+        self.beta_egmf_grid = self.config["beta_egmf_grid"]
+        self.rigidity_grid = self.config["rigidity_grid"]
+        self.charges_grid = self.config["charges_grid"]
+        self.mass_ids_grid = self.config["mass_ids_grid"]
+        self.NEs = self.config["NEs"]
+        self.NElnAs = self.config["NElnAs"]
+        self.Nalphas = self.config["Nalphas"]
+        self.Nmass_fracs = self.config["Nmass_fracs"]
+        self.Nbeta_egmfs = self.config["Nbeta_egmfs"]
 
-        # also compute the src spectrum grid here
-        self.src_spectrum_grid = source_spectrum(
-            self.energy_grid[:, np.newaxis, np.newaxis, np.newaxis],
-            self.alpha_grid[np.newaxis, :, np.newaxis, np.newaxis],
-            self.charges_grid[np.newaxis, np.newaxis, :, np.newaxis],
-            Rmax=src_inj_kwargs["Rmax"],
-        )
-
-        self.wexp_src_grid = np.trapz(y=self.src_spectrum_grid, x=self.energy_grid, axis=0)
-
-        self.esrc_ratio_grid = np.trapz(
-            y=self.energy_grid[:, None, None, None] * self.src_spectrum_grid,
-            x=self.energy_grid,
-            axis=0,
-        ) / np.trapz(y=self.src_spectrum_grid, x=self.energy_grid, axis=0)
-
-        # now calculate grid for flux weights at Earth and source
-        wexp_model = WeightedExposure(data=self.data, eff_exp=eff_exposure, energy_loss_model=energy_loss_model)
-        wexp_model.initialise_grids(energy_gridparams=energy_gridparams, lnA_energy_gridparams=energy_gridparams)
-
-        self.wexp_earth_grid = wexp_model.calculate_weighted_exposure()
-        # if None then use the energy uncertainty reported in
-        # data.detector
-        if logE_stat is None:
-            logE_stat = self.data.detector.energy_uncertainty
-        self.config["logE_stat"] = logE_stat
-        
-
-        # store all these in the config dictionary
-        self.config["energy_grid"] = self.energy_grid
-        self.config["energy_grid_widths"] = self.energy_grid_widths
-        self.config["lnA_energy_grid"] = self.lnA_energy_grid
-        self.config["spectrum_grid"] = self.spectrum_grid
-        self.config["mean_lnA_grid"] = self.mean_lnA_grid
-        self.config["var_lnA_grid"] = self.var_lnA_grid
-        self.config["src_spectrum_grid"] = self.src_spectrum_grid
-        self.config["esrc_ratio_grid"] = self.esrc_ratio_grid
-        self.config["wexp_earth_grid"] = self.wexp_earth_grid
-        self.config["wexp_src_grid"] = self.wexp_src_grid
-        self.config["alpha_grid"] = self.alpha_grid
-        self.config["mass_ids_grid"] = self.mass_ids_grid
-        self.config["charges_grid"] = self.charges_grid
-        self.config["Nsrcs"] = self.Nsrcs
-        self.config["NEs"] = self.NEs
-        self.config["NElnAs"] = self.NElnAs
-        self.config["Nalphas"] = self.Nalphas
-        self.config["Nmass_fracs"] = self.Nmass_fracs
-
-        # finally calculate loss lengths for 
-        # proton case
-        # here we just load it to avoid re-calculating it again
-        # Note that here we read from file with the energy grid defined above
-        loss_length_model = LossLengthModel()
-        loss_length_model.load_loss_length_tables(dinits=src_inj_kwargs["dinits"])
-        # loss_length_model.compute_source_energies(
-        #     self.energy_grid,
-        #     dinits=src_inj_kwargs["dinits"],
-        #     save = False
-        # )
-        self.config["proton_Esrc_grid"] = loss_length_model.Esrc_grid
+        self.spectrum_grid = self.config["spectrum_grid"]
+        self.mean_lnA_grid = self.config["mean_lnA_grid"]
+        self.var_lnA_grid = self.config["var_lnA_grid"]
+        self.src_spectrum_grid = self.config["src_spectrum_grid"]
+        self.esrc_ratio_grid = self.config["esrc_ratio_grid"]
+        self.wexp_earth_grid = self.config["wexp_earth_grid"]
+        self.wexp_src_grid = self.config["wexp_src_grid"]
 
     def set_truths(
         self: Self,
@@ -366,8 +310,6 @@ class Simulation:
         w_exp_earth = np.zeros(self.Nsrcs + 1)
         w_exp_src = np.zeros(self.Nsrcs + 1)
         esrc_ratios = np.zeros(self.Nsrcs + 1)
-
-        print(self.wexp_src_grid.shape, fit_truths["mass_fracs"].shape)
 
         for k in range(self.Nsrcs + 1):
             wexp_earths_mf = np.sum(
@@ -774,6 +716,7 @@ class Simulation:
 
     def apply_energy_directional_response(
         self: Self,
+        logE_stat: Union[float, None] = None,
         kappa_det: Union[float, None] = None,
         logE_sys: float = 0.0,
     ) -> Tuple[np.ndarray, List[SkyCoord]]:
@@ -787,6 +730,8 @@ class Simulation:
 
         Parameter:
         ----------
+        logE_stat : float, optional
+            The statistical uncertainty on the log energy.
         kappa_det : float, optional
             The concentration parameter for the vMF distribution
             that quantifies the uncertainty of the directional reconstruction.
@@ -796,6 +741,11 @@ class Simulation:
             Default is 0.0.
             TODO: move this to when initialising the grid for the weighted exposure calculation.
         """
+        # if None then use the energy uncertainty reported in
+        # data.detector
+        if logE_stat is None:
+            logE_stat = self.data.detector.energy_uncertainty
+
         if kappa_det is None:
             kappa_det = self.data.detector.kappa_d
 
@@ -842,7 +792,7 @@ class Simulation:
 
                 Edet = get_Edet(
                     np.log(Etrue) + logE_sys,
-                    en_unc=self.config["logE_stat"],
+                    en_unc=logE_stat,
                     Eth=np.min(self.energy_grid),
                     Emax=np.max(self.energy_grid),
                 )
@@ -868,12 +818,21 @@ class Simulation:
                     # if we have reached the number of events for this source,
                     # then we can stop
                     N_starting_idx += Nsample_per_src
+                    print(f"Source {k+1}: detected {Nex_per_src_idx} events.")
                     break
 
             if uhecr_idx >= self.truths["Nex"]:
                 # if we have reached the number of expected events,
                 # then we can stop
+                print(f"Reached the expected number of events: {uhecr_idx}")
                 break
+
+        if uhecr_idx < self.truths["Nex"]:
+            print(
+                f"Error: only {uhecr_idx} events were detected out of the expected {self.truths['Nex']} events.",
+                "Try increasing the sampling_factor.",
+            )
+            raise ValueError("Not enough events detected.")
 
         skycoord_earth_dets = concatenate_skycoords(skycoord_earth_dets)
 
@@ -881,8 +840,10 @@ class Simulation:
         self.truths["Edets"] = Edets
         self.truths["skycoord_earth_dets"] = skycoord_earth_dets
         self.truths["exposure_factor"] = exposure_factor
+        self.truths["kappa_ds"] = np.full(self.truths["Nex"], fill_value=kappa_det)
 
         # also set the uncertainties here
+        self.config["logE_stat"] = logE_stat
         self.config["logE_sys"] = logE_sys
         self.config["kappa_det"] = kappa_det
 
@@ -940,6 +901,9 @@ class Simulation:
             data_gr.create_dataset(
                 "day", data=np.ones(self.truths["Nex"], dtype=int)
             )  # stub
+            data_gr.create_dataset(
+                "kappa_ds", data=np.full(self.truths["Nex"], 1.0)
+            )  # stub
 
         # add this to a newly generated data object
         data_for_bp = Data()
@@ -978,6 +942,7 @@ class Simulation:
             self.truths["kappa_gmfs"] = gmfbackprop.kappa_gmfs
             self.truths["theta_gmfs"] = np.rad2deg(gmfbackprop.thetaPs)
             self.truths["skycoord_gb_truths_bp"] = gmfbackprop.uhecr_coords_gb
+            self.truths["kappa_ds"] = gmfbackprop.kappa_gmfs
 
         return gmfbackprop.uhecr_coords_gb, gmfbackprop.kappa_gmfs
 
@@ -1022,6 +987,9 @@ class Simulation:
             simulated_data.create_dataset("glon", data=glons_det)
             simulated_data.create_dataset(
                 "exposure", data=self.truths["exposure_factor"]
+            )
+            simulated_data.create_dataset(
+                "kappa_ds", data=self.config["kappa_det"] * np.ones(self.truths["Nex"])
             )
 
             if self.gmf_model != "None":

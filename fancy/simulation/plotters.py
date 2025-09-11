@@ -8,14 +8,14 @@ from fancy import Data
 from fancy.plotting import AllSkyMapCartopy as AllSkyMap
 
 
-def plot_skymap_gb(data: Data, truths: dict):
+def plot_skymap_gb(data: Data, truths: dict, slice_idx: int = 10):
     skymap_gb = AllSkyMap()
     skymap_gb.set_gridlines(ypadding=10, fontsize=12)
 
     sc = skymap_gb.scatter(
-        lons=truths["skycoord_gb_truths"].galactic.l.deg,
-        lats=truths["skycoord_gb_truths"].galactic.b.deg,
-        c=truths["rigidity_truths"],
+        lons=truths["skycoord_gb_truths"].galactic.l.deg[::slice_idx],
+        lats=truths["skycoord_gb_truths"].galactic.b.deg[::slice_idx],
+        c=truths["rigidity_truths"][::slice_idx],
         cmap="plasma",
         s=10,
         label="GB samples",
@@ -36,6 +36,8 @@ def plot_skymap_gb(data: Data, truths: dict):
         norm=theta_egmf_norm,
     )
     for i, kappa_egmf in enumerate(truths["kappa_egmf_truths"]):
+        if i % slice_idx != 0:
+            continue
         if kappa_egmf > 0:
             theta_egmf = np.sqrt(7552 / kappa_egmf)  # in degrees
             skymap_gb.tissot(

@@ -4,24 +4,19 @@ from typing import Union
 
 import astropy.units as u
 import h5py
-import healpy
 import numpy as np
 from scipy.interpolate import CubicSpline
-from scipy.stats import truncnorm
-from astropy.coordinates import SkyCoord
 from typing_extensions import Self, Tuple
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
 from fancy import Data
-from fancy.detector.exposure import m_dec
-from fancy.physics.gmf import GMFLensing
 from fancy.physics.effective_exposure import EffectiveExposure
 from fancy.physics.energy_loss import EnergyLossModel
 from fancy.utils.package_data import (
     get_path_to_exposure_tables,
 )
-from fancy.utils.helpers import theta_igmf, vMF, truncated_lognorm_ccdf
+from fancy.utils.helpers import truncated_lognorm_ccdf
 
 
 class WeightedExposure:
@@ -84,8 +79,9 @@ class WeightedExposure:
 
     def initialise_grids(
         self: Self,
-        energy_gridparams: tuple = (32, 500, 50),
-        lnA_energy_gridparams: tuple = (3, 100, 50),
+        energy_grid : np.ndarray,
+        lnA_energy_grid : np.ndarray,
+        energy_grid_widths : np.ndarray,
         var_lnA_min: float = 1e-6,
     ) -> None:
         """
@@ -93,27 +89,18 @@ class WeightedExposure:
 
         Parameters
         ----------
-        energy_gridparams : tuple, optional
-            Parameters for the energy grid as (min, max, num_points), by default (32, 500, 50)
-        lnA_energy_gridparams : tuple, optional
-            Parameters for the lnA grid as (min, max, num_points), by default (3, 100, 50)
+        energy_grid : np.ndarray
+            Energy grid in EeV, shape (NEs,)
+        lnA_energy_grid : np.ndarray
+            Energy grid for the lnA calculation in EeV, shape (NElnAs,)
+        energy_grid_widths : np.ndarray
+            Widths of the energy grid in EeV, shape (NEs,)
         var_lnA_min : float, optional
             Minimum value for the variance of lnA to avoid numerical issues, by default 1e-6
         """
-        energy_grid_binedges = np.logspace(
-            np.log10(energy_gridparams[0]),
-            np.log10(energy_gridparams[1]),
-            energy_gridparams[2] + 1,
-        )
-        self.energy_grid = 10 ** np.sqrt(
-            np.log10(energy_grid_binedges[:-1]) * np.log10(energy_grid_binedges[1:])
-        )
-        self.energy_grid_widths = np.diff(energy_grid_binedges)
-        self.lnA_energy_grid = np.logspace(
-            np.log10(lnA_energy_gridparams[0]),
-            np.log10(lnA_energy_gridparams[1]),
-            lnA_energy_gridparams[2],
-        )
+        self.energy_grid = energy_grid
+        self.energy_grid_widths = energy_grid_widths
+        self.lnA_energy_grid = lnA_energy_grid
 
         spectra, lnAs = self.energy_loss_model.compute_spectrum_and_lnA(
             egrid=self.energy_grid,
@@ -123,16 +110,8 @@ class WeightedExposure:
         self.spectrum_grid = spectra
 
         # mean and var lnA grid are evaluated at the energies of the energy grid
-        self.mean_lnA_grid = CubicSpline(x=self.lnA_energy_grid, y=lnAs[0, ...], axis=0, extrapolate=False, bc_type='clamped')(
-            self.energy_grid
-        )
-        self.var_lnA_grid = CubicSpline(x=self.lnA_energy_grid, y=lnAs[1, ...], axis=0, extrapolate=False, bc_type='clamped')(
-            self.energy_grid
-        )
-
-        # clean up the grid for energy values outside the interpolation range
-        # self.mean_lnA_grid[np.isnan(self.mean_lnA_grid)] = lnAs[0,-1,...]  # deal with Nans
-        # self.var_lnA_grid[np.isnan(self.var_lnA_grid)] = lnAs[1,-1,...]  # deal with Nans
+        self.mean_lnA_grid = lnAs[0,np.digitize(self.energy_grid, self.lnA_energy_grid, right=True)-1,...]
+        self.var_lnA_grid = lnAs[1,np.digitize(self.energy_grid, self.lnA_energy_grid, right=True)-1,...]
 
         self.var_lnA_grid[self.var_lnA_grid < 0] = var_lnA_min  # numerical issues can lead to negative variance
         self.var_lnA_grid[np.isclose(self.var_lnA_grid, 0.0)] = var_lnA_min  # avoid zero variance

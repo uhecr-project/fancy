@@ -31,6 +31,20 @@ def theta_igmf(R: float, beta_egmf: float, D: float, lc_mpc: float = 1) -> float
     ) * u.deg
 
 def theta_igmfs(Rs : np.ndarray, beta_egmf : float, D : float, lc_mpc : float=1) -> np.ndarray:
+    """
+    Deflection angle for IGMF in degrees.
+
+    Parameters
+    ----------
+    Rs: np.ndarray
+        grid of rigidities in EV
+    beta_egmf: float
+        EGMF magnetic field spread in nG Mpc^1/2
+    D: float
+        distance of the source in Mpc
+    lc_mpc: float
+        coherence length normalized to 1 Mpc
+    """
     return np.array([theta_igmf(R, beta_egmf, D, lc_mpc).to_value(u.deg) for R in Rs])
 
 
@@ -59,38 +73,49 @@ def bounded_power_law(
     return norm * x ** (-alpha)
 
 def vMF(x: np.array, mu: np.array, kappa: float) -> np.ndarray:
-        """
-        Return a vMF distribution.
+    """
+    Return a vMF distribution.
 
-        NB: shape of x must be (N, 3)
+    NB: shape of x must be (N, 3)
 
-        Parameters
-        ----------
-        x: np.array
-            array of cartesian coordinates
-        mu: np.array
-            array of cartesian coordinates for the mean direction
-        kappa: float
-            deflection parameter
-        """
-        if kappa > 100:
-            return np.exp(
-                kappa * np.dot(x.T, mu) + np.log(kappa) - np.log(4 * np.pi / 2) - kappa
-            )
-        elif kappa < 1e-5:  # L'Hopital's rule
-            return (
-                (1 + kappa * np.dot(x.T, mu))
-                / (4 * np.pi * np.cosh(kappa))
-                * np.exp(kappa * np.dot(x.T, mu))
-            )
-        else:
-            return (
-                kappa / (4 * np.pi * np.sinh(kappa)) * np.exp(kappa * np.dot(x.T, mu))
-            )
+    Parameters
+    ----------
+    x: np.array
+        array of cartesian coordinates
+    mu: np.array
+        array of cartesian coordinates for the mean direction
+    kappa: float
+        deflection parameter
+    """
+    if kappa > 100:
+        return np.exp(
+            kappa * np.dot(x.T, mu) + np.log(kappa) - np.log(4 * np.pi / 2) - kappa
+        )
+    elif kappa < 1e-5:  # L'Hopital's rule
+        return (
+            (1 + kappa * np.dot(x.T, mu))
+            / (4 * np.pi * np.cosh(kappa))
+            * np.exp(kappa * np.dot(x.T, mu))
+        )
+    else:
+        return (
+            kappa / (4 * np.pi * np.sinh(kappa)) * np.exp(kappa * np.dot(x.T, mu))
+        )
     
 
-def truncated_lognormal_sample(mu, sigma, a, b):
+def truncated_lognormal_sample(mu : float, sigma : float, a : float, b : float) -> np.ndarray:
+    """
+    Sample from a truncated lognormal distribution.
 
+    Parameters
+    ----------
+    mu : float
+        Mean of the underlying normal distribution.
+    sigma : float
+        Standard deviation of the underlying normal distribution.
+    a, b : float
+        Truncation bounds [a, b].
+    """
     # Convert to scipy's lognorm parameters
     s = sigma                  # shape parameter (std dev in log space)
     scale = np.exp(mu)        # scale = exp(mu)
@@ -107,7 +132,7 @@ def truncated_lognormal_sample(mu, sigma, a, b):
 
     return samples
 
-def truncated_lognorm_ccdf(x, mu, sigma, a, b):
+def truncated_lognorm_ccdf(x : np.ndarray, mu : float, sigma : float, a : float, b : float) -> float:
     """
     CCDF of a truncated lognormal distribution.
 
@@ -136,3 +161,26 @@ def truncated_lognorm_ccdf(x, mu, sigma, a, b):
 
     # Normalize to account for truncation
     return (Sx - Sb) / (Sa - Sb)
+
+def source_spectrum(energy : np.ndarray, alpha : float, charge : float, Rmax : float = 1.7) -> np.ndarray:
+    """
+    Return the source spectrum.
+
+    This returns the Auger source spectrum, given by:
+
+    dN/dE ∝ E^(-alpha) * exp(1 - E / (charge * Rmax))
+    
+    Parameter
+    ----------
+    energy : np.ndarray
+        Array of energies in EeV.
+    alpha : float
+        Spectral index.
+    charge : float
+        Charge of the nucleus.
+    Rmax : float, optional
+        Maximum rigidity in EV. Default is 1.7 EV.
+    """
+    Emax = charge * Rmax
+    exp_cutoff = np.where(energy > Emax, np.exp(1 - energy / Emax), 1.0)
+    return energy**-alpha * exp_cutoff

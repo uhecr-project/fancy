@@ -8,31 +8,64 @@ import h5py
 import numpy as np
 from cmdstanpy import CmdStanModel
 from typing_extensions import Self  # change to typing for py>3.11
+import arviz as az
 
 from fancy.interfaces.data import Data
-from fancy.physics import EnergyLossModel
+from fancy.interfaces.grid_generator import GridGenerator
+from fancy.simulation import Simulation
 from fancy.utils.package_data import (
-    get_path_to_kappa_theta,
     get_path_to_stan_file,
     get_path_to_stan_includes,
 )
+from fancy.utils.stan_diagnostics import run_single_diagnostics
 
 
 class Analysis:
     """Container to manage the inputs and outputs of the fits."""
 
     # pre-defined analysis types
-    arr_dir_type = "arrival_direction"
-    energy_type = "energy_loss"
-    joint_type = "joint"
-    gmf_type = "joint_gmf"
-    composition_type = "joint_composition"
-    gmf_composition_type = "joint_gmf_composition"
+    energy_type = "energy_only"
+    mass_type = "mass_only"
+    energy_mass_type = "energy_mass"
+    energy_mass_spatial_type = "energy_mass_spatial"
+
+    fit_input_keys = [  # noqa: RUF012
+        "Nsrcs",
+        "D",
+        "omega_src",
+        "N",
+        "NEbins",
+        "Edet",
+        "omega_det",
+        "kappa_ds",
+        "mean_lnA_det",
+        "var_lnA_det",
+        "Nalphas",
+        "alpha_grid",
+        "NEs",
+        "log10_Egrid",
+        "NAsrcs",
+        "earth_spectrum_grid",
+        "mean_lnA_grid",
+        "var_lnA_grid",
+        "Eth",
+        "logE_stat_unc",
+        "logE_sys_unc",
+        "mean_lnA_stat_unc",
+        "mean_lnA_sys_unc",
+        "var_lnA_stat_unc",
+        "var_lnA_sys_unc",
+        "Nbeta_egmfs",
+        "log10_beta_egmf_grid",
+        "wexp_earth_grid",
+        "wexp_src_grid",
+        "esrc_ratio_grid"
+    ] 
 
     def __init__(
         self: Self,
         data: Data,
-        analysis_type: str = "joint_gmf_composition",
+        analysis_type: str = energy_mass_spatial_type,
     ) -> None:
         """
         Container to manage the inputs and outputs of the fits.
@@ -43,194 +76,237 @@ class Analysis:
             Container that handles the source, uhecr, and detector information.
             All such information should already be initialised (see relevant class for
             more information.)
-        analysis_type: str, default=joint_gmf_composition
+        analysis_type: str, default=energy_mass_spatial
             The analysis type to consider.
         """
         self.data = data
         self.analysis_type = analysis_type
 
         self.stan_model = None
-        self.fit_input = None
+        self.grid_config = None
+        self.fit_inputs = {key: None for key in self.fit_input_keys}
         self.fit = None
 
-    def load_grids(
+    def initialise_grid(
         self : Self,
-
-    ) -> None:
-        pass
-
-    def use_tables(
-        self: Self,
-        exposure_table_file: str,
-        energy_table_file: str,
-        gmf_model: str = "None",
-        kappa_theta_filename: str = "kappa_theta_map.pkl",
+        energy_gridparams: tuple = (32, 500, 50),
+        lnA_energy_gridparams: tuple = (3, 100, 50),
+        effexp_model_kwargs : dict = {
+            "beta_egmf_gridparams" : (1e-3, 1, 10),
+            "R_gridparams" : (1, 500, 25),
+        },
+        src_inj_kwargs: dict = {
+            "dinits": [4],
+            "Rmax": 1.7,
+        },
+        bg_inj_kwargs: dict = {
+            "z_max": 3.0,
+            "source_evo": "SFR",
+            "Rmax": 1.7,
+        },
+        energy_loss_model_kwargs: dict = {},
     ) -> None:
         """
-        Pass in effective exposure & energy loss tables that have been pre-generated.
+        Initialise the grid of the simulation.
+
+        This means (in practice) to generate the grid of effective exposure
+        through grid parameters of beta_egmf and rigidity.
 
         Parameters
         ----------
-        exposure_table_file : str
-            The table containing the information about the effective exposure
-            of each configuration (source, detector, MG).
-        energy_table_file : str
-            The table containing information of the energy loss processes for
-            each configuration (detector, MG)
-        gmf_model : str, default=None
-            The GMF model considered in the analysis.
-            Used to read in the effective exposure information.
-            Default is None, which considers no deflections from GMF
-        kappa_theta_filename : str, default='kappa_theta_map.pkl'
-            the file name for the map that converts the vMF parameter `kappa`
-            to the RMS angular scale.
-            Default is the default name saved in `fancy.utils.resources`
+        energy_gridparams : tuple, optional
+            The grid parameters for the energy values.
+            given as (E_min, E_max, Nbins), by default (32, 500, 50).
+            The grid will be logarithmically spaced in energy.
+        lnA_energy_gridparams : tuple, optional
+            The grid parameters for the lnA energy values.
+            given as (lnA_min, lnA_max, Nbins), by default (0, 10, 50).
+            The grid will be linearly spaced in lnA.
+        effexp_model_kwargs : dict, optional
+            The keyword arguments for the effective exposure model.
+            By default set to:
+            {
+                "beta_egmf_gridparams" : (1e-3, 1, 10),
+                "R_gridparams" : (1, 500, 25),
+            }
+            where beta_egmf_gridparams are the grid parameters for the
+            beta_egmf values (in nG Mpc^1/2) and R_gridparams are the grid
+            parameters for the rigidity values (in EV).
+        src_inj_kwargs : dict, optional
+            The keyword arguments for the source injection model.
+            By default set to:
+            {
+                "dinits": [4],
+                "Rmax": 1.7,
+            }
+            where dinits are the distances of the sources (in Mpc)
+            and Rmax is the maximum rigidity (in EV).
+        bg_inj_kwargs : dict, optional
+            The keyword arguments for the background injection model.
+            By default set to:
+            {
+                "z_max": 3.0,
+                "source_evo": "SFR",
+                "Rmax": 1.7,
+            }
+            where z_max is the maximum redshift of the background sources,
+            source_evo is the source evolution model (only "SFR" is implemented),
+            and Rmax is the maximum rigidity (in EV).
         """
-        if self.analysis_type in set(
-            [self.composition_type, self.gmf_composition_type]
-        ):
-            """Read from energy loss tables"""
-            with h5py.File(energy_table_file, "r") as file:
-                config_label = (
-                    f"{self.data.detector.label}_{self.data.detector.mass_model}"
-                )
+        grid_generator = GridGenerator(data=self.data, gmf_model=self.gmf_model)
 
-                self.distances_grid = file[config_label]["distances_grid"][()]  # Mpc
-                self.alpha_grid = file[config_label]["alpha_grid"][()]
-                self.log10_Eearth_grid = file[config_label]["log10_Eearth_grid"][()]
-                self.log10_Esrcs_grid = file[config_label]["log10_Esrcs"][
-                    ()
-                ]  # log10(EeV)
+        grid_generator.get_effective_exposure_grid(
+            effexp_model_kwargs, self.n_jobs
+        )
 
-                self.log10_Eearth_spectrum = file[config_label][
-                    "log10_Eearth_spectrum"
-                ][()]  # log10(1/EV)
+        grid_generator.get_energy_mass_grid(
+            energy_gridparams,
+            lnA_energy_gridparams,
+            src_inj_kwargs,
+            bg_inj_kwargs,
+            energy_loss_model_kwargs,
+            compute_source=True
+        )
 
-            """Read from exposure table"""
-            with h5py.File(exposure_table_file, "r") as file:
-                config_label = f"{self.data.source.label}_{self.data.detector.label}_{self.data.detector.mass_model}_{gmf_model}"
-                self.log10_Bigmf_grid = file[config_label]["log10_Bigmf_grid"][
-                    ()
-                ]  # log10(nG)
-                self.log10_source_exposure_grid = file[config_label]["log10_integrated_source_exposure"][
-                    ()
-                ]  # km^2 yr
-                self.log10_background_exposure_grid = file[config_label]["log10_integrated_background_exposure"][
-                    ()
-                ]  # km^2 yr
+        grid_generator.get_weighted_exposure()
+
+        self.grid_config = grid_generator.store_grids_to_dict()
+
+        self.fit_inputs["NEbins"] = len(grid_generator.lnA_energy_grid)
+        self.fit_inputs["mean_lnA_det"] = grid_generator.truths['mean_lnA_dets']
+        self.fit_inputs["var_lnA_det"] = grid_generator.truths['var_lnA_dets']
+        self.fit_inputs["Nalphas"] = grid_generator.Nalphas
+        self.fit_inputs["NEs"] = grid_generator.NEs
+        self.fit_inputs["NAsrcs"] = grid_generator.Nmass_fracs
+        self.fit_inputs["alpha_grid"] = grid_generator.alpha_grid
+        self.fit_inputs["log10_Egrid"] = np.log10(grid_generator.energy_grid)
+        self.fit_inputs["earth_spectrum_grid"] = grid_generator.spectrum_grid.T
+        self.fit_inputs["lnA_Egrid"] = grid_generator.lnA_energy_grid
+        self.fit_inputs["mean_lnA_grid"] = grid_generator.mean_lnA_grid.T
+        self.fit_inputs["var_lnA_grid"] = grid_generator.var_lnA_grid.T
+        self.fit_inputs["Eth"] = np.min(grid_generator.energy_grid)
+        self.fit_inputs["logE_stat_unc"] = grid_generator.config["logE_stat"]
+        self.fit_inputs["Nbeta_egmfs"] = len(grid_generator.beta_egmf_grid)
+        self.fit_inputs["log10_beta_egmf_grid"] = np.log10(grid_generator.beta_egmf_grid.value)
+        self.fit_inputs["wexp_earth_grid"] = np.moveaxis(grid_generator.wexp_earth_grid, (0,1,2,3), (0,2,3,1))
+        self.fit_inputs["wexp_src_grid"] = grid_generator.wexp_src_grid.T
+        self.fit_inputs["esrc_ratio_grid"] = grid_generator.esrc_ratio_grid.T
+
+    def load_from_simulation(
+        self : Self,
+        simulation : Simulation
+    ) -> None:
+        """
+        Load everything directly from the simulation object.
+
+        Parameters
+        ----------
+        simulation : fancy.simulation.Simulation
+            The simulation object that contains the data, model and tables.
+        """
+        # make sure that the simulation and data are consistent
+        if simulation.detector_type != self.data.detector.label:
+            raise ValueError("Detector type in simulation and analysis do not match.")
+        if simulation.source_type != self.data.source.label:
+            raise ValueError("Source type in simulation and analysis do not match.")
+        if simulation.mass_model != self.data.detector.mass_model:
+            raise ValueError("Mass model in simulation and analysis do not match.")
+
+        self.fit_inputs["Nsrcs"] = simulation.Nsrcs
+        self.fit_inputs["D"] = simulation.data.source.distance
+        self.fit_inputs["omega_src"] = simulation.source_uvs
+        self.fit_inputs["N"] = simulation.truths['Nex']
+        self.fit_inputs["Edet"] = simulation.truths['Edets']
+        self.fit_inputs["kappa_ds"] = simulation.truths["kappa_ds"]
+        self.fit_inputs["mean_lnA_det"] = simulation.truths['mean_lnA_dets']
+        self.fit_inputs["var_lnA_det"] = simulation.truths['var_lnA_dets']
+
+        self.fit_inputs["NEbins"] = len(simulation.lnA_energy_grid)
+        self.fit_inputs["Nalphas"] = simulation.Nalphas
+        self.fit_inputs["NEs"] = simulation.NEs
+        self.fit_inputs["NAsrcs"] = simulation.Nmass_fracs
+        self.fit_inputs["alpha_grid"] = simulation.alpha_grid
+        self.fit_inputs["log10_Egrid"] = np.log10(simulation.energy_grid)
+        self.fit_inputs["earth_spectrum_grid"] = simulation.spectrum_grid.T
+        self.fit_inputs["lnA_Egrid"] = simulation.lnA_energy_grid
+        self.fit_inputs["mean_lnA_grid"] = simulation.mean_lnA_grid.T
+        self.fit_inputs["var_lnA_grid"] = simulation.var_lnA_grid.T
+        self.fit_inputs["Eth"] = np.min(simulation.energy_grid)
+        self.fit_inputs["logE_stat_unc"] = simulation.config["logE_stat"]
+        self.fit_inputs["mean_lnA_stat_unc"] = np.full_like(simulation.truths['mean_lnA_truths'], simulation.config["mean_lnA_stat"])
+        self.fit_inputs["var_lnA_stat_unc"] = np.full_like(simulation.truths['var_lnA_truths'], simulation.config["var_lnA_stat"])
+        self.fit_inputs["logE_sys_unc"] = simulation.config["logE_sys"]
+        self.fit_inputs["mean_lnA_sys_unc"] = simulation.config["mean_lnA_sys"]
+        self.fit_inputs["var_lnA_sys_unc"] = simulation.config["var_lnA_sys"]
+        self.fit_inputs["Nbeta_egmfs"] = len(simulation.beta_egmf_grid)
+        self.fit_inputs["log10_beta_egmf_grid"] = np.log10(simulation.beta_egmf_grid.value)
+        self.fit_inputs["wexp_earth_grid"] = np.moveaxis(simulation.wexp_earth_grid, (0,1,2,3), (0,2,3,1))
+        self.fit_inputs["wexp_src_grid"] = simulation.wexp_src_grid.T
+        self.fit_inputs["esrc_ratio_grid"] = simulation.esrc_ratio_grid.T
+
+        # for omega_det, deal with this depending on gmf model
+        if simulation.gmf_model == "None":
+            self.fit_inputs["omega_det"] = simulation.truths['skycoord_earth_dets'].cartesian.xyz.value.T
         else:
-            raise DeprecationWarning(
-                f"Handles for analysis type {self.analysis_type} is deprecated."
-            )
+            self.fit_inputs["omega_det"] = simulation.truths['skycoord_gb_truths_bp'].cartesian.xyz.value.T
+
+
+        # warn if anything is None
+        missing_keys = [k for k, v in self.fit_inputs.items() if v is None]
+        if len(missing_keys) > 0:
+            raise ValueError(f"Missing fit inputs: {missing_keys}")
+        
 
     def compile_stan_model(self: Self) -> None:
         """Compile the Stan model for the analysis."""
         # get path to the stan file
-        if self.analysis_type == "arrival":
-            stan_path = get_path_to_stan_includes("arrival_direction")
+        if self.analysis_type == self.energy_type:
+            stan_path = get_path_to_stan_includes(self.energy_type)
             path_to_stan_file = get_path_to_stan_file(
-                "arrival_direction", "arrival_direction_model.stan"
+                self.energy_type, "energy_model.stan"
             )
-        elif self.analysis_type == "energy_loss":
-            stan_path = get_path_to_stan_includes("energy_loss")
+        elif self.analysis_type == self.mass_type:
+            stan_path = get_path_to_stan_includes(self.mass_type)
             path_to_stan_file = get_path_to_stan_file(
-                "energy_loss", "energy_model_with_sys.stan"
+                self.mass_type, "mass_model.stan"
             )
-        elif self.analysis_type == "joint":
-            stan_path = get_path_to_stan_includes("joint")
-            path_to_stan_file = get_path_to_stan_file("joint", "joint_model.stan")
-        elif self.analysis_type == "joint_gmf":
-            stan_path = get_path_to_stan_includes("joint_gmf")
+        elif self.analysis_type == self.energy_mass_type:
+            stan_path = get_path_to_stan_includes(self.energy_mass_type)
             path_to_stan_file = get_path_to_stan_file(
-                "joint_gmf", "joint_gmf_model.stan"
+                self.energy_mass_type, "energy_mass_model.stan"
             )
-        elif self.analysis_type in set(["joint_composition", "joint_gmf_composition"]):
-            stan_path = get_path_to_stan_includes("joint_composition")
+        elif self.analysis_type == self.energy_mass_spatial_type:
+            stan_path = get_path_to_stan_includes(self.energy_mass_spatial_type)
             path_to_stan_file = get_path_to_stan_file(
-                "joint_composition", "joint_composition_model.stan"
+                self.energy_mass_spatial_type, "energy_mass_spatial_model.stan"
             )
+        else:
+            raise ValueError(f"Analysis type {self.analysis_type} not recognised.")
 
-        stanc_options = {"include-paths": stan_path}
+        stanc_options = {"include-paths": str(stan_path)}
 
         # TODO: compiling stan like this is deprecated, should fix this at some point
         self.stan_model = CmdStanModel(
-            stan_file=path_to_stan_file, stanc_options=stanc_options
+            stan_file=str(path_to_stan_file), stanc_options=stanc_options
         )
 
     def prepare_fit_inputs(self: Self) -> None:
         """Gather inputs from Model, Data and IntegrationTables."""
         # prepare fit inputs
+
+        self.fit_inputs["Nsrcs"] = self.data.source.N
+        self.fit_inputs["D"] = self.data.source.distance
+        self.fit_inputs["omega_src"] = self.data.source.coord.cartesian.xyz.value.T
+        self.fit_inputs["N"] = self.data.uhecr.N
+        self.fit_inputs["Edet"] = self.data.uhecr.energy
+        self.fit_inputs["kappa_ds"] = self.data.uhecr.kappa_ds
+        self.fit_inputs["mean_lnA_det"] = self.data.uhecr.mean_lnA
+        self.fit_inputs["var_lnA_det"] = self.data.uhecr.var_lnA
         
-        if self.analysis_type == self.energy_type:
-            pass
-
-        if self.analysis_type in set(
-            [self.composition_type, self.gmf_composition_type]
-        ):
-            self.fit_input = {
-                "Ns": self.data.source.N,
-                "varpi": self.data.source.coord.cartesian.xyz.value.T,
-                "D": self.data.source.distance,
-                "N": self.data.uhecr.N,
-                "zenith_angle": self.data.uhecr.zenith_angle,
-                "alpha_T": self.data.detector.alpha_T,
-            }
-            # arrival direction parameters
-            if self.analysis_type == self.gmf_composition_type:  # coordinates at GB
-                self.fit_input["arrival_direction"] = self.data.uhecr.unit_vector_gb
-                self.fit_input["kappa_ds"] = self.data.uhecr.kappa_gmfs
-            elif self.analysis_type == self.composition_type:  # coordinates at Earth
-                self.fit_input["arrival_direction"] = self.data.uhecr.unit_vector
-                self.fit_input["kappa_ds"] = np.full(
-                    self.data.uhecr.N, self.data.detector.kappa_d
-                )
-
-            # direction parameters
-            self.fit_input["Nkappas"] = len(self.log10_kappas_interp_arr)
-            self.fit_input["log10_kappas_grid"] = self.log10_kappas_interp_arr
-            self.fit_input["Nthetas"] = len(self.thetas_interp_arr)
-            self.fit_input["thetas_grid"] = self.thetas_interp_arr
-
-            # UHECR parameters
-            self.fit_input["Edet"] = (
-                self.data.uhecr.energy
-            )
-            self.fit_input["exp_factors"] = self.data.uhecr.exposure
-
-            # detector parameters
-            self.fit_input["Eth"] = self.data.detector.Eth
-            self.fit_input["Eerr"] = self.data.detector.energy_uncertainty
-            self.fit_input["mean_lnA_params"] = self.data.detector.lnA_params[0,:]
-            self.fit_input["sigma_lnA_params"] = self.data.detector.lnA_params[1,:]
-            self.fit_input["lnA_min"] = 1.0
-            self.fit_input["lnA_max"] = np.log(56)
-
-            # arrival spectrum parameters
-            self.fit_input["Nds"] = len(self.distances_grid)
-            self.fit_input["NEearths"] = len(self.log10_Eearth_grid)
-            self.fit_input["Nalphas"] = len(self.alpha_grid)
-            self.fit_input["distances_grid"] = self.distances_grid
-            self.fit_input["log10_Rgrid"] = self.log10_Rgrid
-            self.fit_input["alpha_grid"] = self.alpha_grid
-
-            if self.data.detector.mass_group != 1:
-                self.fit_input["log_Eearth_spectrum"] = np.log(
-                    10.0**self.log10_arr_spect_grid
-                )
-            else:
-                self.fit_input["Rarr_grid"] = self.Rarr_grid
-
-            # Nex / flux parameters
-            self.fit_input["log10_Esrcs_grid"] = self.log10_Esrcs_grid
-            self.fit_input["NBigmfs"] = len(self.log10_Bigmf_grid)
-            self.fit_input["log10_Bigmf_grid"] = self.log10_Bigmf_grid
-            self.fit_input["log10_source_exposure_grid"] = self.log10_source_exposure_grid
-            self.fit_input["log10_backgrond_exposure_grid"] = self.log10_backgrond_exposure_grid
-
-        else:
-            raise DeprecationWarning(
-                f"Handles for analysis type {self.analysis_type} is deprecated."
-            )
+        # warn if anything is None
+        missing_keys = [k for k, v in self.fit_inputs.items() if v is None]
+        if len(missing_keys) > 0:
+            raise ValueError(f"Missing fit inputs: {missing_keys}")
 
     def fit_model(
         self: Self,
@@ -276,35 +352,43 @@ class Analysis:
         See https://cmdstanpy.readthedocs.io/en/v1.2.0/api.html#cmdstanpy.CmdStanModel.sample
         for more details.
         """
-        # make sure that the fit inputs are prepared
-        if self.fit_input is None:
-            raise ValueError("Run `prepare_fit_inputs` first.")
+        # warn if anything is None
+        missing_keys = [k for k, v in self.fit_inputs.items() if v is None]
+        if len(missing_keys) > 0:
+            raise ValueError(f"Missing fit inputs: {missing_keys}")
         
-        # set the default init values
-        if inits is None:
-            if self.analysis_type == self.energy_type:
-                inits={
-                    "alphas" : [-1, -1],
-                    "mass_fracs" : np.full((self.fit_input["N"]+1, self.fit_input["NAsrcs"]), 1 / self.fit_input["NAsrcs"]),
-                    "Etrue" : np.full(self.fit_input['NEs'], np.median(self.fit_input["Edet"])),
-                    "f_s" : [0.2, 0.8],
-                    "log10_Ftot" : -2,
-                    "delta_mulnA_sys" : 0.0,
-                    "delta_varlnA_sys" : 0.0,
-                    "delta_logE_sys" : 0.0
-                }
-            else:
-                NotImplementedError(
-                    f"Initial values for analysis type {self.analysis_type} are not implemented."
-                )
+        # compile the stan model
+        if self.stan_model is None:
+            print("Compiling Stan model...")
+            self.compile_stan_model()
+            print("Done!")
+
+        if warmup is None:
+            print("Setting warmup to same number as the iterations.")
+            warmup = iterations
+
+        inits_dict={
+            "alphas" : [-1, -1],
+            "mass_fracs" : np.full((self.fit_inputs["Nsrcs"]+1, self.fit_inputs["NAsrcs"]), 1 / self.fit_inputs["NAsrcs"]),
+            "Etrue" : np.full(self.fit_inputs['N'], np.median(self.fit_inputs["Edet"])),
+            "flux_frac" : [0.1, 0.9],
+            "log10_Ftot" : -2,
+            "beta_egmf" : 0.5
+        }
+        if inits is not None:
+            print("Using user-provided initial values for the parameters.")
+            inits_dict = inits
+            
+        
         # fit
         print("Performing fitting...")
         self.fit = self.stan_model.sample(
-            data=self.fit_input,
+            data=self.fit_inputs,
             iter_sampling=iterations,
             chains=chains,
             seed=seed,
             iter_warmup=warmup,
+            inits=inits_dict,
             **kwargs,
         )
 
@@ -316,6 +400,43 @@ class Analysis:
         self.chain = self.fit.stan_variables()
         print("Done!")
         return self.fit
+    
+    def run_diagnostics(self: Self) -> None:
+        """
+        Run a more sophisticated diagnostics on the fit output.
+
+        Returns
+        -------
+        df : pd.DataFrame
+            Dataframe containing the summary statistics for the parameters.
+        flags : dict
+            Dictionary containing flags for the diagnostics.
+        summary_txt : str
+            Summary text of the diagnostics.
+        """
+        if self.fit is None:
+            raise ValueError("Run `fit_model` first!")
+        
+        raise NotImplementedError("Diagnostics not yet implemented for cmdstanpy backend.")
+
+        # idata = az.from_cmdstanpy(
+        #     posterior=self.fit,           # your cmdstanpy fit object
+        #     observed_data=self.fit_inputs,  # your simulated data
+        # )
+
+        # var_base_names = [key for key in self.chain.keys() if key != "lp__"]
+        # df, flags, summary_txt = run_single_diagnostics(idata, var_base_names=var_base_names)
+
+        # print(summary_txt)
+        # if any(flags[k] for k in ["any_bad_rhat", "any_bad_ess_bulk", 
+        #                       "any_bad_ess_tail", "any_bad_ebfmi", "has_divergences"]):
+        #     print("⚠️ Some diagnostics failed:")
+        #     print(flags)
+
+        # return df, flags, summary_txt
+    
+    def plot_diagnostics(self : Self, truths : dict = {}) -> None:
+        pass
 
     def save(self: Self, outfile: str) -> None:
         """
@@ -349,7 +470,7 @@ class Analysis:
             fit_handle = f.create_group("fit")
             # fit inputs
             fit_input_handle = fit_handle.create_group("input")
-            for key, value in self.fit_input.items():
+            for key, value in self.fit_inputs.items():
                 fit_input_handle.create_dataset(key, data=value)
 
             # samples

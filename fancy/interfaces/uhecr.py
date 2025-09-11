@@ -121,6 +121,9 @@ class Uhecr:
             self.period = self.__find_period()
             self.A = self.__find_area()
 
+            # represents the angular uncertainty per UHECR
+            self.kappa_ds = data["kappa_ds"]
+
             self.mass_model = mass_model  # TODO: check why we need this
             # reading in GMF information
             # first check if
@@ -139,6 +142,9 @@ class Uhecr:
                 self.kappa_gmfs = data["gmf"][config_key]["kappa_gmf"][
                     ()
                 ]  # deflection parameter
+
+                # set the deflection parameter to the kappa_GMFs
+                self.kappa_ds = self.kappa_gmfs
 
     def __get_properties(self, analysis_type: str) -> dict:
         """Pack all relevant UHECR object infomration to a dictionary."""

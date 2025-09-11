@@ -41,10 +41,16 @@ data {
     /* detector */
     real alpha_T;
     real<lower=0> Eth;
-    real<lower=0> E_unc;
+    real<lower=0> logE_stat_unc;
+    
     /* below in principle can be a function of NEbins */
-    vector[NEbins] mean_lnA_unc;
-    vector[NEbins] var_lnA_unc;
+    vector[NEbins] mean_lnA_stat_unc;
+    vector[NEbins] var_lnA_stat_unc;
+
+    /* systematic uncertainties, as global shifts */
+    real logE_sys_unc;
+    real mean_lnA_sys_unc;
+    real var_lnA_sys_unc;
 
     /* Nex */
     array[Nsrcs+1, NAsrcs] vector[Nalphas] det_rate_grid;
@@ -78,11 +84,6 @@ parameters {
 
     /* latent parameters */
     vector <lower=Eth, upper=Emax>[N] Etrue;   
-
-    /* nuisance parameters */
-    real <lower=-2, upper=2>delta_mulnA_sys; /* mean lnA systematic uncertainty */
-    real <lower=-3, upper=3>delta_varlnA_sys;  /* var lnA systematic uncertainty */
-    real <lower=-0.2, upper=0.2> delta_logE_sys; /* energy scale uncertainty */
 
 }
 
@@ -123,7 +124,7 @@ transformed parameters {
     }
 
 
-    /* log likelihood for energy + spatial */
+    /* log likelihood for energy */
     array[N] vector[Nsrcs+1] lp;
     log_F = log(F);
 
@@ -140,7 +141,7 @@ transformed parameters {
             lp[i,k] += energy_spectrum_lpdf(Etrue[i] | alphas[k], log10_Egrid, alpha_grid, espect_mfs[k]);
 
             /* detector response for energy */
-            lp[i,k] += truncated_lognormal_lpdf(Edet[i] | log(Etrue[i]) + delta_logE_sys, E_unc, Eth, Emax);
+            lp[i,k] += truncated_lognormal_lpdf(Edet[i] | log(Etrue[i]) + logE_sys_unc, logE_stat_unc, Eth, Emax);
         }
     }
 
@@ -182,8 +183,8 @@ transformed parameters {
         }
 
         /* detector response for mean & var lnA */
-        lp_lnA[l][1] = left_truncated_normal_lpdf(mean_lnA_det[l] | mean_lnA_true[l] + delta_mulnA_sys, mean_lnA_unc[l], 0.0);
-        lp_lnA[l][2] = left_truncated_normal_lpdf(var_lnA_det[l] | var_lnA_true[l] + delta_varlnA_sys, var_lnA_unc[l], -1.0);
+        lp_lnA[l][1] = left_truncated_normal_lpdf(mean_lnA_det[l] | mean_lnA_true[l] + mean_lnA_sys_unc, mean_lnA_stat_unc[l], 0.0);
+        lp_lnA[l][2] = left_truncated_normal_lpdf(var_lnA_det[l] | var_lnA_true[l] + var_lnA_sys_unc, var_lnA_stat_unc[l], -1.0);
     }
 
      /* Here we calculate the source luminosity by transforming earth flux -> source flux using integrated source spectrum */
@@ -228,9 +229,5 @@ model {
 
   /* log10_Ftot prior */
   log10_Ftot ~ normal(-1.0, 3.0);
-
-  /* nuisance parameters */
-    delta_mulnA_sys ~ normal(0.0, 1.0);
-    delta_varlnA_sys ~ normal(0.0, 1.0);
 
 }
