@@ -8,6 +8,7 @@ simulations and for the analysis (stan model).
 import numpy as np
 import os
 from typing_extensions import Self, Union
+from astropy import units as u
 
 from fancy import Data
 from fancy.physics import (
@@ -49,6 +50,8 @@ class GridGenerator:
         # grid related parameters
         self.energy_grid = None
         self.lnA_energy_grid = None
+        self.Emin = None
+        self.Emax = None
         self.alpha_grid = None
         self.mass_ids_grid = None
         self.beta_egmf_grid = None
@@ -59,9 +62,11 @@ class GridGenerator:
         self.var_lnA_grid = None
         self.src_spectrum_grid = None
         self.esrc_ratio_grid = None
-        self.wexp_src_grid = None
         self.eff_exp_grid = None
+        self.wexp_src_grid = None
+        self.log_wexp_src_grid = None
         self.wexp_earth_grid = None
+        self.log_wexp_earth_grid = None
         self.proton_esrc_grid = None
         self.energy_grid_widths = None
         self.charges_grid = None
@@ -121,7 +126,6 @@ class GridGenerator:
             "Rmax": 1.7,
         },
         energy_loss_model_kwargs: dict = {},
-        compute_source: bool = True,
     ) -> None:
         """
         Get the grid of energies and masses.
@@ -147,8 +151,6 @@ class GridGenerator:
             }.
         energy_loss_model_kwargs : dict, optional
             Keyword arguments for the energy loss model. Default is {}.
-        compute_source : bool, optional
-            Whether to compute the source spectrum grid. Default is True.
         """
         energy_grid_binedges = np.logspace(
             np.log10(energy_gridparams[0]),
@@ -159,6 +161,8 @@ class GridGenerator:
             np.log10(energy_grid_binedges[:-1]) * np.log10(energy_grid_binedges[1:])
         )
         self.energy_grid_widths = np.diff(energy_grid_binedges)
+        self.Emin = energy_gridparams[0]
+        self.Emax = energy_gridparams[1]
         self.lnA_energy_grid = np.logspace(
             np.log10(lnA_energy_gridparams[0]),
             np.log10(lnA_energy_gridparams[1]),
@@ -172,15 +176,17 @@ class GridGenerator:
         )
 
         # store the grids for later use
-        spectra, lnAs = self.energy_loss_model.compute_spectrum_and_lnA(
+        spectra, lnAs, src_spectra = self.energy_loss_model.compute_spectrum_and_lnA(
             egrid=self.energy_grid,
             egrid_lnA=self.lnA_energy_grid,
             egrid_widths=self.energy_grid_widths,
+            compute_src = True
         )
 
         # store the injection solver results
         # NB: shapes are in (Ngrid, Nalphas, Nmass_fracs, Nsrcs)
         self.spectrum_grid = spectra
+        self.src_spectrum_grid = src_spectra[...,:-1]
         self.mean_lnA_grid = lnAs[0, ...]
         self.var_lnA_grid = lnAs[1, ...]
         self.alpha_grid = self.energy_loss_model.alphas
@@ -195,62 +201,16 @@ class GridGenerator:
         self.Nmass_fracs = self.spectrum_grid.shape[2]
         self.NElnAs = self.mean_lnA_grid.shape[0]
 
-        if compute_source:
-            self.get_source_spectrum_grid(
-                energy_grid=self.energy_grid,
-                alpha_grid=self.alpha_grid,
-                charges_grid=self.charges_grid,
-                Rmax=src_inj_kwargs["Rmax"],
-            )
-
-    def get_source_spectrum_grid(
-        self: Self,
-        energy_grid: np.ndarray = None,
-        alpha_grid: np.ndarray = None,
-        charges_grid: np.ndarray = None,
-        Rmax: float = 1.7,
-    ) -> None:
-        """
-        Get the source spectrum grid.
-
-        It also computes the weighted exposure and the esrc_ratio_grid.
-
-        Parameters
-        ----------
-        energy_grid : np.ndarray, optional
-            The energy grid to use. If None, use the stored energy grid. Default is None.
-        alpha_grid : np.ndarray, optional
-            The alpha grid to use. If None, use the stored alpha grid. Default is None.
-        charges_grid : np.ndarray, optional
-            The charges grid to use. If None, use the stored charges grid. Default is None.
-        Rmax : float, optional
-            The maximum rigidity to use. Default is 1.7 EV.
-        """
-        if energy_grid is None:
-            energy_grid = self.energy_grid
-        if alpha_grid is None:
-            alpha_grid = self.alpha_grid
-        if charges_grid is None:
-            charges_grid = self.charges_grid
-        self.src_spectrum_grid = source_spectrum(
-            energy_grid[:, np.newaxis, np.newaxis, np.newaxis],
-            alpha_grid[np.newaxis, :, np.newaxis, np.newaxis],
-            charges_grid[np.newaxis, np.newaxis, :, np.newaxis],
-            Rmax=Rmax,
-        )
-
-        self.wexp_src_grid = np.trapz(
-            y=self.src_spectrum_grid, x=self.energy_grid, axis=0
-        )
-
         self.esrc_ratio_grid = np.trapz(
             y=self.energy_grid[:, None, None, None] * self.src_spectrum_grid,
             x=self.energy_grid,
             axis=0,
         ) / np.trapz(y=self.src_spectrum_grid, x=self.energy_grid, axis=0)
 
-    def get_weighted_exposure(
+    def get_weighted_exposures(
         self: Self,
+        Nsamples : int = 100,
+        wexp_min : float = 1e-10
     ) -> None:
         """
         Get the weighted exposure grid.
@@ -279,7 +239,12 @@ class GridGenerator:
             lnA_energy_grid=self.lnA_energy_grid,
             energy_grid_widths=self.energy_grid_widths,
         )
-        self.wexp_earth_grid = weighted_exposure.calculate_weighted_exposure()
+        self.wexp_earth_grid = weighted_exposure.calculate_weighted_exposure(Nsamples=Nsamples, wexp_lim=wexp_min)
+        self.log_wexp_earth_grid = np.log(self.wexp_earth_grid.to_value(u.km**2 * u.yr))
+
+        # also compute the source weighted exposure
+        self.wexp_src_grid = weighted_exposure.calculate_src_weighted_exposure(Nsamples=Nsamples, wexp_lim=wexp_min)
+        self.log_wexp_src_grid = np.log(self.wexp_src_grid.to_value(u.km**2 * u.yr))
 
     def get_loss_length_grid(
         self : Self,
@@ -322,9 +287,11 @@ class GridGenerator:
             "var_lnA_grid": self.var_lnA_grid,
             "src_spectrum_grid": self.src_spectrum_grid,
             "esrc_ratio_grid": self.esrc_ratio_grid,
-            "wexp_src_grid": self.wexp_src_grid,
             "eff_exp_grid": self.eff_exp_grid,
             "wexp_earth_grid": self.wexp_earth_grid,
+            "wexp_src_grid": self.wexp_src_grid,
+            "log_wexp_earth_grid": self.log_wexp_earth_grid,
+            "log_wexp_src_grid" : self.log_wexp_src_grid,
             "proton_esrc_grid": self.proton_esrc_grid,
             "NEs": self.NEs,
             "NElnAs": self.NElnAs,
@@ -332,6 +299,8 @@ class GridGenerator:
             "Nmass_fracs": self.Nmass_fracs,
             "Nbeta_egmfs": self.Nbeta_egmfs,
             "Nrigidities": self.Nrigidities,
+            "Emin": self.Emin,
+            "Emax": self.Emax,
         }
         return grids_dict
     

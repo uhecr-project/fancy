@@ -7,13 +7,14 @@ import astropy.units as u
 import h5py
 import numpy as np
 from tqdm import tqdm
-from typing_extensions import Self, Union  # change to typing for py>3.11
+from typing_extensions import Self, Union, Tuple  # change to typing for py>3.11
 
 from fancy.interfaces.source import Source
 from fancy.utils.package_data import (
     get_path_to_prince_config,
     get_path_to_injection_solvers,
 )
+from fancy.utils.helpers import source_spectrum
 
 try:
     import prince_cr as pcr
@@ -23,7 +24,14 @@ try:
     from prince_cr.cr_sources import CosmicRaySource
     from prince_cr.solvers import UHECRPropagationSolverBDF
 
-    from .prince_helpers import SingleInjectionSolver, TruncatedPropagationSolver, NoInjection, TruncatedInjectionSource, create_distance_tables, create_kernel
+    from .prince_helpers import (
+        SingleInjectionSolver,
+        TruncatedPropagationSolver,
+        NoInjection,
+        TruncatedInjectionSource,
+        create_distance_tables,
+        create_kernel,
+    )
 except ImportError:
     pcr = None
 
@@ -209,8 +217,12 @@ class EnergyLossModel:
         self.solvers_loaded = True
 
     def compute_spectrum_and_lnA(
-        self: Self, egrid: np.ndarray, egrid_widths: np.ndarray, egrid_lnA: np.ndarray
-    ) -> None:
+        self: Self,
+        egrid: np.ndarray,
+        egrid_widths: np.ndarray,
+        egrid_lnA: np.ndarray,
+        compute_src: bool = True,
+    ) -> Tuple[np.ndarray, np.ndarray, Union[np.ndarray, None]]:
         """
         Compute the spectrum and lnA given an energy grid for energies and for lnA parameters.
 
@@ -224,6 +236,12 @@ class EnergyLossModel:
             spacing between energy bins in EV
         egrid_lnA : np.ndarray
             energy grid used for mean & var lnA in EV
+        compute_src : bool, default=True
+            whether to compute the source spectra as well.
+            Default is True.
+            If False, then only the background spectra will be computed.
+            This is useful if one wants to compute only the background spectra
+            for a given minimum distance.
         """
         espects = np.zeros(
             (
@@ -243,6 +261,9 @@ class EnergyLossModel:
             )
         )
 
+        if compute_src:
+            espects_src = np.zeros_like(espects)
+
         # choose the right background model to use based on its minimum distance
         dbg_idx = np.digitize(np.max(self.distances), self.dmins, right=True)
         print(f"Using background model with dmin={self.dmins[dbg_idx]:.2f} Mpc")
@@ -256,27 +277,43 @@ class EnergyLossModel:
             for idis in range(len(self.distances)):
                 res, _ = self.solver_res_src[idis][ims][ia]
                 # NB: internal conversion to GeV
-                _, spect_src = res.get_solution_group(
+                _, spect_from_src = res.get_solution_group(
                     "CR", egrid=egrid_GeV, epow=0
                 )
                 _, lnA_params[0, :, ia, ims, idis], lnA_params[1, :, ia, ims, idis] = (
                     res.get_lnA("CR", egrid=egrid_lnA_GeV)
                 )
 
-                espects[:, ia, ims, idis] = spect_src / np.sum(spect_src * egrid_widths)
+                espects[:, ia, ims, idis] = spect_from_src / np.sum(
+                    spect_from_src * egrid_widths
+                )
+
+                if compute_src:
+                    src_spect = source_spectrum(
+                        egrid,
+                        alpha=self.alphas[ia],
+                        charge=self.Zs[ims],
+                        Rmax=1.7,  # NB: here forced for now, in EV
+                    )
+                    espects_src[:, ia, ims, idis] = src_spect / np.sum(
+                        src_spect * egrid_widths
+                    )
 
             res, _ = solver_res_bg[ims][ia]
             # NB: internal conversion to GeV
-            _, spect_bg = res.get_solution_group(
-                "CR", egrid=egrid_GeV, epow=0
-            )
+            _, spect_from_bg = res.get_solution_group("CR", egrid=egrid_GeV, epow=0)
             _, lnA_params[0, :, ia, ims, -1], lnA_params[1, :, ia, ims, -1] = (
                 res.get_lnA("CR", egrid=egrid_lnA_GeV)
             )
 
-            espects[:, ia, ims, -1] = spect_bg / np.sum(spect_bg * egrid_widths)
+            espects[:, ia, ims, -1] = spect_from_bg / np.sum(
+                spect_from_bg * egrid_widths
+            )
 
-        return espects, lnA_params
+        if compute_src:
+            return espects, lnA_params, espects_src
+        else:
+            return espects, lnA_params
 
     def run_source_injection_solver(
         self: Self,

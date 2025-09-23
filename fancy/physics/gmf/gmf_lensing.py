@@ -130,15 +130,15 @@ class GMFLensing:
 
         # create maps container and add weights to it
         particles = crpropa.ParticleMapsContainer()
-        particles.addWeights(np.float32(R) * crpropa.EeV, weighted_map)
+        particles.addWeights(R * crpropa.EeV, weighted_map)
 
         # apply lensing
         if not self.disable_gmf:
-            particles.applyLens(np.float32(R) * crpropa.EeV, self.gmf_lens)
+            particles.applyLens(R * crpropa.EeV, self.gmf_lens)
 
         # obtain the lensed weights
         lensed_weighted_map = particles.getWeights(
-            crpropa.nucleusId(1, 1), np.float32(R) * crpropa.EeV
+            crpropa.nucleusId(1, 1), R * crpropa.EeV
         )
 
         # force nan values to be minimum value of probability

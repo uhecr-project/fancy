@@ -83,8 +83,8 @@ class GMFBackPropagation:
         self.uhecr_energy = data.uhecr.energy
         self.Nuhecrs = len(self.uhecr_energy)
 
-        # store the mean rigidity generated from the backpropagation model
-        self.mean_rigidity = np.zeros(self.Nuhecrs)
+        # store the rigidities generated from the backpropagation model
+        self.rigidities = None
 
         # compile vMF model
         self.__compile_vMFmodel()
@@ -107,8 +107,8 @@ class GMFBackPropagation:
         E_lnA_grid : Union[np.ndarray, None] = None,
         logE_stat: Union[float, None] = None,
         kappa_det : Union[float, None] = None,
-        Eth: Union[float, None] = None,
-        Eth_max : float = 1000,
+        Emin: Union[float, None] = None,
+        Emax : float = 1000,
     ) -> None:
         """
         Set up the detector response for the backpropagation.
@@ -142,9 +142,9 @@ class GMFBackPropagation:
             the maximum energy in EeV for the detector.
             Used for the grid of lnA values if E_lnA_grid is not provided.
         """
-        if Eth is not None:
-            self.Eth = Eth
-        self.Eth_max = Eth_max
+        if Emin is not None:
+            self.Emin = Emin
+        self.Emax = Emax
 
         if E_lnA_grid is None:
             if (mean_lnA_grid is not None and var_lnA_grid is not None):
@@ -155,7 +155,7 @@ class GMFBackPropagation:
                 # then this is just hardcoded, where Emax is some very large number.
                 # the bins here are also small to reflect the fact that we have an analytical estimate
                 # for lnA.
-                self.E_lnA_grid = np.logspace(Eth, Eth_max, 1000)
+                self.E_lnA_grid = np.logspace(Emin, Emax, 1000)
         else:
             self.E_lnA_grid = E_lnA_grid
 
@@ -223,7 +223,7 @@ class GMFBackPropagation:
 
         # use joblib to run parallel jobs otherwise use serial
         if parallel:
-            results = Parallel(n_jobs=njobs)(
+            results = Parallel(n_jobs=njobs, prefer="threads")(
                 delayed(self.run_single_backpropagation)(arg) for arg in bt_args
             )
         else:
@@ -257,9 +257,9 @@ class GMFBackPropagation:
         )
         self.uhecr_coords_gb.representation_type = "unitspherical"
 
-    def compute_kappa_gmf(self: Self) -> None:
+    def compute_kappa_gmf(self: Self, n_jobs : int = 4) -> None:
         """Compute kappa gmf & theta by fitting to vMF distribution pre-computed via stan."""
-        self.kappa_gmfs = np.array([self._get_kappa_gmf(uhecr_idx) for uhecr_idx in range(self.Nuhecrs)])
+        self.kappa_gmfs = Parallel(n_jobs=n_jobs, prefer="threads")(delayed(self._get_kappa_gmf)(uhecr_idx) for uhecr_idx in range(self.Nuhecrs))
         self.thetaPs = self.f_theta(self.kappa_gmfs)  # for plotting purposes
     
 
@@ -309,7 +309,7 @@ class GMFBackPropagation:
             uhecr_vector3d = cr.Vector3d(*uhecr_uv)
 
             c = cr.Candidate(
-                cr.ParticleState(pid, uhecr_Rs[k], pos_earth, uhecr_vector3d)
+                cr.ParticleState(pid, uhecr_Rs[k] * cr.EeV, pos_earth, uhecr_vector3d)
             )
             sim.run(c)
 
@@ -451,6 +451,7 @@ class GMFBackPropagation:
         """
         # generate arguments
         bt_args = []
+        self.rigidities = []
         for i in range(self.Nuhecrs):
             # sample arrival directions via vMF
             uhecr_sampled_uvs = sample_vMF(
@@ -467,8 +468,8 @@ class GMFBackPropagation:
                 E_samples[j] = truncated_lognormal_sample(
                     mu=np.log(self.uhecr_energy[i]),
                     sigma=self.logE_stat,
-                    a=self.Eth,  # minimum energy in EeV
-                    b=self.Eth_max,  # maximum energy in EeV
+                    a=self.Emin,  # minimum energy in EeV
+                    b=self.Emax,  # maximum energy in EeV
                 )
 
                 # now compute mean and variance of lnA, as a function of log10(E / EeV)
@@ -481,12 +482,14 @@ class GMFBackPropagation:
                 )
 
             # now compute the rigidities using R = (E / Z) * (Z /A) * (A / (exp(lnA)))
-            uhecr_sampled_Rs = E_samples / (0.5 * np.exp(lnA_samples)) * cr.EeV  # in EV
+            uhecr_sampled_Rs = E_samples / (0.5 * np.exp(lnA_samples))  # in EV
 
             # calculate the mean rigidity for each UHECR for later use
-            self.mean_rigidity[i] = np.mean(uhecr_sampled_Rs / cr.EeV)
+            self.rigidities.append(uhecr_sampled_Rs)
 
             bt_args.append((i, uhecr_sampled_uvs, uhecr_sampled_Rs))
+
+        self.rigidities = np.concatenate(self.rigidities)
         return bt_args
 
     def _get_kappa_gmf(self: Self, uhecr_idx: int) -> float:

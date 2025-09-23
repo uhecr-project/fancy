@@ -15,13 +15,13 @@ def plot_skymap_gb(data: Data, truths: dict, slice_idx: int = 10):
     sc = skymap_gb.scatter(
         lons=truths["skycoord_gb_truths"].galactic.l.deg[::slice_idx],
         lats=truths["skycoord_gb_truths"].galactic.b.deg[::slice_idx],
-        c=truths["rigidity_truths"][::slice_idx],
+        c=truths["rigidity_truths_samples"][::slice_idx],
         cmap="plasma",
         s=10,
         label="GB samples",
         alpha=0.5,
-        vmin=1, 
-        vmax=100
+        vmin=1,
+        vmax=100,
     )
 
     # for kappa egmf, draw a circle around it, color coded with the theta value
@@ -35,7 +35,7 @@ def plot_skymap_gb(data: Data, truths: dict, slice_idx: int = 10):
         cmap=theta_egmf_cmap,
         norm=theta_egmf_norm,
     )
-    for i, kappa_egmf in enumerate(truths["kappa_egmf_truths"]):
+    for i, kappa_egmf in enumerate(truths["kappa_egmf_truth_samples"]):
         if i % slice_idx != 0:
             continue
         if kappa_egmf > 0:
@@ -60,7 +60,9 @@ def plot_skymap_gb(data: Data, truths: dict, slice_idx: int = 10):
         zorder=10,
     )
     # add double colorbars for the energy and kappa_egmf
-    cbar = skymap_gb.fig.colorbar(sc, ax=skymap_gb.ax, orientation="horizontal", shrink=0.7)
+    cbar = skymap_gb.fig.colorbar(
+        sc, ax=skymap_gb.ax, orientation="horizontal", shrink=0.7
+    )
     cbar.set_label("log10(Rigidity / EV)")
     cbar2 = skymap_gb.fig.colorbar(
         sm, ax=skymap_gb.ax, orientation="horizontal", pad=0.05, shrink=0.7
@@ -69,19 +71,21 @@ def plot_skymap_gb(data: Data, truths: dict, slice_idx: int = 10):
 
     skymap_gb.ax.legend(loc="upper right")
 
-    skymap_gb.fig.suptitle(f"{data.detector.label}, {data.source.label}, {data.detector.mass_model}")
+    skymap_gb.fig.suptitle(
+        f"{data.detector.label}, {data.source.label}, {data.detector.mass_model}"
+    )
 
     return skymap_gb
 
 
-def plot_skymap_earth(data: Data, truths: dict, gmf_model : str):
+def plot_skymap_earth(data: Data, truths: dict, gmf_model: str):
     skymap_earth = AllSkyMap()
     skymap_earth.set_gridlines(ypadding=10, fontsize=12)
 
     sc = skymap_earth.scatter(
         lons=truths["skycoord_earth_truths"].galactic.l.deg,
         lats=truths["skycoord_earth_truths"].galactic.b.deg,
-        c=truths["Etruths"],
+        c=truths["Etruths_samples"],
         cmap="viridis",
         s=10,
         label="Truths",
@@ -104,7 +108,9 @@ def plot_skymap_earth(data: Data, truths: dict, gmf_model : str):
 
     skymap_earth.ax.legend(loc="upper right")
 
-    skymap_earth.fig.suptitle(f"{data.detector.label}, {data.source.label}, {data.detector.mass_model}, {gmf_model}")
+    skymap_earth.fig.suptitle(
+        f"{data.detector.label}, {data.source.label}, {data.detector.mass_model}, {gmf_model}"
+    )
 
     return skymap_earth
 
@@ -178,7 +184,9 @@ def plot_mean_sigma_lnA(data: Data, truths: dict, config: dict):
     axs[1].set_xlabel(r"$E$ [EeV]")
     fig.legend(loc="upper right", bbox_to_anchor=(1.1, 0.8))
 
-    fig.suptitle(f"{data.detector.label}, {data.source.label}, {data.detector.mass_model}")
+    fig.suptitle(
+        f"{data.detector.label}, {data.source.label}, {data.detector.mass_model}"
+    )
 
     return fig, axs
 
@@ -224,7 +232,7 @@ def plot_energy(data: Data, truths: dict, config: dict):
 
         # also plot histogrammed energy samples per source
         axs[1].hist(
-            truths["Etruths"][N_prev_idx : truths["Nex_per_src"][k]*10],
+            truths["Etruths_samples"][N_prev_idx : truths["Nex_per_src"][k] * 10],
             bins=20,
             density=False,
             ls=dis_lss[k],
@@ -232,7 +240,7 @@ def plot_energy(data: Data, truths: dict, config: dict):
             label=dis_labels[k],
         )
 
-        N_prev_idx = truths["Nex_per_src"][k]*10 + N_prev_idx
+        N_prev_idx = truths["Nex_per_src"][k] * 10 + N_prev_idx
 
     # plot total spectrum
     axs[0].loglog(
@@ -241,7 +249,7 @@ def plot_energy(data: Data, truths: dict, config: dict):
 
     # plot total histogrammed energy samples
     axs[1].hist(
-        truths["Etruths"],
+        truths["Etruths_samples"],
         bins=20,
         density=False,
         ls="-",
@@ -252,7 +260,9 @@ def plot_energy(data: Data, truths: dict, config: dict):
     )
 
     # histogram the samples
-    hist_vals, ebinedges = np.histogram(truths["Etruths"], bins=20, density=False)
+    hist_vals, ebinedges = np.histogram(
+        truths["Etruths_samples"], bins=20, density=False
+    )
     yvals = hist_vals / np.sum(hist_vals) / np.diff(ebinedges)
     yerr = np.sqrt(hist_vals) / np.sum(hist_vals) / np.diff(ebinedges)  # Error bars
     axs[0].errorbar(
@@ -274,11 +284,14 @@ def plot_energy(data: Data, truths: dict, config: dict):
     axs[1].legend()
     axs[1].set_yscale("log")
 
-    fig.suptitle(f"{data.detector.label}, {data.source.label}, {data.detector.mass_model}")
+    fig.suptitle(
+        f"{data.detector.label}, {data.source.label}, {data.detector.mass_model}"
+    )
 
     return fig, axs
 
-def plot_detected_events(data: Data, truths: dict, gmf_model : str, config: dict):
+
+def plot_detected_events(data: Data, truths: dict, gmf_model: str, config: dict):
     skymap_earth = AllSkyMap()
     skymap_earth.set_gridlines(ypadding=10, fontsize=12)
 
@@ -303,12 +316,16 @@ def plot_detected_events(data: Data, truths: dict, gmf_model : str, config: dict
     )
 
     # add colorbar for the energy
-    cbar = skymap_earth.fig.colorbar(sc, ax=skymap_earth.ax, orientation="horizontal", shrink=0.7)
+    cbar = skymap_earth.fig.colorbar(
+        sc, ax=skymap_earth.ax, orientation="horizontal", shrink=0.7
+    )
     cbar.set_label("Energy (EeV)")
 
     skymap_earth.ax.legend(loc="upper right")
 
-    skymap_earth.fig.suptitle(f"{data.detector.label}, {data.source.label}, {data.detector.mass_model}, {gmf_model}")
+    skymap_earth.fig.suptitle(
+        f"{data.detector.label}, {data.source.label}, {data.detector.mass_model}, {gmf_model}"
+    )
 
     fig_lnA, axs = plt.subplots(2, 1, figsize=(8, 6))
     axs[0].semilogx(
@@ -358,6 +375,13 @@ def plot_detected_events(data: Data, truths: dict, gmf_model : str, config: dict
         histtype="step",
         label="Detected energies",
     )
+    ax.hist(
+        truths["Etruths"],
+        bins=20,
+        density=False,
+        histtype="step",
+        label="True energies",
+    )
     ax.set_xlabel("Energy (EeV)")
     ax.set_ylabel("Counts")
     ax.legend()
@@ -365,7 +389,7 @@ def plot_detected_events(data: Data, truths: dict, gmf_model : str, config: dict
     return skymap_earth, fig_en, fig_lnA
 
 
-def plot_backprop_skymap(data: Data, truths: dict, gmf_model : str):
+def plot_backprop_skymap(data: Data, truths: dict, gmf_model: str):
     skymap_defl = AllSkyMap()
     skymap_defl.set_gridlines(ypadding=10, fontsize=12)
 
@@ -377,7 +401,7 @@ def plot_backprop_skymap(data: Data, truths: dict, gmf_model : str):
         s=10,
         label="Truths - Earth",
         alpha=0.5,
-        zorder=1
+        zorder=1,
     )
 
     skymap_defl.scatter(
@@ -388,7 +412,7 @@ def plot_backprop_skymap(data: Data, truths: dict, gmf_model : str):
         s=10,
         label="Backpropagated - GB",
         alpha=0.5,
-        zorder=5
+        zorder=5,
     )
 
     # for kappa gmf, draw a circle around it, color coded with the theta value
@@ -409,7 +433,7 @@ def plot_backprop_skymap(data: Data, truths: dict, gmf_model : str):
             theta_gmf,
             color=theta_gmf_cmap(theta_gmf_norm(theta_gmf)),
             alpha=0.3,
-            zorder=2
+            zorder=2,
         )
 
     # add the source direction
@@ -430,11 +454,14 @@ def plot_backprop_skymap(data: Data, truths: dict, gmf_model : str):
 
     skymap_defl.ax.legend(loc="upper right")
 
-    skymap_defl.fig.suptitle(f"{data.detector.label}, {data.source.label}, {data.detector.mass_model}, {gmf_model}")
+    skymap_defl.fig.suptitle(
+        f"{data.detector.label}, {data.source.label}, {data.detector.mass_model}, {gmf_model}"
+    )
 
     return skymap_defl
 
-def plot_kappas(data: Data, truths: dict, gmf_model : str):
+
+def plot_kappas(data: Data, truths: dict, gmf_model: str):
     fig, ax = plt.subplots(figsize=(8, 6))
     ax.hist(
         truths["kappa_egmf_truths"],
@@ -457,11 +484,14 @@ def plot_kappas(data: Data, truths: dict, gmf_model : str):
     # ax.set_xscale("log")
     ax.legend()
 
-    fig.suptitle(f"{data.detector.label}, {data.source.label}, {data.detector.mass_model}, {gmf_model}")
+    fig.suptitle(
+        f"{data.detector.label}, {data.source.label}, {data.detector.mass_model}, {gmf_model}"
+    )
 
     return fig
 
-def plot_thetas(data: Data, truths: dict, gmf_model : str):
+
+def plot_thetas(data: Data, truths: dict, gmf_model: str):
     fig, ax = plt.subplots(figsize=(8, 6))
     ax.hist(
         truths["theta_gmfs"],
@@ -471,16 +501,29 @@ def plot_thetas(data: Data, truths: dict, gmf_model : str):
         label="Theta GMF from backpropagation",
         color="blue",
     )
+
+    # plot only those with kappa > 0
+    kappa_egmf_truths = truths["kappa_egmf_truths"][truths["kappa_egmf_truths"] > 0]
+    ax.hist(
+        np.sqrt(7552.0 / kappa_egmf_truths),
+        bins=20,
+        density=True,
+        histtype="step",
+        label="Theta EGMF at source",
+        color="black",
+    )
     ax.set_xlabel("Theta / deg")
     ax.set_ylabel("Density")
     ax.legend()
 
-    fig.suptitle(f"{data.detector.label}, {data.source.label}, {data.detector.mass_model}, {gmf_model}")
+    fig.suptitle(
+        f"{data.detector.label}, {data.source.label}, {data.detector.mass_model}, {gmf_model}"
+    )
 
     return fig
 
 
-def plot_backprop_rigidities(data: Data, truths: dict, gmf_model : str):
+def plot_backprop_rigidities(data: Data, truths: dict, gmf_model: str):
     fig, ax = plt.subplots(figsize=(8, 6))
     ax.hist(
         truths["rigidity_truths"],
@@ -502,6 +545,8 @@ def plot_backprop_rigidities(data: Data, truths: dict, gmf_model : str):
     ax.set_ylabel("Density")
     ax.legend()
 
-    fig.suptitle(f"{data.detector.label}, {data.source.label}, {data.detector.mass_model}, {gmf_model}")
+    fig.suptitle(
+        f"{data.detector.label}, {data.source.label}, {data.detector.mass_model}, {gmf_model}"
+    )
 
     return fig
