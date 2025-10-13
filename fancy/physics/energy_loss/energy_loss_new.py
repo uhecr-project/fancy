@@ -7,7 +7,12 @@ import astropy.units as u
 import h5py
 import numpy as np
 from tqdm import tqdm
-from typing_extensions import Self, Union, Tuple  # change to typing for py>3.11
+from typing_extensions import (
+    Self,
+    Union,
+    Tuple,
+    Optional,
+)  # change to typing for py>3.11
 
 from fancy.interfaces.source import Source
 from fancy.utils.package_data import (
@@ -193,9 +198,25 @@ class EnergyLossModel:
             assert np.all(solver_res_dict["alphas"] == self.alphas), (
                 "alphas do not match!"
             )
-            assert np.all(solver_res_dict["massids"] == self.massids), (
-                "massids do not match!"
-            )
+
+            # do some sorting with the given mass ids and the
+            # mass ids from the solver results
+            if not np.all(np.sort(solver_res_dict["massids"]) == np.sort(self.massids)):
+                for mid in self.massids:
+                    if mid not in solver_res_dict["massids"]:
+                        raise ValueError(f"massid {mid} not in solver results!")
+                self.solver_res_src = [
+                    [  # for each distance
+                        [  # for each massid
+                            solver_res_dict["results"][idist][
+                                solver_res_dict["massids"].index(mid)
+                            ][ia]
+                            for ia in range(len(self.alphas))
+                        ]
+                        for mid in self.massids
+                    ]
+                    for idist in range(len(self.distances))
+                ]
             # print(f"Loaded from {source_solver_file}")
 
         # load the background injection solver here too
@@ -209,9 +230,26 @@ class EnergyLossModel:
             assert np.all(solver_res_dict["alphas"] == self.alphas), (
                 "alphas do not match!"
             )
-            assert np.all(solver_res_dict["massids"] == self.massids), (
-                "massids do not match!"
-            )
+
+            # do some sorting with the given mass ids and the
+            # mass ids from the solver results
+            if not np.all(np.sort(solver_res_dict["massids"]) == np.sort(self.massids)):
+                for mid in self.massids:
+                    if mid not in solver_res_dict["massids"]:
+                        raise ValueError(f"massid {mid} not in solver results!")
+                self.solver_res_bg = [
+                    [  # for each distance
+                        [  # for each massid
+                            solver_res_dict["results"][idist][
+                                solver_res_dict["massids"].index(mid)
+                            ][ia]
+                            for ia in range(len(self.alphas))
+                        ]
+                        for mid in self.massids
+                    ]
+                    for idist in range(len(self.distances))
+                ]
+            # print(f"Loaded from {source_solver_file}")
             # print(f"Loaded {bg_solver_file}")
 
         self.solvers_loaded = True

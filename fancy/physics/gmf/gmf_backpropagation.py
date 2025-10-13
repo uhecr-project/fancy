@@ -17,6 +17,8 @@ from fancy.utils.package_data import get_path_to_stan_includes, get_path_to_stan
 from fancy import Data
 from fancy.utils.helpers import truncated_lognormal_sample
 
+os.environ["OPENMP_NUM_THREADS"] = f"{int(os.cpu_count() * 0.75)}"  # to avoid openmp conflicts
+
 try:
     import crpropa as cr
 except ImportError:
@@ -405,7 +407,7 @@ class GMFBackPropagation:
             gmf_cr.randomStriated(seed)
             gmf_cr.randomTurbulent(seed)
 
-        elif self.gmf_model == "UF23Turbbase":
+        elif self.gmf_model == "UF23baseTurb":
             seed = int(rng.integers(low=0, high=10000000))
 
             gmf_cr = cr.UF23Field(0)
@@ -489,7 +491,7 @@ class GMFBackPropagation:
 
             bt_args.append((i, uhecr_sampled_uvs, uhecr_sampled_Rs))
 
-        self.rigidities = np.concatenate(self.rigidities)
+        self.rigidities = np.array(self.rigidities)
         return bt_args
 
     def _get_kappa_gmf(self: Self, uhecr_idx: int) -> float:

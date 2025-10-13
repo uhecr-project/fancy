@@ -17,7 +17,6 @@ from fancy.physics import (
     WeightedExposure,
     LossLengthModel,
 )
-from fancy.utils.helpers import source_spectrum
 
 charge_massid_map = {101: 1, 402: 2, 1407: 7, 2814: 14, 5626: 26}
 

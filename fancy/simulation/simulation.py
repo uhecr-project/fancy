@@ -113,9 +113,9 @@ class Simulation:
     def initialise_grids(
         self: Self,
         energy_gridparams: tuple = (32, 500, 50),
-        lnA_energy_gridparams: tuple = (3, 100, 50),
+        lnA_energy_gridparams: tuple = (1, 500, 50),
         effexp_model_kwargs: dict = {
-            "beta_egmf_gridparams": (1e-3, 5, 30),
+            "beta_egmf_gridparams": (1e-3, 100, 30),
             "R_gridparams": (1, 300, 50),
         },
         src_inj_kwargs: dict = {
@@ -127,7 +127,9 @@ class Simulation:
             "source_evo": "SFR",
             "Rmax": 1.7,
         },
-        energy_loss_model_kwargs: dict = {},
+        energy_loss_model_kwargs: dict = {
+            "massids" : [402, 1407, 2814]
+        },
     ) -> None:
         """
         Initialise the grid of the simulation.
@@ -534,7 +536,7 @@ class Simulation:
 
         # create an 2-D interpolation grid
         f_log_espect = RegularGridInterpolator(
-            (np.log10(self.energy_grid), self.alpha_grid), np.log(energy_spect_mf)
+            (np.log(self.energy_grid), self.alpha_grid), np.log(energy_spect_mf)
         )
 
         f_mulnA = CubicSpline(y=mean_lnA_mfs, x=self.alpha_grid, axis=1)
@@ -564,7 +566,7 @@ class Simulation:
 
             alpha_truth = self.truths["alphas"][k]
             en_spect = np.exp(
-                f_log_espect((np.log10(self.energy_grid), alpha_truth))[:, k]
+                f_log_espect((np.log(self.energy_grid), alpha_truth))[:, k]
             )
             en_prob = (en_spect * self.energy_grid_widths) / np.sum(
                 en_spect * self.energy_grid_widths
@@ -678,10 +680,21 @@ class Simulation:
         # initialise gmf lens object
         gmflens = GMFLensing(self.gmf_model)
 
-        skycoords_earth = gmflens.apply_lens_with_particles(
-            self.truths["rigidity_truths_samples"],
-            skycoords_gb,
-        )
+        skycoords_earth = []
+        # need to apply lens per source to ensure correct ratio
+        N_prev_idx = 0
+        for k in range(self.Nsrcs + 1):  # +1 for the background source
+
+            N_next_idx = self.config["Nsamples_per_src"][k] + N_prev_idx
+            defl_skycoord = gmflens.apply_lens_with_particles(
+                self.truths["rigidity_truths_samples"][N_prev_idx:N_next_idx],
+                skycoords_gb[N_prev_idx:N_next_idx],
+            )
+
+            skycoords_earth.append(defl_skycoord)
+            N_prev_idx = N_next_idx
+
+        skycoords_earth = concatenate_skycoords(skycoords_earth)
 
         self.truths["skycoord_earth_truths"] = skycoords_earth
 
@@ -910,7 +923,7 @@ class Simulation:
 
     # add some function to backtrack samples to get the kappa_GMF per mass model
     def backpropagate_events(
-        self: Self, n_samples: int = 200, n_jobs: int = 4
+        self: Self, n_samples: int = 500, n_jobs: int = 4
     ) -> Tuple[SkyCoord, np.ndarray]:
         """
         Backpropagate the sampled & exposure-applied events at Earth back to the GB.

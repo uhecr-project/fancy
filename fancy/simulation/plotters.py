@@ -21,7 +21,7 @@ def plot_skymap_gb(data: Data, truths: dict, slice_idx: int = 10):
         label="GB samples",
         alpha=0.5,
         vmin=1,
-        vmax=100,
+        vmax=25,
     )
 
     # for kappa egmf, draw a circle around it, color coded with the theta value
@@ -198,6 +198,11 @@ def plot_energy(data: Data, truths: dict, config: dict):
     dis_lss = ["--", ":"]
 
     tot_espect = np.zeros_like(config["energy_grid"])
+    energy_binedges = np.logspace(
+        np.log10(config["energy_grid"].min()),
+        np.log10(config["energy_grid"].max()),
+        21,
+    )
 
     N_prev_idx = 0
     for k in range(data.source.N + 1):
@@ -232,15 +237,15 @@ def plot_energy(data: Data, truths: dict, config: dict):
 
         # also plot histogrammed energy samples per source
         axs[1].hist(
-            truths["Etruths_samples"][N_prev_idx : truths["Nex_per_src"][k] * 10],
-            bins=20,
+            truths["Etruths_samples"][N_prev_idx : config["Nsamples_per_src"][k]],
+            bins=energy_binedges,
             density=False,
             ls=dis_lss[k],
             alpha=0.2,
             label=dis_labels[k],
         )
 
-        N_prev_idx = truths["Nex_per_src"][k] * 10 + N_prev_idx
+        N_prev_idx = config["Nsamples_per_src"][k] + N_prev_idx
 
     # plot total spectrum
     axs[0].loglog(
@@ -250,7 +255,7 @@ def plot_energy(data: Data, truths: dict, config: dict):
     # plot total histogrammed energy samples
     axs[1].hist(
         truths["Etruths_samples"],
-        bins=20,
+        bins=energy_binedges,
         density=False,
         ls="-",
         lw=3,
@@ -261,7 +266,7 @@ def plot_energy(data: Data, truths: dict, config: dict):
 
     # histogram the samples
     hist_vals, ebinedges = np.histogram(
-        truths["Etruths_samples"], bins=20, density=False
+        truths["Etruths_samples"], bins=energy_binedges, density=False
     )
     yvals = hist_vals / np.sum(hist_vals) / np.diff(ebinedges)
     yerr = np.sqrt(hist_vals) / np.sum(hist_vals) / np.diff(ebinedges)  # Error bars
@@ -368,16 +373,21 @@ def plot_detected_events(data: Data, truths: dict, gmf_model: str, config: dict)
     axs[0].legend(loc="upper right")
 
     fig_en, ax = plt.subplots(figsize=(8, 6))
+    energy_binedges = np.logspace(
+        np.log10(config["energy_grid"].min()),
+        np.log10(config["energy_grid"].max()),
+        21,
+    )
     ax.hist(
         truths["Edets"],
-        bins=20,
+        bins=energy_binedges,
         density=False,
         histtype="step",
         label="Detected energies",
     )
     ax.hist(
         truths["Etruths"],
-        bins=20,
+        bins=energy_binedges,
         density=False,
         histtype="step",
         label="True energies",
@@ -386,21 +396,33 @@ def plot_detected_events(data: Data, truths: dict, gmf_model: str, config: dict)
     ax.set_ylabel("Counts")
     ax.legend()
     ax.set_yscale("log")
+    ax.set_xscale("log")
     return skymap_earth, fig_en, fig_lnA
 
 
-def plot_backprop_skymap(data: Data, truths: dict, gmf_model: str):
+def plot_backprop_skymap(data: Data, truths: dict, gmf_model: str, gb : bool=True):
     skymap_defl = AllSkyMap()
     skymap_defl.set_gridlines(ypadding=10, fontsize=12)
 
+    if gb:
+        skymap_defl.scatter(
+            lons=truths["skycoord_gb_truths"].galactic.l.deg,
+            lats=truths["skycoord_gb_truths"].galactic.b.deg,
+            c="gray",
+            marker="o",
+            s=10,
+            label="Truths - GB",
+            alpha=0.3,
+            zorder=0,
+        )
     sc = skymap_defl.scatter(
         lons=truths["skycoord_earth_dets"].galactic.l.deg,
         lats=truths["skycoord_earth_dets"].galactic.b.deg,
         c="black",
-        marker="o",
-        s=10,
+        marker="+",
+        s=40,
         label="Truths - Earth",
-        alpha=0.5,
+        alpha=0.8,
         zorder=1,
     )
 
@@ -411,7 +433,7 @@ def plot_backprop_skymap(data: Data, truths: dict, gmf_model: str):
         marker="s",
         s=10,
         label="Backpropagated - GB",
-        alpha=0.5,
+        alpha=0.8,
         zorder=5,
     )
 
@@ -481,7 +503,8 @@ def plot_kappas(data: Data, truths: dict, gmf_model: str):
     )
     ax.set_xlabel("Kappa")
     ax.set_ylabel("Density")
-    # ax.set_xscale("log")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
     ax.legend()
 
     fig.suptitle(
@@ -493,9 +516,10 @@ def plot_kappas(data: Data, truths: dict, gmf_model: str):
 
 def plot_thetas(data: Data, truths: dict, gmf_model: str):
     fig, ax = plt.subplots(figsize=(8, 6))
+    theta_binedges = np.linspace(0, 80, 21)
     ax.hist(
         truths["theta_gmfs"],
-        bins=20,
+        bins=theta_binedges,
         density=True,
         histtype="step",
         label="Theta GMF from backpropagation",
@@ -506,7 +530,7 @@ def plot_thetas(data: Data, truths: dict, gmf_model: str):
     kappa_egmf_truths = truths["kappa_egmf_truths"][truths["kappa_egmf_truths"] > 0]
     ax.hist(
         np.sqrt(7552.0 / kappa_egmf_truths),
-        bins=20,
+        bins=theta_binedges,
         density=True,
         histtype="step",
         label="Theta EGMF at source",
@@ -525,17 +549,20 @@ def plot_thetas(data: Data, truths: dict, gmf_model: str):
 
 def plot_backprop_rigidities(data: Data, truths: dict, gmf_model: str):
     fig, ax = plt.subplots(figsize=(8, 6))
+    rigidity_binedges = np.logspace(
+        np.log10(1), np.log10(25), 21
+    )
     ax.hist(
         truths["rigidity_truths"],
-        bins=20,
+        bins=rigidity_binedges,
         density=True,
         histtype="step",
         label="Rigidity at source",
         color="black",
     )
     ax.hist(
-        truths["rigidity_bp"],
-        bins=20,
+        truths["rigidity_bp"].flatten(),
+        bins=rigidity_binedges,
         density=True,
         histtype="step",
         label="Rigidity from backpropagation",
@@ -544,6 +571,8 @@ def plot_backprop_rigidities(data: Data, truths: dict, gmf_model: str):
     ax.set_xlabel("Rigidity (EV)")
     ax.set_ylabel("Density")
     ax.legend()
+    ax.set_xscale("log")
+    ax.set_yscale("log")
 
     fig.suptitle(
         f"{data.detector.label}, {data.source.label}, {data.detector.mass_model}, {gmf_model}"
