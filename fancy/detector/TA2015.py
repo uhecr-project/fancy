@@ -92,6 +92,9 @@ f_E = 0.20
 # threshold energy [EeV]
 Eth = 57
 
+# systematic uncertainty
+f_E_sys = 0.05
+
 # For convenience
 detector_properties = {}
 detector_properties['label'] = 'TA2015'
@@ -106,3 +109,4 @@ detector_properties['alpha_T'] = alpha_T
 detector_properties['Eth'] = Eth
 detector_properties["start_year"] = start_year
 detector_properties["period_start"] = period_start
+detector_properties["f_E_sys"] = f_E_sys

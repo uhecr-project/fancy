@@ -8,7 +8,9 @@ import numpy as np
 from astropy.coordinates import SkyCoord
 from cmdstanpy import CmdStanModel
 from joblib import Parallel, delayed
-from scipy.stats import norm
+from tqdm import tqdm
+from tqdm_joblib import ParallelPbar
+from scipy.stats import norm, truncnorm
 from typing_extensions import Self, Union
 from vMF import sample_vMF
 
@@ -17,7 +19,8 @@ from fancy.utils.package_data import get_path_to_stan_includes, get_path_to_stan
 from fancy import Data
 from fancy.utils.helpers import truncated_lognormal_sample
 
-os.environ["OPENMP_NUM_THREADS"] = f"{int(os.cpu_count() * 0.75)}"  # to avoid openmp conflicts
+# os.environ["OPENMP_NUM_THREADS"] = f"{int(os.cpu_count() * 0.8)}"  # to avoid openmp conflicts
+os.environ["OPENMP_NUM_THREADS"] = "1"  # to avoid openmp conflicts
 
 try:
     import crpropa as cr
@@ -51,17 +54,25 @@ class GMFBackPropagation:
         gmf_model : str
             the GMF model considered for backpropagation.
         """
-        self.data = data
         self.gmf_model = gmf_model
 
         # settings for the detector
         self.mean_lnA_grid = None
         self.var_lnA_grid = None
         self.E_lnA_grid = None
-        self.logE_stat = self.data.detector.energy_uncertainty
-        self.kappa_det = self.data.detector.kappa_d  # default value for the detector kappa
-        self.Eth = self.data.detector.Eth  # default value for the threshold energy in EeV
+        self.logE_stat = data.detector.logE_stat
+        self.logE_sys = data.detector.logE_sys
+        self.kappa_det = data.detector.kappa_d  # default value for the detector kappa
+        self.Eth = data.detector.Eth  # default value for the threshold energy in EeV
         self.Eth_max = 1000  # default value for the maximum energy in EeV
+
+        self.mean_lnA_grid = data.detector.mean_lnA
+        self.var_lnA_grid = data.detector.var_lnA
+        self.lnA_logE_grid = data.detector.lnA_logE_grid
+        self.mean_lnA_stat = data.detector.mean_lnA_stat
+        self.mean_lnA_sys = data.detector.mean_lnA_sys
+        self.var_lnA_stat = data.detector.var_lnA_stat
+        self.var_lnA_sys = data.detector.var_lnA_sys
 
 
         assert gmf_model in self.__gmf_models, (
@@ -102,96 +113,6 @@ class GMFBackPropagation:
             stanc_options=stanc_options,
         )
 
-    def setup_detector_response(
-        self: Self,
-        mean_lnA_grid: Union[np.ndarray, None] = None,
-        var_lnA_grid: Union[np.ndarray, None] = None,
-        E_lnA_grid : Union[np.ndarray, None] = None,
-        logE_stat: Union[float, None] = None,
-        kappa_det : Union[float, None] = None,
-        Emin: Union[float, None] = None,
-        Emax : float = 1000,
-    ) -> None:
-        """
-        Set up the detector response for the backpropagation.
-
-        Parameters
-        ----------
-        mean_lnA : np.ndarray, optional
-            mean lnA values for the detector as a function of log10(E).
-            If not provided, will be taken from the detector model.
-        var_lnA : np.ndarray, optional
-            variance of lnA values for the detector as a function of log10(E).
-            If not provided, will be taken from the detector model.
-        E_lnA_grid : np.ndarray, optional
-            energy grid for the lnA values, used to perform the bin search for
-            rigidity values used for backtracking.
-            Must be provided if the mean and variance of the lnA is provided.
-            If None, then the energy grid will be taken with logarithmic spacing
-            from the energy range of the detector model.
-        logE_stat : float, optional
-            logarithm of the statistical energy uncertainty.
-            If not provided, will be taken from the detector model.
-        kappa_det : float, optional
-            the concentration parameter for the von Mises-Fisher distribution
-            used to sample the arrival directions of the UHECRs.
-            Characterises the reconstruction uncertainty of the arrival directions.
-            If not provided, will be taken from the detector model.
-        Eth : float, optional
-            the threshold energy in EeV for the detector.
-            If not provided, will be taken from the detector model.
-        Eth_max : float, default=1000
-            the maximum energy in EeV for the detector.
-            Used for the grid of lnA values if E_lnA_grid is not provided.
-        """
-        if Emin is not None:
-            self.Emin = Emin
-        self.Emax = Emax
-
-        if E_lnA_grid is None:
-            if (mean_lnA_grid is not None and var_lnA_grid is not None):
-                raise ValueError(
-                    "E_lnA_grid must be provided if mean_lnA_grid and var_lnA_grid are provided."
-                )
-            else:
-                # then this is just hardcoded, where Emax is some very large number.
-                # the bins here are also small to reflect the fact that we have an analytical estimate
-                # for lnA.
-                self.E_lnA_grid = np.logspace(Emin, Emax, 1000)
-        else:
-            self.E_lnA_grid = E_lnA_grid
-
-        # for the mean and variance of lnA, we just use the linear fit
-        # if they are both set to None.
-        # otherwise we use the values given here.
-        
-        if mean_lnA_grid is not None:
-            self.mean_lnA_grid = mean_lnA_grid
-        else:
-            # otherwise, we use the linear fit from the lnA parameters.
-            # TODO: in the future, we should just use the values directly 
-            # instead of storing a fit function
-            self.mean_lnA_grid = self.data.detector.lnA_params[0,0] * np.log10(
-                self.E_lnA_grid
-            ) + self.data.detector.lnA_params[0,1]
-        
-
-        if var_lnA_grid is not None:
-            self.var_lnA_grid = var_lnA_grid
-        else:
-            self.var_lnA_grid = (self.data.detector.lnA_params[1,0] * np.log10(
-                self.E_lnA_grid
-            ) + self.data.detector.lnA_params[1,1])**2
-
-        # for the energy uncertainty, we just use the detector default value
-        # if it is not provided.
-        if logE_stat is not None:
-            self.logE_stat = logE_stat
-
-        # for the kappa detector, we just use the detector default value
-        if kappa_det is not None:
-            self.kappa_det = kappa_det
-
     # parallelize for each UHECR
     def run_backpropagation(
         self: Self, Nsamples: int = 500, njobs: int = 4, parallel: bool = True
@@ -225,12 +146,12 @@ class GMFBackPropagation:
 
         # use joblib to run parallel jobs otherwise use serial
         if parallel:
-            results = Parallel(n_jobs=njobs, prefer="threads")(
+            results = ParallelPbar("Running Backpropagation: ")(n_jobs=njobs)(
                 delayed(self.run_single_backpropagation)(arg) for arg in bt_args
             )
         else:
             results = []
-            for arg in bt_args:
+            for iarg, arg in tqdm(enumerate(bt_args), desc="Running Backpropagation: ", total=len(bt_args)):
                 results.append(self.run_single_backpropagation(arg))
 
         # append the results
@@ -259,9 +180,9 @@ class GMFBackPropagation:
         )
         self.uhecr_coords_gb.representation_type = "unitspherical"
 
-    def compute_kappa_gmf(self: Self, n_jobs : int = 4) -> None:
+    def compute_kappa_gmf(self: Self, njobs : int = 4) -> None:
         """Compute kappa gmf & theta by fitting to vMF distribution pre-computed via stan."""
-        self.kappa_gmfs = Parallel(n_jobs=n_jobs, prefer="threads")(delayed(self._get_kappa_gmf)(uhecr_idx) for uhecr_idx in range(self.Nuhecrs))
+        self.kappa_gmfs = ParallelPbar("Calculating kappa_GMF: ")(n_jobs=njobs)(delayed(self._get_kappa_gmf)(uhecr_idx) for uhecr_idx in range(self.Nuhecrs))
         self.thetaPs = self.f_theta(self.kappa_gmfs)  # for plotting purposes
     
 
@@ -281,8 +202,6 @@ class GMFBackPropagation:
         uhecr_idx, uhecr_uvs, uhecr_Rs = bt_arg
         uhecr_defl_uvs = np.zeros_like(uhecr_uvs)
         uhecr_time_delays = np.zeros(uhecr_uvs.shape[0])
-
-        print(f"Current UHECR index: {uhecr_idx}")
 
         # Position of the Earth in galactic coordinates
         pos_earth = cr.Vector3d(-8.5, 0, 0) * cr.kpc
@@ -449,7 +368,7 @@ class GMFBackPropagation:
 
         Returns
         -------
-        a list containing a tuple of arguments for each UHECR.
+        a list containing a tuple of sampled directions & rigidities for each UHECR.
         """
         # generate arguments
         bt_args = []
@@ -466,17 +385,32 @@ class GMFBackPropagation:
 
             for j in range(Nsamples):
                 # sample energy from truncated lognormal distribution
-                # TODO: do we want to include the systematic uncertainty?
                 E_samples[j] = truncated_lognormal_sample(
-                    mu=np.log(self.uhecr_energy[i]),
+                    mu=np.log(self.uhecr_energy[i]) + self.logE_sys,
                     sigma=self.logE_stat,
-                    a=self.Emin,  # minimum energy in EeV
-                    b=self.Emax,  # maximum energy in EeV
+                    a=self.Eth,  # minimum energy in EeV
+                    b=self.Eth_max,  # maximum energy in EeV
                 )
 
                 # now compute mean and variance of lnA, as a function of log10(E / EeV)
-                mean_lnA = self.mean_lnA_grid[np.digitize(E_samples[j], self.E_lnA_grid, right=True)-1]
-                var_lnA = self.var_lnA_grid[np.digitize(E_samples[j], self.E_lnA_grid, right=True)-1]
+                logE_idx = np.digitize(np.log(E_samples[j]), self.lnA_logE_grid, right=True)-1
+                mean_lnA = truncnorm.rvs(
+                    loc=self.mean_lnA_grid[logE_idx] + self.mean_lnA_sys,
+                    scale=self.mean_lnA_stat[logE_idx],
+                    a=0,
+                    b=np.inf,
+                    size=1
+                )
+                var_lnA = truncnorm.rvs(
+                    loc=self.var_lnA_grid[logE_idx] + self.var_lnA_sys,
+                    scale=self.var_lnA_stat[logE_idx],
+                    a=-1,
+                    b=np.inf,
+                    size=1
+                )
+
+                # force non-negative variance
+                var_lnA = max(var_lnA, 1e-12)
 
                 # generate a single sampled lnA value from the normal distribution
                 lnA_samples[j] = norm.rvs(
@@ -578,8 +512,8 @@ class GMFBackPropagation:
                 self.defl_sampled_uvs,
                 self.defl_mean_uvs,
                 self.time_delays,
-                self.data.detector.coord_uncertainty,
-                self.data.detector.kappa_d,
+                np.sqrt(7552 / self.kappa_det),  # sigma_det in deg
+                self.kappa_det,
             ),
             open(outfile, "wb"),
             protocol=-1,

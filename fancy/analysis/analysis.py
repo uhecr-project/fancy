@@ -1,5 +1,5 @@
 """Container to manage the inputs and outputs of the fits."""
-
+import os
 import pickle
 from typing import Union
 
@@ -13,11 +13,11 @@ import arviz as az
 from fancy.interfaces.data import Data
 from fancy.interfaces.grid_generator import GridGenerator
 from fancy.simulation import Simulation
+from fancy.utils.helpers import pick_grain_size
 from fancy.utils.package_data import (
     get_path_to_stan_file,
     get_path_to_stan_includes,
 )
-from fancy.utils.stan_diagnostics import run_single_diagnostics
 
 
 class Analysis:
@@ -26,6 +26,7 @@ class Analysis:
     # pre-defined analysis types
     energy_type = "energy_only"
     mass_type = "mass_only"
+    spatial_type = "spatial_only"
     energy_mass_type = "energy_mass"
     energy_mass_spatial_type = "energy_mass_spatial"
 
@@ -43,9 +44,10 @@ class Analysis:
         "Nalphas",
         "alpha_grid",
         "NEs",
-        "log10_Egrid",
+        "logE_grid",
         "NAsrcs",
         "earth_spectrum_grid",
+        "lnA_logE_grid",
         "mean_lnA_grid",
         "var_lnA_grid",
         "Eth",
@@ -57,14 +59,16 @@ class Analysis:
         "var_lnA_sys_unc",
         "Nbeta_egmfs",
         "log10_beta_egmf_grid",
-        "wexp_earth_grid",
-        "wexp_src_grid",
-        "esrc_ratio_grid"
+        "log_wexp_earth_grid",
+        "log_wexp_src_grid",
+        "esrc_ratio_grid",
+        "grain_size"
     ] 
 
     def __init__(
         self: Self,
         data: Data,
+        gmf_model : str = "None",
         analysis_type: str = energy_mass_spatial_type,
     ) -> None:
         """
@@ -80,20 +84,21 @@ class Analysis:
             The analysis type to consider.
         """
         self.data = data
+        self.gmf_model = gmf_model
         self.analysis_type = analysis_type
 
         self.stan_model = None
         self.grid_config = None
+        self.nthreads_per_chain = None
         self.fit_inputs = {key: None for key in self.fit_input_keys}
         self.fit = None
 
     def initialise_grid(
         self : Self,
         energy_gridparams: tuple = (32, 500, 50),
-        lnA_energy_gridparams: tuple = (3, 100, 50),
         effexp_model_kwargs : dict = {
-            "beta_egmf_gridparams" : (1e-3, 1, 10),
-            "R_gridparams" : (1, 500, 25),
+            "beta_egmf_gridparams" : (1e-3, 50, 30),
+            "R_gridparams" : (1, 500, 30),
         },
         src_inj_kwargs: dict = {
             "dinits": [4],
@@ -104,7 +109,9 @@ class Analysis:
             "source_evo": "SFR",
             "Rmax": 1.7,
         },
-        energy_loss_model_kwargs: dict = {},
+        energy_loss_model_kwargs: dict = {
+            "massids":[402, 1407, 2814]
+        },
     ) -> None:
         """
         Initialise the grid of the simulation.
@@ -118,10 +125,6 @@ class Analysis:
             The grid parameters for the energy values.
             given as (E_min, E_max, Nbins), by default (32, 500, 50).
             The grid will be logarithmically spaced in energy.
-        lnA_energy_gridparams : tuple, optional
-            The grid parameters for the lnA energy values.
-            given as (lnA_min, lnA_max, Nbins), by default (0, 10, 50).
-            The grid will be linearly spaced in lnA.
         effexp_model_kwargs : dict, optional
             The keyword arguments for the effective exposure model.
             By default set to:
@@ -156,7 +159,14 @@ class Analysis:
         grid_generator = GridGenerator(data=self.data, gmf_model=self.gmf_model)
 
         grid_generator.get_effective_exposure_grid(
-            effexp_model_kwargs, self.n_jobs
+            effexp_model_kwargs
+        )
+
+        # for the lnA grid parameters, use the detector's mass model
+        lnA_energy_gridparams = (
+            np.min(10**self.data.detector.lnA_logE_grid),
+            np.max(10**self.data.detector.lnA_logE_grid),
+            len(self.data.detector.lnA_logE_grid),
         )
 
         grid_generator.get_energy_mass_grid(
@@ -164,32 +174,29 @@ class Analysis:
             lnA_energy_gridparams,
             src_inj_kwargs,
             bg_inj_kwargs,
-            energy_loss_model_kwargs,
-            compute_source=True
+            energy_loss_model_kwargs
         )
 
-        grid_generator.get_weighted_exposure()
+        grid_generator.get_weighted_exposures()
 
         self.grid_config = grid_generator.store_grids_to_dict()
 
         self.fit_inputs["NEbins"] = len(grid_generator.lnA_energy_grid)
-        self.fit_inputs["mean_lnA_det"] = grid_generator.truths['mean_lnA_dets']
-        self.fit_inputs["var_lnA_det"] = grid_generator.truths['var_lnA_dets']
         self.fit_inputs["Nalphas"] = grid_generator.Nalphas
         self.fit_inputs["NEs"] = grid_generator.NEs
         self.fit_inputs["NAsrcs"] = grid_generator.Nmass_fracs
         self.fit_inputs["alpha_grid"] = grid_generator.alpha_grid
-        self.fit_inputs["log10_Egrid"] = np.log10(grid_generator.energy_grid)
+        self.fit_inputs["logE_grid"] = np.log(grid_generator.energy_grid)
+        self.fit_inputs["Emin"] = np.min(grid_generator.energy_grid)
+        self.fit_inputs["Emax"] = np.max(grid_generator.energy_grid)
         self.fit_inputs["earth_spectrum_grid"] = grid_generator.spectrum_grid.T
-        self.fit_inputs["lnA_Egrid"] = grid_generator.lnA_energy_grid
+        self.fit_inputs["lnA_logE_grid"] = np.log(grid_generator.lnA_energy_grid)
         self.fit_inputs["mean_lnA_grid"] = grid_generator.mean_lnA_grid.T
         self.fit_inputs["var_lnA_grid"] = grid_generator.var_lnA_grid.T
-        self.fit_inputs["Eth"] = np.min(grid_generator.energy_grid)
-        self.fit_inputs["logE_stat_unc"] = grid_generator.config["logE_stat"]
         self.fit_inputs["Nbeta_egmfs"] = len(grid_generator.beta_egmf_grid)
         self.fit_inputs["log10_beta_egmf_grid"] = np.log10(grid_generator.beta_egmf_grid.value)
-        self.fit_inputs["wexp_earth_grid"] = np.moveaxis(grid_generator.wexp_earth_grid, (0,1,2,3), (0,2,3,1))
-        self.fit_inputs["wexp_src_grid"] = grid_generator.wexp_src_grid.T
+        self.fit_inputs["log_wexp_earth_grid"] = np.moveaxis(grid_generator.log_wexp_earth_grid, (0,1,2,3), (0,2,3,1))
+        self.fit_inputs["log_wexp_src_grid"] = np.moveaxis(grid_generator.log_wexp_src_grid, (0,1,2,3), (0,2,3,1))
         self.fit_inputs["esrc_ratio_grid"] = grid_generator.esrc_ratio_grid.T
 
     def load_from_simulation(
@@ -221,34 +228,37 @@ class Analysis:
         self.fit_inputs["mean_lnA_det"] = simulation.truths['mean_lnA_dets']
         self.fit_inputs["var_lnA_det"] = simulation.truths['var_lnA_dets']
 
+        self.fit_inputs["Eth"] = np.min(simulation.energy_grid)
+        self.fit_inputs["logE_stat_unc"] = simulation.config["logE_stat"]
+        self.fit_inputs["mean_lnA_stat_unc"] = simulation.config["mean_lnA_stat"]
+        self.fit_inputs["var_lnA_stat_unc"] = simulation.config["var_lnA_stat"]
+        self.fit_inputs["logE_sys_unc"] = simulation.config["logE_sys"]
+        self.fit_inputs["mean_lnA_sys_unc"] = simulation.config["mean_lnA_sys"]
+        self.fit_inputs["var_lnA_sys_unc"] = simulation.config["var_lnA_sys"]
+
         self.fit_inputs["NEbins"] = len(simulation.lnA_energy_grid)
         self.fit_inputs["Nalphas"] = simulation.Nalphas
         self.fit_inputs["NEs"] = simulation.NEs
         self.fit_inputs["NAsrcs"] = simulation.Nmass_fracs
         self.fit_inputs["alpha_grid"] = simulation.alpha_grid
-        self.fit_inputs["log10_Egrid"] = np.log10(simulation.energy_grid)
+        self.fit_inputs["logE_grid"] = np.log(simulation.energy_grid)
         self.fit_inputs["earth_spectrum_grid"] = simulation.spectrum_grid.T
-        self.fit_inputs["lnA_Egrid"] = simulation.lnA_energy_grid
+        self.fit_inputs["lnA_logE_grid"] = np.log(simulation.lnA_energy_grid)
         self.fit_inputs["mean_lnA_grid"] = simulation.mean_lnA_grid.T
         self.fit_inputs["var_lnA_grid"] = simulation.var_lnA_grid.T
-        self.fit_inputs["Eth"] = np.min(simulation.energy_grid)
-        self.fit_inputs["logE_stat_unc"] = simulation.config["logE_stat"]
-        self.fit_inputs["mean_lnA_stat_unc"] = np.full_like(simulation.truths['mean_lnA_truths'], simulation.config["mean_lnA_stat"])
-        self.fit_inputs["var_lnA_stat_unc"] = np.full_like(simulation.truths['var_lnA_truths'], simulation.config["var_lnA_stat"])
-        self.fit_inputs["logE_sys_unc"] = simulation.config["logE_sys"]
-        self.fit_inputs["mean_lnA_sys_unc"] = simulation.config["mean_lnA_sys"]
-        self.fit_inputs["var_lnA_sys_unc"] = simulation.config["var_lnA_sys"]
         self.fit_inputs["Nbeta_egmfs"] = len(simulation.beta_egmf_grid)
         self.fit_inputs["log10_beta_egmf_grid"] = np.log10(simulation.beta_egmf_grid.value)
-        self.fit_inputs["wexp_earth_grid"] = np.moveaxis(simulation.wexp_earth_grid, (0,1,2,3), (0,2,3,1))
-        self.fit_inputs["wexp_src_grid"] = simulation.wexp_src_grid.T
+        self.fit_inputs["log_wexp_earth_grid"] = np.moveaxis(simulation.log_wexp_earth_grid, (0,1,2,3), (0,2,3,1))
+        self.fit_inputs["log_wexp_src_grid"] = np.moveaxis(simulation.log_wexp_src_grid, (0,1,2,3), (0,2,3,1))
         self.fit_inputs["esrc_ratio_grid"] = simulation.esrc_ratio_grid.T
 
         # for omega_det, deal with this depending on gmf model
         if simulation.gmf_model == "None":
-            self.fit_inputs["omega_det"] = simulation.truths['skycoord_earth_dets'].cartesian.xyz.value.T
+            omega_det = simulation.truths['skycoord_earth_dets']
         else:
-            self.fit_inputs["omega_det"] = simulation.truths['skycoord_gb_truths_bp'].cartesian.xyz.value.T
+            omega_det = simulation.truths['skycoord_gb_truths_bp']
+        omega_det.representation_type = "cartesian"
+        self.fit_inputs["omega_det"] = omega_det.cartesian.xyz.value.T
 
 
         # warn if anything is None
@@ -257,8 +267,15 @@ class Analysis:
             raise ValueError(f"Missing fit inputs: {missing_keys}")
         
 
-    def compile_stan_model(self: Self) -> None:
-        """Compile the Stan model for the analysis."""
+    def compile_stan_model(self: Self, stan_threads : int = 4) -> None:
+        """
+        Compile the Stan model for the analysis.
+        
+        Parameters
+        ----------
+        stan_threads : int, default=4
+            number of stan threads per chain to run
+        """
         # get path to the stan file
         if self.analysis_type == self.energy_type:
             stan_path = get_path_to_stan_includes(self.energy_type)
@@ -269,6 +286,11 @@ class Analysis:
             stan_path = get_path_to_stan_includes(self.mass_type)
             path_to_stan_file = get_path_to_stan_file(
                 self.mass_type, "mass_model.stan"
+            )
+        elif self.analysis_type == self.spatial_type:
+            stan_path = get_path_to_stan_includes(self.spatial_type)
+            path_to_stan_file = get_path_to_stan_file(
+                self.spatial_type, "spatial_model.stan"
             )
         elif self.analysis_type == self.energy_mass_type:
             stan_path = get_path_to_stan_includes(self.energy_mass_type)
@@ -283,11 +305,15 @@ class Analysis:
         else:
             raise ValueError(f"Analysis type {self.analysis_type} not recognised.")
 
+        self.nthreads_per_chain = stan_threads
+        os.environ["STAN_NUM_THREADS"] = str(self.nthreads_per_chain)
+
         stanc_options = {"include-paths": str(stan_path)}
+        cpp_options = {"STAN_THREADS": True}
 
         # TODO: compiling stan like this is deprecated, should fix this at some point
         self.stan_model = CmdStanModel(
-            stan_file=str(path_to_stan_file), stanc_options=stanc_options
+            stan_file=str(path_to_stan_file), stanc_options=stanc_options, cpp_options=cpp_options
         )
 
     def prepare_fit_inputs(self: Self) -> None:
@@ -300,8 +326,28 @@ class Analysis:
         self.fit_inputs["N"] = self.data.uhecr.N
         self.fit_inputs["Edet"] = self.data.uhecr.energy
         self.fit_inputs["kappa_ds"] = self.data.uhecr.kappa_ds
-        self.fit_inputs["mean_lnA_det"] = self.data.uhecr.mean_lnA
-        self.fit_inputs["var_lnA_det"] = self.data.uhecr.var_lnA
+        self.fit_inputs["mean_lnA_det"] = self.data.detector.mean_lnA
+        self.fit_inputs["var_lnA_det"] = self.data.detector.var_lnA
+
+        self.fit_inputs["Eth"] = self.data.detector.Eth
+        self.fit_inputs["logE_stat_unc"] = self.data.detector.logE_stat
+        self.fit_inputs["logE_sys_unc"] = self.data.detector.logE_sys
+        self.fit_inputs["mean_lnA_stat_unc"] = self.data.detector.mean_lnA_stat
+        self.fit_inputs["var_lnA_stat_unc"] = self.data.detector.var_lnA_stat
+        self.fit_inputs["mean_lnA_sys_unc"] = self.data.detector.mean_lnA_sys
+        self.fit_inputs["var_lnA_sys_unc"] = self.data.detector.var_lnA_sys
+
+        # for omega_det, deal with this depending on gmf model
+        if self.gmf_model == "None":
+            self.fit_inputs["omega_det"] = self.data.uhecr.coord.cartesian.xyz.value.T
+        else:
+            self.fit_inputs["omega_det"] = self.data.uhecr.coords_gb.cartesian.xyz.value.T
+
+        # calculate the grain size
+        self.fit_inputs["grain_size"] = pick_grain_size(
+            self.fit_inputs["N"], self.nthreads_per_chain
+        )
+        print(f"Using grain size of {self.fit_inputs['grain_size']} for {self.fit_inputs['N']} events.")
         
         # warn if anything is None
         missing_keys = [k for k, v in self.fit_inputs.items() if v is None]
@@ -359,21 +405,20 @@ class Analysis:
         
         # compile the stan model
         if self.stan_model is None:
-            print("Compiling Stan model...")
-            self.compile_stan_model()
-            print("Done!")
+            raise ValueError("Run `compile_stan_model` first!")
 
         if warmup is None:
-            print("Setting warmup to same number as the iterations.")
-            warmup = iterations
+            print("Setting warmup to 1000.")
+            warmup = 1000
 
         inits_dict={
-            "alphas" : [-1, -1],
+            "alphas" : [-1, 1],
             "mass_fracs" : np.full((self.fit_inputs["Nsrcs"]+1, self.fit_inputs["NAsrcs"]), 1 / self.fit_inputs["NAsrcs"]),
-            "Etrue" : np.full(self.fit_inputs['N'], np.median(self.fit_inputs["Edet"])),
-            "flux_frac" : [0.1, 0.9],
+            "logE_true" : [np.median(np.log(self.fit_inputs["Edet"]))] * self.fit_inputs['N'],
+            # "flux_frac" : [0.1, 0.9],
             "log10_Ftot" : -2,
-            "beta_egmf" : 0.5
+            "beta_egmf" : 0.5,
+            "nu_lnAs": np.full(self.fit_inputs['N'], 0.5),
         }
         if inits is not None:
             print("Using user-provided initial values for the parameters.")
@@ -389,13 +434,14 @@ class Analysis:
             seed=seed,
             iter_warmup=warmup,
             inits=inits_dict,
+            parallel_chains=chains,
+            threads_per_chain=self.nthreads_per_chain,
             **kwargs,
         )
 
         # Diagnositics
         print("Checking all diagnostics...")
         print(self.fit.diagnose())
-        print(self.fit.summary())
 
         self.chain = self.fit.stan_variables()
         print("Done!")

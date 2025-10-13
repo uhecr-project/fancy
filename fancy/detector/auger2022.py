@@ -68,6 +68,9 @@ f_E = 0.156
 # threshold energy [EeV]
 Eth = 32
 
+# systematic uncertainty
+f_E_sys = -0.05
+
 # For convenience
 detector_properties = {}
 detector_properties['label'] = 'auger2022'
@@ -82,3 +85,4 @@ detector_properties['alpha_T'] = alpha_T
 detector_properties['Eth'] = Eth
 detector_properties["start_year"] = start_year
 detector_properties["period_start"] = period_start
+detector_properties["f_E_sys"] = f_E_sys

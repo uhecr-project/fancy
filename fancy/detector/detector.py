@@ -1,5 +1,6 @@
 import typing
 
+import os
 import h5py
 import matplotlib
 import numpy as np
@@ -10,6 +11,7 @@ from scipy import integrate, stats
 from typing_extensions import Self, Tuple
 
 from fancy.detector.exposure import m_dec, m_integrand
+from fancy.utils.package_data import get_path_to_datafiles
 from fancy.plotting import AllSkyMapCartopy as AllSkyMap
 
 __all__ = ["Detector"]
@@ -47,7 +49,7 @@ class Detector:
 
     __view_options: typing.ClassVar[list] = ["map", "decplot"]
 
-    def __init__(self: Self, label: str) -> None:
+    def __init__(self: Self, label: str, mass_model : str = "EPOS-LHC") -> None:
         """
         UHECR observatory information and instrument response.
 
@@ -73,12 +75,20 @@ class Detector:
         self.kappa_d = self.properties["kappa_d"]
         self.coord_uncertainty = np.sqrt(7552.0 / self.kappa_d)
 
-        self.energy_uncertainty = self.properties["f_E"]
+        self.logE_stat = self.properties["f_E"]
+        self.logE_sys = self.properties["f_E_sys"]
+
         self.Eth = float(self.properties["Eth"])
-        self.mass_model = None  # default model to describe mass composition
-        self.lnA_params = None  # parameters for lnA fit
-        self.Rth = None  # rigidity threshold value computed from mean lnA threshold
-        self.lnA_th = None  # lnA threshold
+
+        # mean and var lnA parameters
+        self.mass_model = mass_model  # default model to describe mass composition
+        self.mean_lnA = None
+        self.var_lnA = None
+        self.lnA_logE_grid = None
+        self.mean_lnA_stat = None
+        self.var_lnA_stat = None
+        self.mean_lnA_sys = None
+        self.var_lnA_sys = None
 
         # timing information
         self.start_year = self.properties["start_year"]
@@ -179,123 +189,44 @@ class Detector:
         declim_index = -1 if self.label.find("TA") != -1 else 0
         self.limiting_dec = (self.declination[m == 0])[declim_index] * u.rad
 
-    def set_lnA_params(
-        self: Self, meanlnA_file: str, mass_model: str = "EPOS-LHC"
+    def load_lnA_data(
+        self: Self, lnA_filename: str = "lnA_moments_data.h5"
     ) -> None:
-        """Set the fit parameters that fit mean lnA with logE."""
-        self.mass_model = mass_model  # set this as the object
-        self.lnA_params = np.zeros((2, 2))  # ((mean/sigma), (slope & intercept))
-
-        self.lnA_params[0, :] = np.genfromtxt(meanlnA_file, usecols=(1, 2))[
-            self.__mass_models[mass_model], :
-        ]
-        self.lnA_params[1, :] = np.array(
-            [0, 0.5]
-        )  # set it constant for now. TODO: We can also optionally read them from the resutls
-
-        # we want to translate the threshold energy to threshold rigidity
-        # then we can exploit rigidity conservation to use that threshold rigidity
-        # for the source.
-        # we use the mean lnA from the energy threshold as the threshold mass
-        self.lnA_th = self.lnA_params[0, 0] * np.log10(self.Eth) + self.lnA_params[0, 1]
-        self.Rth = self.Eth / (0.5 * np.exp(self.lnA_th))
-
-    def sample_lnAs(
-        self: Self,
-        energy: float,
-        Nsamples: int = 1000,
-        lnA_min: float = 0,
-        lnA_max: float = np.log(56),
-    ) -> np.ndarray:
         """
-        Sample the composition based on the lnA parameters.
+        Load the lnA data (mean and variance of lnA) from a given HDF5 file.
 
         Parameters
         ----------
-        energy : float
-            the energy of the UHECR in EeV
-        Nsamples : int, default=1000
-            the number of samples to sample for
-        lnA_min : float, default=0
-            the minimum value for lnA sampling
-        lnA_max : float, default = log(56)
-            maximum value for lnA sampling.
-            Defaults to value for iron
+        lnA_filename : str, default="lnA_moments_data.h5"
+            the filename of the HDF5 file containing the lnA data
+            If there is no 'sim' label, then it will find this file from the 
+            datafile path.
         """
-        # calculate mean and sigma lnA
-        mu_lnA, sigma_lnA = (
-            self.lnA_params[:, 0] * np.log10(energy) + self.lnA_params[:, 1]
-        )
+        if lnA_filename.find('sim') < 0:
+            path_to_lnA_data = get_path_to_datafiles(lnA_filename)
+        else:
+            path_to_lnA_data = lnA_filename
+        
+        if not os.path.exists(path_to_lnA_data):
+            raise FileNotFoundError(f"File {path_to_lnA_data} not found.")
 
-        # if mass groups, then use a uniform distribution
-        if self.mass_model.find("MG") != -1:
-            raise NotImplementedError("Still need to implement for mass groups.")
-        # if its hadronic interaction model, then use truncated normal
-        elif self.mass_model in set(["EPOS-LHC", "SIBYLL2.3"]):
-            a_lnA, b_lnA = (
-                (lnA_min - mu_lnA) / sigma_lnA,
-                (lnA_max - mu_lnA) / sigma_lnA,
-            )
+        with h5py.File(path_to_lnA_data, "r") as f:
+            f_lnA_data = f[self.label][self.mass_model]
+            self.lnA_logE_grid = np.log(10**(f_lnA_data["mean_log10E"][()])) # converting to logEV
+            self.mean_lnA = f_lnA_data["mean_lnA"][()]
+            self.var_lnA = f_lnA_data["var_lnA"][()]
+            self.mean_lnA_stat = f_lnA_data["mean_stat"][()]
+            self.var_lnA_stat = f_lnA_data["var_stat"][()]
 
-            lnA_samples = stats.truncnorm.rvs(
-                a=a_lnA, b=b_lnA, loc=mu_lnA, scale=sigma_lnA, size=Nsamples
-            )
-
-        return lnA_samples
-
-    def get_lnA_pdf(
-        self: Self,
-        lnA_grid : np.ndarray,
-        energy: float,
-        lnA_min: float = 0,
-        lnA_max: float = np.log(56),
-    ) -> np.ndarray:
-        """
-        Get the lnA pdf for the detector.
-
-        Returns
-        -------
-        lnA_pdf : np.ndarray
-            the lnA pdf for the detector
-        """
-        # calculate mean and sigma lnA
-        mu_lnA, sigma_lnA = (
-            self.lnA_params[:, 0] * np.log10(energy) + self.lnA_params[:, 1]
-        )
-
-        # if mass groups, then use a uniform distribution
-        if self.mass_model.find("MG") != -1:
-            raise NotImplementedError("Still need to implement for mass groups.")
-        # if its hadronic interaction model, then use truncated normal
-        elif self.mass_model in set(["EPOS-LHC", "SIBYLL2.3"]):
-            a_lnA, b_lnA = (
-                (lnA_min - mu_lnA) / sigma_lnA,
-                (lnA_max - mu_lnA) / sigma_lnA,
-            )
-
-            lnA_pdf = stats.truncnorm.pdf(
-                lnA_grid,
-                a=a_lnA,
-                b=b_lnA,
-                loc=mu_lnA,
-                scale=sigma_lnA,
-            )
-        return lnA_pdf
-    
-    def get_mu_sigma_lnA(self : Self, energy : float) -> Tuple[float, float]:
-        """
-        Return the mean and sigma lnA as a function of energy.
-
-        Parameters
-        ----------
-        energy : float
-            the energy of the UHECR in EeV
-        """
-        # calculate mean and sigma lnA
-        mu_lnA, sigma_lnA = (
-            self.lnA_params[:, 0] * np.log10(energy) + self.lnA_params[:, 1]
-        )
-        return mu_lnA, sigma_lnA
+            # for the systematic uncertainty, if simulation, just take the value.
+            # for data, we can take the average over all
+            # energy bins after combining up and down systematics in quadrature
+            if lnA_filename.find('sim') > 0:
+                self.mean_lnA_sys = f_lnA_data["mean_sys"][()]
+                self.var_lnA_sys = f_lnA_data["var_sys"][()]
+            else:
+                self.mean_lnA_sys = np.mean(np.sqrt(f_lnA_data["mean_sys_up"][()]**2 + f_lnA_data["mean_sys_low"][()]**2))
+                self.var_lnA_sys = np.mean(np.sqrt(f_lnA_data["var_sys_up"][()]**2 + f_lnA_data["var_sys_low"][()]**2))
     
     def sample_energies(self : Self, energy : float, n_samples : int = 1000) -> np.ndarray:
         """
@@ -306,7 +237,7 @@ class Detector:
         energy : float
             the true energy of the UHECR in EeV
         """
-        sigma_en = self.energy_uncertainty * energy
+        sigma_en = self.logE_stat * energy
         a_en, b_en = (self.Eth - energy) / sigma_en, (np.inf - energy) / sigma_en
         return stats.truncnorm.rvs(a_en, b_en, loc=energy, scale=sigma_en, size=n_samples)
 
@@ -322,7 +253,7 @@ class Detector:
                 stats.norm.cdf(
                     self.Eth,
                     loc=E,
-                    scale=self.energy_uncertainty * E,
+                    scale=self.logE_stat * E,
                 )
                 for E in energies
             ]

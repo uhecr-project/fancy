@@ -163,7 +163,7 @@ class WeightedExposure:
             Eth = np.min(self.energy_grid)
 
         if logE_stat is None:
-            logE_stat = self.data.detector.energy_uncertainty
+            logE_stat = self.data.detector.logE_stat
 
         P_Eth = np.array(
             [

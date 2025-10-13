@@ -35,7 +35,7 @@ class Uhecr:
         self.A = None
 
         # stubs for gmf-related information
-        self.hadr_model = None
+        self.mass_model = None
         self.coords_gb = None
         self.unit_vector_gb = None
         self.kappa_gmfs = None
@@ -122,7 +122,7 @@ class Uhecr:
             self.A = self.__find_area()
 
             # represents the angular uncertainty per UHECR
-            self.kappa_ds = data["kappa_ds"]
+            self.kappa_ds = data["kappa_ds"][()]
 
             self.mass_model = mass_model  # TODO: check why we need this
             # reading in GMF information

@@ -74,7 +74,7 @@ class Data:
         self: Self,
         label: str = "TA2015",
         mass_model: str = "EPOS-LHC",
-        mean_lnA_file: str = "meanlnA_logE_fit.txt",
+        lnA_moments_filename: str = "lnA_moments_data.h5",
     ) -> None:
         """
         Add a detector object to complement the data.
@@ -85,14 +85,12 @@ class Data:
             label of detector
         hadr_model : str
             hadronic interaction model used to get the composition information
-        mean_lnA_file : str, default="meanlnA_logE_fit.txt"
-            the file containing the mean lnA values
+        mean_lnA_file : str, default="lnA_moments_data.h5"
+            the file containing the mean and variance of lnA values
         """
-        new_detector = Detector(label)
+        new_detector = Detector(label, mass_model=mass_model)
         new_detector.get_exposure_properties()
-        new_detector.set_lnA_params(
-            meanlnA_file=get_path_to_meanlnA(mean_lnA_file), mass_model=mass_model
-        )
+        new_detector.load_lnA_data(lnA_filename=lnA_moments_filename)
 
         # define detector
         self.detector = new_detector

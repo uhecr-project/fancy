@@ -184,3 +184,22 @@ def source_spectrum(energy : np.ndarray, alpha : float, charge : float, Rmax : f
     Emax = charge * Rmax
     exp_cutoff = np.where(energy > Emax, np.exp(1 - energy / Emax), 1.0)
     return energy**-alpha * exp_cutoff
+
+def pick_grain_size(N : int, threads_per_chain : int):
+    """
+    Get the grain size for stan batch parallelisation.
+
+    Parameters
+    ----------
+    N : int
+        Number of events.
+    threads_per_chain : int
+        Number of threads per chain.
+    """
+    g = N / (10 * threads_per_chain)
+    if g < 20:
+        return 20
+    elif g > N:
+        return N
+    else:
+        return round(g)

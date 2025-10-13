@@ -794,7 +794,7 @@ class Simulation:
         # if None then use the energy uncertainty reported in
         # data.detector
         if logE_stat is None:
-            logE_stat = self.data.detector.energy_uncertainty
+            logE_stat = self.data.detector.logE_stat
 
         if kappa_det is None:
             kappa_det = self.data.detector.kappa_d
@@ -951,41 +951,18 @@ class Simulation:
                 self.truths["Nex"], fill_value=np.sqrt(7552 / self.config["kappa_det"])
             )  # no GMF deflection
             return self.truths["skycoord_earth_dets"], self.truths["kappa_gmfs"]
+        
         # first write data to temporary file such that Data can read it
         outfile = (
             tempfile.mkstemp()[1] + "sim.h5"
         )  # add keyword "sim" so that the data UHECR reader knows that the full path should be used instead
-        with h5py.File(outfile, "w") as f:
-            data_gr = f.create_group(self.detector_type)
-            data_gr.create_dataset("energy", data=self.truths["Etruths"])
-            data_gr.create_dataset(
-                "glon", data=self.truths["skycoord_earth_dets"].galactic.l.deg
-            )
-            data_gr.create_dataset(
-                "glat", data=self.truths["skycoord_earth_dets"].galactic.b.deg
-            )
+        lnA_outfile = tempfile.mkstemp()[1] + "lnA_sim.h5"
 
-            # following datasets are stubs, as they are not used in the backpropagation
-            data_gr.create_dataset(
-                "exposure_factors", data=np.full(self.truths["Nex"], 1.0)
-            )  # stub
-            data_gr.create_dataset("theta", data=np.full(self.truths["Nex"], 0))  # stub
-            data_gr.create_dataset(
-                "year",
-                data=np.full(
-                    self.truths["Nex"], self.data.detector.start_year, dtype=int
-                ),
-            )  # stub
-            data_gr.create_dataset(
-                "day", data=np.ones(self.truths["Nex"], dtype=int)
-            )  # stub
-            data_gr.create_dataset(
-                "kappa_ds", data=np.full(self.truths["Nex"], 1.0)
-            )  # stub
+        self.save(outfile, lnA_outfile, use_tmp=True)
 
         # add this to a newly generated data object
         data_for_bp = Data()
-        data_for_bp.add_detector(label=self.detector_type, mass_model=self.mass_model)
+        data_for_bp.add_detector(label=self.detector_type, mass_model=self.mass_model, lnA_moments_filename=lnA_outfile)
         data_for_bp.add_uhecr(
             label=self.detector_type,
             mass_model=self.mass_model,
@@ -995,24 +972,8 @@ class Simulation:
 
         # now perform GMF back propagation
         gmfbackprop = GMFBackPropagation(data_for_bp, self.gmf_model)
-
-        # setup the "detector response" through the mean and sigma lnA observed at Earth
-        # from our model
-        # NB: we pass in the true mean and variance of lnA at Earth
-        # as opposed to the detected one, since they will have
-        # systematic uncertainties, which can lead to
-        # weird values for mean and variance of lnA
-        gmfbackprop.setup_detector_response(
-            mean_lnA_grid=self.truths["mean_lnA_truths"],
-            var_lnA_grid=self.truths["var_lnA_truths"],
-            E_lnA_grid=self.lnA_energy_grid,
-            logE_stat=self.config["logE_stat"],
-            kappa_det=self.config["kappa_det"],
-            Emin=self.Emin,
-            Emax=self.Emax,
-        )
-        gmfbackprop.run_backpropagation(n_samples, njobs=n_jobs, parallel=False)
-        gmfbackprop.compute_kappa_gmf(n_jobs=n_jobs)
+        gmfbackprop.run_backpropagation(n_samples, njobs=n_jobs, parallel=True)
+        gmfbackprop.compute_kappa_gmf(njobs=n_jobs)
 
         # set properties
         if self.gmf_model != "None":
@@ -1024,7 +985,7 @@ class Simulation:
 
         return gmfbackprop.uhecr_coords_gb, gmfbackprop.kappa_gmfs
 
-    def save(self: Self, outfile: str) -> None:
+    def save(self: Self, outfile: str, lnA_outfile : str, use_tmp:bool = False) -> None:
         """
         Save the simulation file as a new UHECR file.
 
@@ -1032,7 +993,10 @@ class Simulation:
         ----------
         outfile: str
             the output file as an UHECR file
+        lnA_outfile: str
+            the output file for the mean and variance of lnA
         """
+        gmf_model = self.gmf_model if not use_tmp else "None"
         # get ra, dec, glon, glat
         glons_det, glats_det = (
             self.truths["skycoord_earth_dets"].galactic.l.deg,
@@ -1056,7 +1020,7 @@ class Simulation:
             simulated_data.create_dataset("day", data=days_sim)
             simulated_data.create_dataset("year", data=years_sim)
             simulated_data.create_dataset("theta", data=zeniths_sim)
-            if self.gmf_model != "None":
+            if gmf_model != "None":
                 simulated_data.create_dataset(
                     "rigidity", data=self.truths["rigidity_bp"]
                 )
@@ -1072,9 +1036,9 @@ class Simulation:
                 "kappa_ds", data=self.config["kappa_det"] * np.ones(self.truths["Nex"])
             )
 
-            if self.gmf_model != "None":
+            if gmf_model != "None":
                 gmfdefl_datas_grp = simulated_data.create_group("gmf")
-                config_key = f"{self.gmf_model}_{self.mass_model}"
+                config_key = f"{gmf_model}_{self.mass_model}"
                 if config_key in gmfdefl_datas_grp.keys():
                     del gmfdefl_datas_grp[config_key]
                 gmfdefl_datas_config_grp = gmfdefl_datas_grp.create_group(config_key)
@@ -1091,6 +1055,26 @@ class Simulation:
                     "glats_gb",
                     data=self.truths["skycoord_gb_truths_bp"].galactic.b.deg,
                 )
+
+        # save the mean and variance of lnA
+        with h5py.File(lnA_outfile, "a") as file:
+            if self.detector_type in list(file.keys()):
+                del file[self.detector_type]
+            det_grp = file.create_group(f"{self.detector_type}")
+            simulated_data = det_grp.create_group(self.mass_model)
+
+            simulated_data.create_dataset(
+                "mean_log10E", data=np.log10(self.lnA_energy_grid)
+            )
+
+            simulated_data.create_dataset(
+                "mean_lnA", data=self.truths["mean_lnA_dets"]
+            )
+            simulated_data.create_dataset("var_lnA", data=self.truths["var_lnA_dets"])
+            simulated_data.create_dataset("mean_stat", data=self.config["mean_lnA_stat"])
+            simulated_data.create_dataset("var_stat", data=self.config["var_lnA_stat"])
+            simulated_data.create_dataset("mean_sys", data=self.config["mean_lnA_sys"])
+            simulated_data.create_dataset("var_sys", data=self.config["var_lnA_sys"])
 
     def plot_samples(
         self: Self, plotting_mode: str = "all"
