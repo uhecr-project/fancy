@@ -59,11 +59,11 @@ functions {
   real event_likelihood_chunk(
       array [] int slice_i,         // indices of events in this chunk
       int start, int end,           // range of indices in this chunk
-      vector alphas,                // alphas per source
-      vector F,                     // fluxes per source
+      real alpha_bg,                // alphas per source
+      real F0,                     // fluxes per source
       array [] real alpha_grid,     // grid of alpha for energy interpolation
       array [] real logE_grid,    // grid of log10(E) for energy interpolation
-      array [] matrix espect_mfs,   // energy spectra at Earth per source
+      matrix espect_mfs,          // energy spectra at Earth per source
       vector logE_true,                 // latent true energies
       vector Edet,                  // detected energies
       real logE_stat_unc,           // statistical energy uncertainty (log-normal)
@@ -74,11 +74,7 @@ functions {
       array[] real lnA_logE_grid,   // grid of energy bins for finding the mean and variance of lnA per energy
       vector nu_lnAs,              // latent variable for sampling Zsrcs
       array [] vector omega_det,    // detected directions
-      vector kappa_ds,              // deflection parameters including GMF and arrival direction uncertainty
-      array [] vector omega_src,    // source directions
-      real beta_egmf,         // EGMF spread parameter
-      vector D,                     // source distances
-      int Nsrcs                     // number of sources
+      real beta_egmf         // EGMF spread parameter
   ) {
       real lp_chunk = 0.0;  // log likelihood for this chunk
       int len = size(slice_i); // number of events in this chunk
@@ -88,7 +84,7 @@ functions {
           int i = slice_i[n];
 
           // log likelihood per source + isotropic background
-          vector[Nsrcs+1] lp_i = log(F);
+          real lp_i = log(F0);
 
           // pre-computation for the rigidity
           // computing the mean and variance of lnA through a binned search
@@ -99,35 +95,14 @@ functions {
           real Zsrc = 0.5 * exp(mean_lnA + sqrt(var_lnA) * nu_lnAs[i]);
           real Rtrue = exp(logE_true[i]) / Zsrc;
           
-          // iterate over sources + isotropic background
-          for (k in 1:Nsrcs+1) {
-              // energy sampling (spectrum at Earth + truncated lognormal)
-              lp_i[k] += energy_spectrum_lpdf(logE_true[i] | alphas[k], logE_grid, alpha_grid, log(espect_mfs[k]));
-              lp_i[k] += truncated_lognormal_lpdf(Edet[i] | logE_true[i] + logE_sys_unc, logE_stat_unc, Emin, Emax);
+          // energy sampling (spectrum at Earth + truncated lognormal)
+          lp_i += energy_spectrum_lpdf(logE_true[i] | alpha_bg, logE_grid, alpha_grid, log(espect_mfs));
+          lp_i += truncated_lognormal_lpdf(Edet[i] | logE_true[i] + logE_sys_unc, logE_stat_unc, Emin, Emax);
+          /* isotropic background */
+          lp_i += -log(4*pi());
 
-              // spatial likelihood (EGMF and GMF deflections for source, isotropic for background)
-
-              if (k <= Nsrcs) {
-                /* GMF and EGMF deflections */
-                real kappa_egmf = get_kappa(Rtrue, beta_egmf, D[k]/10.0);
-                lp_i[k] += fik_lpdf(
-                  omega_det[i] | omega_src[k],
-                  kappa_egmf,
-                  kappa_ds[i]
-                );
-              }  
-              
-              else {
-                /* isotropic background */
-                lp_i[k] += -log(4*pi());
-                
-              }
-                  
-          }
-
-            // log-sum-exp over sources + isotropic background
-          lp_chunk += log_sum_exp(lp_i);
-      }
+          lp_chunk += lp_i;
+        }      
 
       return lp_chunk;
   }
@@ -215,16 +190,13 @@ transformed data {
 parameters {
 
     /* spectral information */
-    vector <lower=alpha_min, upper=alpha_max>  [Nsrcs+1] alphas;
+    real <lower=alpha_min, upper=alpha_max> alpha_bg;
 
     /* mass fractions (in future, 2D structure with sources) */
-    array[Nsrcs+1] simplex[NAsrcs] mass_fracs;
-
-    /* flux fraction per source (+ BG) */
-    simplex[Nsrcs+1] flux_frac;        
+    simplex[NAsrcs] mass_fracs_bg;   
 
     /* total flux AT EARTH */
-    real log10_Ftot;
+    real log10_F0;
 
     /* EGMF spread parameter, in nG Mpc^1/2 */
     real<lower=beta_egmf_min, upper=beta_egmf_max> beta_egmf;
@@ -233,45 +205,37 @@ parameters {
     vector <lower=logEmin, upper=logEmax>[N] logE_true;
 
     vector[N] nu_lnAs; /* latent variable for sampling lnA (Zsrcs) */
-    // real nu_lnA;
 
 }
 
 transformed parameters {
   // --- only quantities needed downstream ---
-  vector[Nsrcs+1] F;
-  array[Nsrcs+1] matrix [Nalphas, NEs] espect_mfs;
-  array[Nsrcs+1] matrix [Nalphas, NEbins] mulnA_mfs;
-  array[Nsrcs+1] matrix [Nalphas, NEbins] varlnA_mfs;
-  vector[Nsrcs+1] wexp_earths;
+  real F0 = pow(10.0, log10_F0);
+  matrix [Nalphas, NEs] espect_mfs;
+  matrix [Nalphas, NEbins] mulnA_mfs;
+  matrix [Nalphas, NEbins] varlnA_mfs;
+  real wexp_earth;
 
   // initialise
-  F = rep_vector(0.0, Nsrcs+1);
-  espect_mfs = rep_array(rep_matrix(0.0, Nalphas, NEs), Nsrcs+1);
-  mulnA_mfs = rep_array(rep_matrix(0.0, Nalphas, NEbins), Nsrcs+1);
-  varlnA_mfs = rep_array(rep_matrix(0.0, Nalphas, NEbins), Nsrcs+1);
-  wexp_earths = rep_vector(0.0, Nsrcs+1);
+  espect_mfs = rep_matrix(0.0, Nalphas, NEs);
+  mulnA_mfs = rep_matrix(0.0, Nalphas, NEbins);
+  varlnA_mfs = rep_matrix(0.0, Nalphas, NEbins);
+  wexp_earth = 0.0;
 
-  for (k in 1:Nsrcs+1) {
-    // flux at Earth
-    F[k] = pow(10.0, log10_Ftot) * flux_frac[k];
+  // accumulate spectra and weights
+  for (j in 1:NAsrcs) {
+    espect_mfs += mass_fracs_bg[j] * earth_spectrum_grid[Nsrcs+1,j];
+    mulnA_mfs += mass_fracs_bg[j] * mean_lnA_grid[Nsrcs+1,j];
+    varlnA_mfs += mass_fracs_bg[j] * var_lnA_grid[Nsrcs+1,j];
 
-    // accumulate spectra and weights
-    for (j in 1:NAsrcs) {
-      espect_mfs[k] += mass_fracs[k][j] * earth_spectrum_grid[k,j];
-      mulnA_mfs[k][,] += mass_fracs[k][j] * mean_lnA_grid[k,j];
-      varlnA_mfs[k][,] += mass_fracs[k][j] * var_lnA_grid[k,j];
-
-      wexp_earths[k] += mass_fracs[k][j] * exp(interp2d(
-        alphas[k], log10(beta_egmf),
-        alpha_grid, log10_beta_egmf_grid,
-        to_array_2d(log_wexp_earth_grid[k,j])
-      ));
-    }
+    wexp_earth += mass_fracs_bg[j] * exp(interp2d(
+      alpha_bg, log10(beta_egmf),
+      alpha_grid, log10_beta_egmf_grid,
+      to_array_2d(log_wexp_earth_grid[Nsrcs+1,j])
+    ));
   }
 
-  vector[Nsrcs+1] Nex_arr = F .* wexp_earths;
-  real Nex = sum(Nex_arr);
+  real Nex = F0 * wexp_earth;
 
   // mean and sigma lnA values
   vector[NEbins] mean_lnA_true = rep_vector(0.0, NEbins);
@@ -279,33 +243,24 @@ transformed parameters {
 
    // --- binned lnA likelihood ---
   for (l in 1:NEbins) {
-    for (k in 1:Nsrcs+1) {
 
-        /* calculate the mean and variance of lnA for each energy bin */
-        mean_lnA_true[l] += Nex_arr[k] * interpolate(alpha_grid_vec, to_vector(mulnA_mfs[k][,l]), alphas[k]) / Nex;
-        var_lnA_true[l] += Nex_arr[k] * interpolate(alpha_grid_vec, to_vector(varlnA_mfs[k][,l]), alphas[k]) / Nex;
+      /* calculate the mean and variance of lnA for each energy bin */
+      mean_lnA_true[l] += interpolate(alpha_grid_vec, to_vector(mulnA_mfs[,l]), alpha_bg);
+      var_lnA_true[l] += interpolate(alpha_grid_vec, to_vector(varlnA_mfs[,l]), alpha_bg);
 
-    }
   }
 }
 
 model {
   // --- priors ---
   // spectral indices : normal distribution
-  alphas ~ normal(0.0, 2.0);
-  // alphas[1] ~ normal(-0.5, 0.5);
-  // alphas[2] ~ normal(1.5, 0.5);
+  alpha_bg ~ normal(0.0, 2.0);
 
   // mass fractions : Dirichlet distribution per source
-  for (k in 1:Nsrcs+1) {
-    mass_fracs[k] ~ dirichlet([2.0, 3.0, 2.0]);
-  }
-
-  // flux fraction weights: Dirichlet-like prior
-  flux_frac ~ dirichlet([1.0, 3.0]);
+  mass_fracs_bg ~ dirichlet([2.0, 3.0, 2.0]);
 
   // total flux : normal distribution in log10
-  log10_Ftot ~ normal(-1.0, 3.0);
+  log10_F0 ~ normal(-1.0, 3.0);
 
   // magnetic spread: normal in log10
   // log10_beta_egmf ~ normal(log10(0.5), 0.1);
@@ -321,7 +276,7 @@ model {
               mean_lnA_stat_unc[l], 0.0);
     target += left_truncated_normal_lpdf(var_lnA_det[l] |
               var_lnA_true[l] + var_lnA_sys_unc,
-              var_lnA_stat_unc[l], -1.0);
+              var_lnA_stat_unc[l], -2.0);
   }
 
   // --- parallelized unbinned likelihood ---
@@ -329,8 +284,8 @@ model {
     event_likelihood_chunk,         // the per-chunk unbinned likelihood function
     event_ids,                      // the data to be sliced and passed to each chunk
     grain_size,                     // tuning parameter for the chunk size
-    alphas,                         // spectral indices
-    F,                              // fluxes per source
+    alpha_bg,                         // spectral indices
+    F0,                              // fluxes per source
     alpha_grid,                     // alpha grid for interpolation        
     logE_grid,                      // log10(E) grid for interpolation  
     espect_mfs,                     // energy spectra at Earth per source
@@ -344,11 +299,7 @@ model {
     lnA_logE_grid,                      // grid of energy bins in lnA
     nu_lnAs,                       // latent variable for sampling lnA
     omega_det,                      // detected directions
-    kappa_ds,                       // deflection parameters including GMF and arrival direction uncertainty
-    omega_src,                      // source directions
-    beta_egmf,                // EGMF spread parameter
-    D,                              // source distances
-    Nsrcs                           // number of sources
+    beta_egmf                // EGMF spread parameter
   );
 
   // --- Poisson normalization ---
@@ -356,64 +307,30 @@ model {
 }
 
 generated quantities {
-    real Nex_src = sum(Nex_arr[1:Nsrcs]);
-    real Nex_bg = Nex_arr[Nsrcs+1];
-
-    real src_frac = Nex_src / Nex;
 
     real log10_beta_egmf = log10(beta_egmf);
 
-    vector[Nsrcs] Lsrcs;
-
-    for (k in 1:Nsrcs) {
-      real esrc_ratios = 0.0;
-      real wexp_src = 0.0;
-
-      for (j in 1:NAsrcs) {
-        esrc_ratios += mass_fracs[k][j] * interpolate(alpha_grid_vec, esrc_ratio_grid[k,j], alphas[k]);
-        wexp_src += mass_fracs[k][j] * exp(interp2d(
-          alphas[k], log10_beta_egmf,
-          alpha_grid, log10_beta_egmf_grid,
-          to_array_2d(log_wexp_src_grid[k,j])
-        ));
-      }
-
-      Lsrcs[k] = F[k] * wexp_src / wexp_earths[k] * 4*pi() * square(D_flux[k]) * esrc_ratios;
-    
-    }
-
-    vector[Nsrcs] log10_Lsrcs = log10(Lsrcs);
-
-    
-
     // generate the log-likelihood of the event to get the
     // association probability as well
-    array[N] vector[Nsrcs+1] loglik_event;
-    array[N] vector[Nsrcs+1] loglik_event_energy;
-    array[N] vector[Nsrcs+1] loglik_event_spatial;
-    vector[N] kappa_egmfs;
+    array[N] real loglik_event;
+    array[N] real loglik_event_energy;
+    array[N] real loglik_event_spatial;
+
     for (i in 1:N) {
-      loglik_event[i] = log(F);
+      loglik_event[i] = log(F0);
       int Ebin_idx = binary_search(logE_true[i], lnA_logE_grid);
       real mean_lnA = mean_lnA_true[Ebin_idx];
       real var_lnA = var_lnA_true[Ebin_idx];
       real Zsrc = 0.5 * exp(mean_lnA + sqrt(var_lnA) * nu_lnAs[i]);
       real Rtrue = exp(logE_true[i]) / Zsrc;
-      for (k in 1:(Nsrcs+1)) {
-        loglik_event[i,k] += energy_spectrum_lpdf(logE_true[i] | alphas[k], logE_grid, alpha_grid, log(espect_mfs[k]));
-        loglik_event[i,k] += truncated_lognormal_lpdf(Edet[i] | logE_true[i] + logE_sys_unc, logE_stat_unc, Emin, Emax);
-        loglik_event_energy[i,k] = loglik_event[i,k];
-        if (k <= Nsrcs) {
-          real kappa_egmf = get_kappa(Rtrue, beta_egmf, D[k]/10.0);
-          loglik_event[i,k] += fik_lpdf(omega_det[i]|omega_src[k], kappa_egmf, kappa_ds[i]);
-          loglik_event_spatial[i,k] = fik_lpdf(omega_det[i]|omega_src[k], kappa_egmf, kappa_ds[i]);
 
-          kappa_egmfs[i] = kappa_egmf;
-        } else {
-          loglik_event[i,k] += -log(4*pi());
-          loglik_event_spatial[i,k] = -log(4*pi());
-        }
-      }
+      loglik_event[i] += energy_spectrum_lpdf(logE_true[i] | alpha_bg, logE_grid, alpha_grid, log(espect_mfs));
+      loglik_event[i] += truncated_lognormal_lpdf(Edet[i] | logE_true[i] + logE_sys_unc, logE_stat_unc, Emin, Emax);
+      loglik_event_energy[i] = loglik_event[i];
+
+
+      loglik_event[i] += -log(4*pi());
+      loglik_event_spatial[i] = -log(4*pi());
     }
         
 }

@@ -70,6 +70,7 @@ class Analysis:
         data: Data,
         gmf_model : str = "None",
         analysis_type: str = energy_mass_spatial_type,
+        background_only : bool = False
     ) -> None:
         """
         Container to manage the inputs and outputs of the fits.
@@ -80,12 +81,17 @@ class Analysis:
             Container that handles the source, uhecr, and detector information.
             All such information should already be initialised (see relevant class for
             more information.)
+        gmf_model: str, default="None"
+            The GMF model to consider. 
         analysis_type: str, default=energy_mass_spatial
             The analysis type to consider.
+        background_only : bool, default=False
+            Whether to consider only background sources in the analysis.
         """
         self.data = data
         self.gmf_model = gmf_model
         self.analysis_type = analysis_type
+        self.bg_only = background_only
 
         self.stan_model = None
         self.grid_config = None
@@ -277,30 +283,31 @@ class Analysis:
             number of stan threads per chain to run
         """
         # get path to the stan file
+        stan_ext = "_background.stan" if self.bg_only else ".stan"
         if self.analysis_type == self.energy_type:
             stan_path = get_path_to_stan_includes(self.energy_type)
             path_to_stan_file = get_path_to_stan_file(
-                self.energy_type, "energy_model.stan"
+                self.energy_type, f"energy_model{stan_ext}"
             )
         elif self.analysis_type == self.mass_type:
             stan_path = get_path_to_stan_includes(self.mass_type)
             path_to_stan_file = get_path_to_stan_file(
-                self.mass_type, "mass_model.stan"
+                self.mass_type, f"mass_model{stan_ext}"
             )
         elif self.analysis_type == self.spatial_type:
             stan_path = get_path_to_stan_includes(self.spatial_type)
             path_to_stan_file = get_path_to_stan_file(
-                self.spatial_type, "spatial_model.stan"
+                self.spatial_type, f"spatial_model{stan_ext}"
             )
         elif self.analysis_type == self.energy_mass_type:
             stan_path = get_path_to_stan_includes(self.energy_mass_type)
             path_to_stan_file = get_path_to_stan_file(
-                self.energy_mass_type, "energy_mass_model.stan"
+                self.energy_mass_type, f"energy_mass_model{stan_ext}"
             )
         elif self.analysis_type == self.energy_mass_spatial_type:
             stan_path = get_path_to_stan_includes(self.energy_mass_spatial_type)
             path_to_stan_file = get_path_to_stan_file(
-                self.energy_mass_spatial_type, "energy_mass_spatial_model.stan"
+                self.energy_mass_spatial_type, f"energy_mass_spatial_model{stan_ext}"
             )
         else:
             raise ValueError(f"Analysis type {self.analysis_type} not recognised.")
@@ -415,11 +422,19 @@ class Analysis:
             "alphas" : [-1, 1],
             "mass_fracs" : np.full((self.fit_inputs["Nsrcs"]+1, self.fit_inputs["NAsrcs"]), 1 / self.fit_inputs["NAsrcs"]),
             "logE_true" : [np.median(np.log(self.fit_inputs["Edet"]))] * self.fit_inputs['N'],
-            # "flux_frac" : [0.1, 0.9],
+            "flux_frac" : [0.1, 0.9],
             "log10_Ftot" : -2,
             "beta_egmf" : 0.5,
             "nu_lnAs": np.full(self.fit_inputs['N'], 0.5),
         }
+        # different parameter names and configurations for background only fits
+        if self.bg_only:
+            inits_dict.pop("flux_frac")
+            inits_dict.pop("log10_Ftot")
+            inits_dict.pop("alphas")
+            inits_dict.pop("mass_fracs")
+            inits_dict["alpha_bg"] = 1
+            inits_dict["mass_fracs_bg"] = np.full((self.fit_inputs["NAsrcs"]), 1 / self.fit_inputs["NAsrcs"])
         if inits is not None:
             print("Using user-provided initial values for the parameters.")
             inits_dict = inits
