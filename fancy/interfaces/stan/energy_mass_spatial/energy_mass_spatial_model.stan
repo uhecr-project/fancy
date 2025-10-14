@@ -321,7 +321,7 @@ model {
               mean_lnA_stat_unc[l], 0.0);
     target += left_truncated_normal_lpdf(var_lnA_det[l] |
               var_lnA_true[l] + var_lnA_sys_unc,
-              var_lnA_stat_unc[l], -1.0);
+              var_lnA_stat_unc[l], -2.0);
   }
 
   // --- parallelized unbinned likelihood ---

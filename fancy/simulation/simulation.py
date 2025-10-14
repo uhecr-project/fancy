@@ -805,6 +805,7 @@ class Simulation:
         Etruths_mean = np.zeros(self.truths["Nex"])
         kappa_egmf_truths_mean = np.zeros(self.truths["Nex"])
         rigidities_mean = np.zeros(self.truths["Nex"])
+        marks = np.zeros(self.truths["Nex"], dtype=int)
 
         uhecr_idx = 0
         N_starting_idx = 0  # the starting index for each source
@@ -880,6 +881,8 @@ class Simulation:
                     kappa_egmf_truths_mean[uhecr_idx] = kappa_egmf
                     rigidities_mean[uhecr_idx] = rig
 
+                    marks[uhecr_idx] = k  # store the source index as mark
+
                     uhecr_idx += 1
                     Nex_per_src_idx += 1
 
@@ -913,6 +916,7 @@ class Simulation:
         self.truths["rigidity_truths"] = rigidities_mean
         self.truths["exposure_factor"] = exposure_factor
         self.truths["kappa_ds"] = np.full(self.truths["Nex"], fill_value=kappa_det)
+        self.truths["marks"] = marks
 
         # also set the uncertainties here
         self.config["logE_stat"] = logE_stat
