@@ -219,14 +219,16 @@ class Detector:
             self.var_lnA_stat = f_lnA_data["var_stat"][()]
 
             # for the systematic uncertainty, if simulation, just take the value.
-            # for data, we can take the average over all
-            # energy bins after combining up and down systematics in quadrature
             if lnA_filename.find('sim') > 0:
                 self.mean_lnA_sys = f_lnA_data["mean_sys"][()]
                 self.var_lnA_sys = f_lnA_data["var_sys"][()]
             else:
-                self.mean_lnA_sys = np.mean(np.sqrt(f_lnA_data["mean_sys_up"][()]**2 + f_lnA_data["mean_sys_low"][()]**2))
-                self.var_lnA_sys = np.mean(np.sqrt(f_lnA_data["var_sys_up"][()]**2 + f_lnA_data["var_sys_low"][()]**2))
+                # for data, we set it to zero, but include the up and low values into a statistical uncertainty
+                self.mean_lnA_sys = 0.0
+                self.var_lnA_sys = 0.0
+
+                self.mean_lnA_stat = np.sqrt(self.mean_lnA_stat**2 + f_lnA_data["mean_sys_up"][()]**2 + f_lnA_data["mean_sys_low"][()]**2)
+                self.var_lnA_stat = np.sqrt(self.var_lnA_stat**2 + f_lnA_data["var_sys_up"][()]**2 + f_lnA_data["var_sys_low"][()]**2)
     
     def sample_energies(self : Self, energy : float, n_samples : int = 1000) -> np.ndarray:
         """

@@ -137,7 +137,7 @@ class Uhecr:
 
                 glons_gb = data["gmf"][config_key]["glons_gb"][()]
                 glats_gb = data["gmf"][config_key]["glats_gb"][()]
-                self.coords_gb = self.get_coordinates(glons_gb, glats_gb)
+                self.coords_gb = get_coordinates(glons_gb, glats_gb)
                 self.unit_vector_gb = self.coords_gb.cartesian.xyz.value.T
                 self.kappa_gmfs = data["gmf"][config_key]["kappa_gmf"][
                     ()

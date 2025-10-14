@@ -33,7 +33,7 @@ def get_mean_lnA_det(mean_lnA_true : np.ndarray, mean_lnA_unc : Union[np.ndarray
 def get_var_lnA_det(var_lnA_true : np.ndarray, var_lnA_unc: Union[np.ndarray, float]=0.5) -> np.ndarray:
     """Get the detected var lnA given true var lnA and uncertainty."""
     # assuming Gaussian uncertainty
-    a = (-1 - (var_lnA_true)) / var_lnA_unc
+    a = (-2 - (var_lnA_true)) / var_lnA_unc
     b = np.inf
     var_lnA_det = truncnorm.rvs(a, b, loc=var_lnA_true, scale=var_lnA_unc, size=1)
     return var_lnA_det

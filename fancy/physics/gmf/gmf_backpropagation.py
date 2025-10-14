@@ -404,7 +404,7 @@ class GMFBackPropagation:
                 var_lnA = truncnorm.rvs(
                     loc=self.var_lnA_grid[logE_idx] + self.var_lnA_sys,
                     scale=self.var_lnA_stat[logE_idx],
-                    a=-1,
+                    a=-2,
                     b=np.inf,
                     size=1
                 )
