@@ -799,6 +799,10 @@ class Simulation:
         if kappa_det is None:
             kappa_det = self.data.detector.kappa_d
 
+        accept_all_dirs = False
+        if self.data.detector.label == "all_sky":
+            accept_all_dirs = True
+
         skycoord_earth_dets = []
         exposure_factor = np.zeros(self.truths["Nex"])
         Edets = np.zeros(self.truths["Nex"])
@@ -853,6 +857,7 @@ class Simulation:
                     kappa_det,
                     detector_params=self.data.detector.params,
                     max_exposure=self.data.detector.exposure_max,
+                    accept_all_dirs=accept_all_dirs,
                 )
 
                 Edet = get_Edet(

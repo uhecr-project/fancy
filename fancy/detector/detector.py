@@ -25,6 +25,7 @@ class Detector:
         "auger2022",
         "auger2014",
         "auger2010",
+        "all_sky"
     )
 
     __mass_models: typing.ClassVar[dict] = {
@@ -130,6 +131,8 @@ class Detector:
             from fancy.detector.auger2014 import detector_properties
         elif label == "auger2010":
             from fancy.detector.auger2010 import detector_properties
+        elif label == "all_sky":
+            from fancy.detector.all_sky import detector_properties
 
         return detector_properties
 
@@ -176,18 +179,23 @@ class Detector:
 
         m = np.asarray([m_dec(d, self.params) for d in self.declination])
 
+        if self.label == "all_sky":
+            m = np.ones_like(m)
+            print("Warning: all_sky detector has uniform exposure.")
+
         self.exposure_max = np.max(m)
 
         # normalise to a maximum at 1
         # max value of exposure factor is normalization constant
         self.exposure_factor = m / self.exposure_max
 
-        # find the point at which the exposure factor is 0
-        # indexing value depends on TA or PAO
-        # since TA only sees from dec ~ -10deg,
-        # PAO only sees until dec ~ +45 deg
-        declim_index = -1 if self.label.find("TA") != -1 else 0
-        self.limiting_dec = (self.declination[m == 0])[declim_index] * u.rad
+        if self.label != "all_sky":
+            # find the point at which the exposure factor is 0
+            # indexing value depends on TA or PAO
+            # since TA only sees from dec ~ -10deg,
+            # PAO only sees until dec ~ +45 deg
+            declim_index = -1 if self.label.find("TA") != -1 else 0
+            self.limiting_dec = (self.declination[m == 0])[declim_index] * u.rad
 
     def load_lnA_data(
         self: Self, lnA_filename: str = "lnA_moments_data.h5"
