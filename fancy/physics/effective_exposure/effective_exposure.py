@@ -135,8 +135,12 @@ class EffectiveExposure:
         decs_healpy_grid = self.coords_healpy.icrs.dec.rad
 
         # compute exposure, which is function of declination only
-        p = self.data.detector.params
-        exposures = p[3] / p[4] * m_dec(decs_healpy_grid, p) * (u.km**2 * u.yr)
+        p = self.data.detector.params  # exposure parameters
+        m_grid = m_dec(decs_healpy_grid, p)
+        if self.data.detector.label == "all_sky":
+            m_grid = np.ones_like(m_grid)
+
+        exposures = p[3] / p[4] * m_grid * (u.km**2 * u.yr)
 
         # transform the coordinates back to galactic
         self.coords_healpy.transform_to("galactic")
