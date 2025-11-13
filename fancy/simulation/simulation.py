@@ -823,16 +823,16 @@ class Simulation:
 
             # get all the skycoords & energies related to this particular source
             skycoord_earths_per_src = self.truths["skycoord_earth_truths"][
-                N_starting_idx:Nsample_per_src
+                N_starting_idx:Nsample_per_src + N_starting_idx
             ]
             energies_per_src = self.truths["Etruths_samples"][
-                N_starting_idx:Nsample_per_src
+                N_starting_idx:Nsample_per_src + N_starting_idx
             ]
             kappa_egmfs_per_src = self.truths["kappa_egmf_truth_samples"][
-                N_starting_idx:Nsample_per_src
+                N_starting_idx:Nsample_per_src + N_starting_idx
             ]
             rigidities_per_src = self.truths["rigidity_truths_samples"][
-                N_starting_idx:Nsample_per_src
+                N_starting_idx:Nsample_per_src + N_starting_idx
             ]
 
             # here we randomise the order of the samples to ensure
