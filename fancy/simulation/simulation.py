@@ -4,6 +4,7 @@ import os
 import pickle
 import tempfile
 import h5py
+import healpy
 
 from astropy.coordinates import SkyCoord
 from astropy.coordinates import concatenate as concatenate_skycoords
@@ -14,17 +15,14 @@ from scipy.interpolate import CubicSpline, RegularGridInterpolator
 from typing_extensions import List, Self, Tuple, Union
 
 from fancy import Data
-from fancy.physics import EnergyLossModel, EffectiveExposure, LossLengthModel
 from fancy.physics.gmf import GMFLensing, GMFBackPropagation
-from fancy.physics.effective_exposure import WeightedExposure
 from fancy.interfaces.grid_generator import GridGenerator
-from fancy.utils.helpers import km_per_Mpc, theta_igmfs, truncated_lognorm_ccdf
+from fancy.utils.helpers import km_per_Mpc, theta_igmfs
 from fancy.simulation.helpers import (
     get_Edet,
     get_mean_lnA_det,
     get_var_lnA_det,
     get_direction_acceptance,
-    source_spectrum,
     simulate_zenith_angles,
 )
 from fancy.plotting import AllSkyMapCartopy as AllSkyMap
@@ -191,6 +189,8 @@ class Simulation:
         )
 
         grid_generator.get_weighted_exposures()
+        if self.gmf_model != "None":
+            grid_generator.get_gmf_exposure_interpolators()
 
         self.config = grid_generator.store_grids_to_dict()
 
@@ -220,6 +220,9 @@ class Simulation:
         self.log_wexp_src_grid = self.config["log_wexp_src_grid"]
         self.Emin = self.config["Emin"]
         self.Emax = self.config["Emax"]
+
+        if self.gmf_model != "None":
+            self.gmf_exp_interpolators = self.config["gmf_exp_interpolators"]
 
     def set_truths(
         self: Self,
@@ -874,9 +877,23 @@ class Simulation:
                     # store the glon and glat
                     # as well as the exposure factor
                     skycoord_earth_dets.append(skycoord_earth_det)
-                    exposure_factor[uhecr_idx] = (
-                        m_exp * self.data.detector.alpha_T / self.data.detector.M
-                    )
+
+                    exposure_factor[uhecr_idx] = m_exp
+                    # set the exposure weights at the galactic boundary if GMF is enabled
+                    if self.gmf_model != "None":
+                        ang_det = healpy.vec2ang(
+                            skycoord_earth_det.cartesian.xyz.value.T, lonlat=True
+                        )
+                        # apply the exposure correction for GMF lensing here
+                        gmf_exp = healpy.get_interp_val(
+                            self.gmf_exp_interpolator(rig),
+                            ang_det[0],
+                            ang_det[1],
+                            lonlat=True
+                        )
+                        # limit zero values to something super small
+                        gmf_exp[gmf_exp < 1e-30] = 1e-30
+                        exposure_factor[uhecr_idx] = gmf_exp
                     # we also sample for the detected energy here
                     # truncated lognormal with global shift
                     Edets[uhecr_idx] = Edet

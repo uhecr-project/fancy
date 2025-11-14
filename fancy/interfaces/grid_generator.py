@@ -17,6 +17,7 @@ from fancy.physics import (
     WeightedExposure,
     LossLengthModel,
 )
+from fancy.physics.gmf import GMFExposure
 
 charge_massid_map = {101: 1, 402: 2, 1407: 7, 2814: 14, 5626: 26}
 
@@ -55,6 +56,8 @@ class GridGenerator:
         self.mass_ids_grid = None
         self.beta_egmf_grid = None
         self.rigidity_grid = None
+
+        self.gmf_exp_interpolator = None
 
         self.spectrum_grid = None
         self.mean_lnA_grid = None
@@ -99,6 +102,7 @@ class GridGenerator:
             }.
         """
         self.eff_exp_model = EffectiveExposure(data=self.data, gmf_model=self.gmf_model)
+        # self.eff_exp_model.load_from_tables()
         self.eff_exp_model.initialise_grids(**effexp_model_kwargs)
         self.eff_exp_model.compute_effective_exposure(n_jobs=n_jobs)
 
@@ -110,6 +114,19 @@ class GridGenerator:
         self.rigidity_grid = self.eff_exp_model.rigidity_grid
         self.Nbeta_egmfs = len(self.beta_egmf_grid)
         self.Nrigidities = len(self.rigidity_grid)
+
+    def get_gmf_exposure_interpolators(
+        self : Self,
+    ) -> None:
+        """
+        Get the GMF exposure grid.
+        """
+        gmf_exp_runner = GMFExposure(data=self.data, gmf_model=self.gmf_model)
+        gmf_exp_runner.load_from_tables()
+
+        gmf_exp_runner.set_interpolated_deflected_exposure_map()
+
+        self.gmf_exp_interpolator = gmf_exp_runner.defl_exp_interpolators
 
     def get_energy_mass_grid(
         self: Self,
@@ -300,6 +317,7 @@ class GridGenerator:
             "Nrigidities": self.Nrigidities,
             "Emin": self.Emin,
             "Emax": self.Emax,
+            "gmf_exp_interpolator" : self.gmf_exp_interpolator
         }
         return grids_dict
     

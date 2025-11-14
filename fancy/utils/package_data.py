@@ -32,6 +32,14 @@ def get_path_to_stan_file(model_type: str, file_name : str) -> Path:
 
     return Path(file_path)
 
+def get_path_to_gmf_tables(file_name: str) -> Path:
+
+    file_path = resource_filename(
+        "fancy", "physics/gmf/tables/%s" % file_name
+    )
+
+    return Path(file_path)
+
 
 def get_path_to_lens(lens_name: str) -> Path:
 

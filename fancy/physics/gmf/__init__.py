@@ -4,6 +4,7 @@ import shutil
 
 from .gmf_lensing import GMFLensing
 from .gmf_backpropagation import GMFBackPropagation
+from .gmf_exposure import GMFExposure
 
 def install_gmflens():
     """Install GMFlens from CRPropa database."""

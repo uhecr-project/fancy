@@ -325,12 +325,61 @@ class EffectiveExposure:
             config_gr.create_dataset("source_distances", data=self.data.source.distance)
             config_gr.create_dataset("source_uvs", data=self.data.source.unit_vector)
             config_gr.create_dataset(
+                "rigidity_grid",
+                data=self.rigidity_grid.to_value(u.EV),
+            )
+            config_gr.create_dataset(
                 "log10_beta_egmf_grid",
                 data=np.log10(self.beta_egmf_grid.to_value(u.nG * u.Mpc**1 / 2)),
             )
             config_gr.create_dataset(
                 "log10_effective_exposure",
                 data=np.log10(self.effective_exposure.to_value(u.km**2 * u.yr)),
+            )
+
+    def load_from_tables(self : Self, infile : str = "effective_exposure_tables.h5") -> None:
+        """
+        Load tabulated results from h5py File.
+
+        Parameter:
+        ----------
+        infile : str
+            the path to the input file. must be in .h5 format.
+        """
+        assert infile.find(".h5") > 0, (
+            f"Input file {infile} needs to have a .h5 extension."
+        )
+        with h5py.File(str(get_path_to_exposure_tables(infile)), "r") as f:
+            config_label = f"{self.source_type}_{self.gmf_model}"
+            assert config_label in f.keys(), (
+                f"Configuration {config_label} not found in {infile}."
+            )
+            config_gr = f[config_label]
+
+            source_distances = config_gr["source_distances"][:]
+            source_uvs = config_gr["source_uvs"][:]
+            log10_beta_egmf_grid = config_gr["log10_beta_egmf_grid"][:]
+            rigidity_grid = config_gr["rigidity_grid"][:]
+            log10_effective_exposure = config_gr["log10_effective_exposure"][:]
+
+            # # check that the source distances and uvs match
+            assert np.allclose(
+                source_distances, self.data.source.distance
+            ), "Source distances do not match."
+            assert np.allclose(
+                source_uvs, self.data.source.unit_vector
+            ), "Source unit vectors do not match."
+
+            self.beta_egmf_grid = (
+                10 ** log10_beta_egmf_grid * (u.nG * u.Mpc**(1 / 2))
+            )
+            self.Nbeta_egmfs = len(self.beta_egmf_grid)
+
+            self.rigidity_grid = rigidity_grid * u.EV
+            self.NRs = len(self.rigidity_grid)
+
+            self.effective_exposure = (
+                10 ** log10_effective_exposure * (u.km**2 * u.yr)
             )
 
     def plot_heatmap(self : Self, source : str = "all") -> plt.Figure:
