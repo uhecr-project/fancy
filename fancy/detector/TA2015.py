@@ -42,7 +42,8 @@ ta_location = EarthLocation(lat = lat * u.rad, lon = lon * u.rad,
 # threshold incidence angle [rad]
 # above 10^19 eV, theta_m = 55
 # below this, theta_m = 45
-theta_m = np.deg2rad(55)
+# theta_m = np.deg2rad(55)
+theta_m = np.deg2rad(70)
 
 # define observation period based on Abu-Zayyad et al. 2013 and Abbasi et al. 2018
 # assume no off-time

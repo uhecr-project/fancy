@@ -233,6 +233,7 @@ class Analysis:
         self.fit_inputs["kappa_ds"] = simulation.truths["kappa_ds"]
         self.fit_inputs["mean_lnA_det"] = simulation.truths['mean_lnA_dets']
         self.fit_inputs["var_lnA_det"] = simulation.truths['var_lnA_dets']
+        self.fit_inputs['exposure_factor'] = simulation.truths['exposure_factor']
 
         self.fit_inputs["Eth"] = np.min(simulation.energy_grid)
         self.fit_inputs["logE_stat_unc"] = simulation.config["logE_stat"]
@@ -335,6 +336,7 @@ class Analysis:
         self.fit_inputs["kappa_ds"] = self.data.uhecr.kappa_ds
         self.fit_inputs["mean_lnA_det"] = self.data.detector.mean_lnA
         self.fit_inputs["var_lnA_det"] = self.data.detector.var_lnA
+        self.fit_inputs['exposure_factor'] = self.data.uhecr.exposure
 
         self.fit_inputs["Eth"] = self.data.detector.Eth
         self.fit_inputs["logE_stat_unc"] = self.data.detector.logE_stat

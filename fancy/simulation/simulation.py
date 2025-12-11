@@ -100,6 +100,8 @@ class Simulation:
         self.wexp_src_grid = None
         self.log_wexp_src_grid = None
 
+        self.gmf_exp_interpolators = None
+
         # shape parameters
         self.NEs = 0
         self.NElnAs = 0
@@ -223,6 +225,10 @@ class Simulation:
 
         if self.gmf_model != "None":
             self.gmf_exp_interpolators = self.config["gmf_exp_interpolators"]
+
+        # manually set the energy threshold based on the grid of energies
+        self.data.detector.Eth = self.Emin
+        self.data.detector.Eth_max = self.Emax
 
     def set_truths(
         self: Self,
@@ -886,13 +892,13 @@ class Simulation:
                         )
                         # apply the exposure correction for GMF lensing here
                         gmf_exp = healpy.get_interp_val(
-                            self.gmf_exp_interpolator(rig),
+                            self.gmf_exp_interpolators(rig),
                             ang_det[0],
                             ang_det[1],
                             lonlat=True
                         )
                         # limit zero values to something super small
-                        gmf_exp[gmf_exp < 1e-30] = 1e-30
+                        gmf_exp = max(gmf_exp, 1e-30)
                         exposure_factor[uhecr_idx] = gmf_exp
                     # we also sample for the detected energy here
                     # truncated lognormal with global shift

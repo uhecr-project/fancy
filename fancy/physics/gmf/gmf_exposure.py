@@ -283,6 +283,9 @@ class GMFExposure:
         # average over random realizations
         defl_exp_maps = np.mean(defl_exp_maps_all, axis=2)
 
+        # normalize with all maps
+        defl_exp_maps /= np.max(defl_exp_maps)
+
         # assign deflection exposure maps
         self.deflected_exposure_maps = defl_exp_maps
         self.config["rigidities"] = rigidities
@@ -376,7 +379,7 @@ class GMFExposure:
                 "Deflected exposure maps have not been computed yet. Please run calculate_deflected_exposure_map() first."
             )
         
-        with h5py.File(str(get_path_to_gmf_tables(outfile), "a")) as f:
+        with h5py.File(str(get_path_to_gmf_tables(outfile)), "a") as f:
             config_label = f"{self.detector}_{self.gmf_model}"
             if config_label in f.keys():
                 del f[config_label]
@@ -395,7 +398,7 @@ class GMFExposure:
                 "deflected_exposure_maps", data=self.deflected_exposure_maps, compression='gzip'
             )
             config_gr.create_dataset(
-                "exposure_map", data=self.exposure_map, compressed='gzip'
+                "exposure_map", data=self.exposure_map, compression='gzip'
             )
 
     def load_from_tables(self : Self, infile : str = "gmf_exposure.h5") -> None:
@@ -411,7 +414,7 @@ class GMFExposure:
             f"Input file {infile} needs to have a .h5 extension."
         )
         with h5py.File(str(get_path_to_gmf_tables(infile)), "r") as f:
-            config_label = f"{self.source_type}_{self.gmf_model}"
+            config_label = f"{self.detector}_{self.gmf_model}"
             assert config_label in f.keys(), (
                 f"Configuration {config_label} not found in {infile}."
             )

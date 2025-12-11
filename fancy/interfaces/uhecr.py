@@ -143,6 +143,12 @@ class Uhecr:
                     ()
                 ]  # deflection parameter
 
+                # read the exposure factors
+                if "exposure_factor" in data["gmf"][config_key]:
+                    self.exposure = data["gmf"][config_key][
+                        "exposure_factor"
+                    ][()]
+
                 # set the deflection parameter to the kappa_GMFs
                 self.kappa_ds = self.kappa_gmfs
 

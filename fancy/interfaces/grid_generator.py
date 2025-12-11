@@ -57,7 +57,7 @@ class GridGenerator:
         self.beta_egmf_grid = None
         self.rigidity_grid = None
 
-        self.gmf_exp_interpolator = None
+        self.gmf_exp_interpolators = None
 
         self.spectrum_grid = None
         self.mean_lnA_grid = None
@@ -126,7 +126,7 @@ class GridGenerator:
 
         gmf_exp_runner.set_interpolated_deflected_exposure_map()
 
-        self.gmf_exp_interpolator = gmf_exp_runner.defl_exp_interpolators
+        self.gmf_exp_interpolators = gmf_exp_runner.defl_exp_interpolators
 
     def get_energy_mass_grid(
         self: Self,
@@ -317,7 +317,7 @@ class GridGenerator:
             "Nrigidities": self.Nrigidities,
             "Emin": self.Emin,
             "Emax": self.Emax,
-            "gmf_exp_interpolator" : self.gmf_exp_interpolator
+            "gmf_exp_interpolators" : self.gmf_exp_interpolators
         }
         return grids_dict
     

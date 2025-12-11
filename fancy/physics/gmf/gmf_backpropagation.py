@@ -64,7 +64,7 @@ class GMFBackPropagation:
         self.logE_sys = data.detector.logE_sys
         self.kappa_det = data.detector.kappa_d  # default value for the detector kappa
         self.Eth = data.detector.Eth  # default value for the threshold energy in EeV
-        self.Eth_max = 1000  # default value for the maximum energy in EeV
+        self.Eth_max = data.detector.Eth_max  # default value for the maximum energy in EeV
 
         self.mean_lnA_grid = data.detector.mean_lnA
         self.var_lnA_grid = data.detector.var_lnA
@@ -142,7 +142,7 @@ class GMFBackPropagation:
         self.time_delays = np.zeros((self.Nuhecrs, Nsamples))
 
         # generate backtrakcing arguments for all uhecrs
-        bt_args = self.__generate_backtracking_arguments(Nsamples)
+        bt_args = self._generate_backtracking_arguments(Nsamples)
 
         # use joblib to run parallel jobs otherwise use serial
         if parallel:
@@ -348,7 +348,7 @@ class GMFBackPropagation:
         sim.add(obs)  # add observer at galactic boundary
         return sim
 
-    def __generate_backtracking_arguments(self: Self, Nsamples: int = 500) -> list:
+    def _generate_backtracking_arguments(self: Self, Nsamples: int = 500) -> list:
         """
         Generate arguments used for backtracking.
 
@@ -392,7 +392,7 @@ class GMFBackPropagation:
                     b=self.Eth_max,  # maximum energy in EeV
                 )
 
-                # now compute mean and variance of lnA, as a function of log10(E / EeV)
+                # # now compute mean and variance of lnA, as a function of log10(E / EeV)
                 logE_idx = np.digitize(np.log(E_samples[j]), self.lnA_logE_grid, right=True)-1
                 mean_lnA = truncnorm.rvs(
                     loc=self.mean_lnA_grid[logE_idx] + self.mean_lnA_sys,
@@ -408,6 +408,8 @@ class GMFBackPropagation:
                     b=np.inf,
                     size=1
                 )
+                # mean_lnA = self.mean_lnA_grid[logE_idx]
+                # var_lnA = self.var_lnA_grid[logE_idx]
 
                 # force non-negative variance
                 var_lnA = max(var_lnA, 1e-12)
@@ -514,6 +516,7 @@ class GMFBackPropagation:
                 self.time_delays,
                 np.sqrt(7552 / self.kappa_det),  # sigma_det in deg
                 self.kappa_det,
+                self.rigidities,
             ),
             open(outfile, "wb"),
             protocol=-1,

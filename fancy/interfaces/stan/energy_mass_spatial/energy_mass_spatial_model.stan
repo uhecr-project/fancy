@@ -78,7 +78,8 @@ functions {
       array [] vector omega_src,    // source directions
       real beta_egmf,         // EGMF spread parameter
       vector D,                     // source distances
-      int Nsrcs                     // number of sources
+      int Nsrcs,                     // number of sources
+      vector exp_factors          // exposure correction factors per event
   ) {
       real lp_chunk = 0.0;  // log likelihood for this chunk
       int len = size(slice_i); // number of events in this chunk
@@ -125,7 +126,10 @@ functions {
                   
           }
 
-            // log-sum-exp over sources + isotropic background
+          // apply exposure correction
+          lp_i += log(exp_factors[i]);
+
+          // log-sum-exp over sources + isotropic background
           lp_chunk += log_sum_exp(lp_i);
       }
 
@@ -147,6 +151,7 @@ data {
     int<lower=0> NEbins;  /* number of energy bins for lnA measurements */
     vector[N] Edet;
     array[N] unit_vector[3] omega_det; /* arrival directions */
+    vector[N] exposure_factor; /* exposure correction factors per event */
     vector[N] kappa_ds; /* deflection parameters, including GMF deflections + arrival direction uncertainty */
     array[NEbins] real mean_lnA_det;
     array[NEbins] real var_lnA_det;
@@ -175,8 +180,8 @@ data {
 
     /* systematic uncertainties, as global shifts */
     real logE_sys_unc;
-    real mean_lnA_sys_unc;
-    real var_lnA_sys_unc;
+    // real mean_lnA_sys_unc;
+    // real var_lnA_sys_unc;
 
     /* Nex */
     int <lower=0> Nbeta_egmfs;
@@ -196,7 +201,8 @@ transformed data {
   real logEmax = log(Emax);
 
   real alpha_min = min(alpha_grid);
-  real alpha_max = max(alpha_grid);
+  // real alpha_max = max(alpha_grid);
+  real alpha_max = 3.0;
 
   real beta_egmf_min = pow(10.0, min(log10_beta_egmf_grid));
   real beta_egmf_max = pow(10.0, max(log10_beta_egmf_grid));
@@ -234,6 +240,9 @@ parameters {
 
     vector[N] nu_lnAs; /* latent variable for sampling lnA (Zsrcs) */
     // real nu_lnA;
+
+    real mean_lnA_sys_unc;
+    real var_lnA_sys_unc;
 
 }
 
@@ -293,26 +302,26 @@ model {
   // --- priors ---
   // spectral indices : normal distribution
   alphas ~ normal(0.0, 2.0);
-  // alphas[1] ~ normal(-0.5, 0.5);
-  // alphas[2] ~ normal(1.5, 0.5);
 
   // mass fractions : Dirichlet distribution per source
   for (k in 1:Nsrcs+1) {
-    mass_fracs[k] ~ dirichlet([2.0, 3.0, 2.0]);
+    mass_fracs[k] ~ dirichlet([2.0, 2.0, 2.0]);
   }
 
   // flux fraction weights: Dirichlet-like prior
-  flux_frac ~ dirichlet([1.0, 3.0]);
+  flux_frac ~ dirichlet([1.0, 2.0]);
 
   // total flux : normal distribution in log10
   log10_Ftot ~ normal(-1.0, 3.0);
 
   // magnetic spread: normal in log10
-  // log10_beta_egmf ~ normal(log10(0.5), 0.1);
   beta_egmf ~ normal(0.0, 1.0);
 
   // latent variables for lnA : normal distribution
   nu_lnAs ~ normal(0.0, 1.0);
+
+  mean_lnA_sys_unc ~ normal(0.0, 1.0);
+  var_lnA_sys_unc ~ normal(0.0, 1.0);
 
    // --- binned lnA likelihood ---
   for (l in 1:NEbins) {
@@ -348,7 +357,8 @@ model {
     omega_src,                      // source directions
     beta_egmf,                // EGMF spread parameter
     D,                              // source distances
-    Nsrcs                           // number of sources
+    Nsrcs,                           // number of sources
+    exposure_factor               // exposure correction factors per event
   );
 
   // --- Poisson normalization ---
