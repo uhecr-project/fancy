@@ -80,7 +80,7 @@ class Detector:
         self.logE_sys = self.properties["f_E_sys"]
 
         self.Eth = float(self.properties["Eth"])
-        self.Eth_max = 250 # set default to 500 EeV
+        self.Eth_max = 250 # set default to 250 EeV
 
         # mean and var lnA parameters
         self.mass_model = mass_model  # default model to describe mass composition

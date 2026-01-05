@@ -192,7 +192,7 @@ data {
     array[Nsrcs, NAsrcs] vector[Nalphas] esrc_ratio_grid;
 
     /* computation parameters */
-    int<lower=1> grain_size; /* for reduce_sum, generatlly N / (4 * ncores) is a good estimate */
+    int<lower=1> grain_size; /* for reduce_sum, generally N / (4 * ncores) is a good estimate */
 }
 
 transformed data {
@@ -239,8 +239,7 @@ parameters {
     vector <lower=logEmin, upper=logEmax>[N] logE_true;
 
     vector[N] nu_lnAs; /* latent variable for sampling lnA (Zsrcs) */
-    // real nu_lnA;
-
+    /* global systematic uncertainties (shift) for lnA */
     real mean_lnA_sys_unc;
     real var_lnA_sys_unc;
 
@@ -315,11 +314,12 @@ model {
   log10_Ftot ~ normal(-1.0, 3.0);
 
   // magnetic spread: normal in log10
-  beta_egmf ~ normal(0.0, 1.0);
+  beta_egmf ~ normal(0.0, 3.0);
 
   // latent variables for lnA : normal distribution
   nu_lnAs ~ normal(0.0, 1.0);
 
+  // global systematic uncertainties (shift) for lnA : normal distribution
   mean_lnA_sys_unc ~ normal(0.0, 1.0);
   var_lnA_sys_unc ~ normal(0.0, 1.0);
 

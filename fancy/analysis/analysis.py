@@ -101,7 +101,7 @@ class Analysis:
 
     def initialise_grid(
         self : Self,
-        energy_gridparams: tuple = (32, 500, 50),
+        energy_gridparams: tuple = (32, 250, 50),
         effexp_model_kwargs : dict = {
             "beta_egmf_gridparams" : (1e-3, 50, 30),
             "R_gridparams" : (1, 500, 30),
