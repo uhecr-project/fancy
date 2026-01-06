@@ -777,7 +777,7 @@ class Simulation:
         self: Self,
         logE_stat: Union[float, None] = None,
         kappa_det: Union[float, None] = None,
-        logE_sys: float = 0.0,
+        logE_sys: Union[float, None] = None,
     ) -> Tuple[np.ndarray, List[SkyCoord]]:
         """
         Apply the detector response to the true values for the energy and direction.
@@ -797,7 +797,7 @@ class Simulation:
             If None, then the value from the data.detector is used.
         logE_sys : float, optional
             The systematic uncertainty on the log energy.
-            Default is 0.0.
+            If None, then the value from the data.detector is used.
             TODO: move this to when initialising the grid for the weighted exposure calculation.
         """
         # if None then use the energy uncertainty reported in
@@ -807,6 +807,9 @@ class Simulation:
 
         if kappa_det is None:
             kappa_det = self.data.detector.kappa_d
+
+        if logE_sys is None:
+            logE_sys = self.data.detector.logE_sys
 
         accept_all_dirs = False
         if self.data.detector.label == "all_sky":

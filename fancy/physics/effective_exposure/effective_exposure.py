@@ -61,6 +61,7 @@ class EffectiveExposure:
 
         # exposure parameters
         self.effective_exposure = None
+        self.__computed_effective_exposure = False
 
         if verbose:
             print(
@@ -211,6 +212,8 @@ class EffectiveExposure:
         for dis_idx, eff_exp in eff_exp_results:
             self.effective_exposure[dis_idx, ...] = eff_exp
 
+        self.__computed_effective_exposure = True
+
         return self.effective_exposure
 
     def compute_single_effective_exposure(self: Self, args: tuple) -> np.ndarray:
@@ -304,7 +307,7 @@ class EffectiveExposure:
 
         return weighted_map, lensed_map
 
-    def save(self: Self, outfile: str = "effective_exposure_tables.h5") -> None:
+    def save(self: Self, outfile: str = "effective_exposures.h5") -> None:
         """
         Save tabulated results to h5py File.
 
@@ -317,7 +320,7 @@ class EffectiveExposure:
             f"Output file {outfile} needs to have a .h5 extension."
         )
         with h5py.File(str(get_path_to_exposure_tables(outfile)), "a") as f:
-            config_label = f"{self.source_type}_{self.gmf_model}"
+            config_label = f"{self.source_type}_{self.detector_type}_{self.gmf_model}"
             if config_label in f.keys():
                 del f[config_label]
             config_gr = f.create_group(config_label)
@@ -330,14 +333,14 @@ class EffectiveExposure:
             )
             config_gr.create_dataset(
                 "log10_beta_egmf_grid",
-                data=np.log10(self.beta_egmf_grid.to_value(u.nG * u.Mpc**1 / 2)),
+                data=np.log10(self.beta_egmf_grid.to_value(u.nG * u.Mpc**(1 / 2))),
             )
             config_gr.create_dataset(
                 "log10_effective_exposure",
                 data=np.log10(self.effective_exposure.to_value(u.km**2 * u.yr)),
             )
 
-    def load_from_tables(self : Self, infile : str = "effective_exposure_tables.h5") -> None:
+    def load_from_tables(self : Self, infile : str = "effective_exposures.h5") -> None:
         """
         Load tabulated results from h5py File.
 
@@ -350,7 +353,7 @@ class EffectiveExposure:
             f"Input file {infile} needs to have a .h5 extension."
         )
         with h5py.File(str(get_path_to_exposure_tables(infile)), "r") as f:
-            config_label = f"{self.source_type}_{self.gmf_model}"
+            config_label = f"{self.source_type}_{self.detector_type}_{self.gmf_model}"
             assert config_label in f.keys(), (
                 f"Configuration {config_label} not found in {infile}."
             )
@@ -382,6 +385,8 @@ class EffectiveExposure:
                 10 ** log10_effective_exposure * (u.km**2 * u.yr)
             )
 
+        self.__computed_effective_exposure = True
+
     def plot_heatmap(self : Self, source : str = "all") -> plt.Figure:
         """
         Plot heatmap of the effective exposure as a function of rigidity and beta_egmf.
@@ -394,7 +399,7 @@ class EffectiveExposure:
             - "background": plots the background model
             - name of the individual source in the catalogue
         """
-        if self.effective_exposure is None:
+        if not self.__computed_effective_exposure:
             raise ValueError("Effective exposure has not been computed yet.")
         if source == "all":
             nsources = self.Nsrcs + 1

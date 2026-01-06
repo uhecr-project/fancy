@@ -313,7 +313,7 @@ class EnergyLossModel:
         for ims, ia in np.ndindex((len(self.massids), len(self.alphas))):
             # iterate over all distances for sources
             for idis in range(len(self.distances)):
-                res, _ = self.solver_res_src[idis][ims][ia]
+                res = self.solver_res_src[idis][ims][ia]
                 # NB: internal conversion to GeV
                 _, spect_from_src = res.get_solution_group(
                     "CR", egrid=egrid_GeV, epow=0
@@ -441,7 +441,7 @@ class EnergyLossModel:
                 obj={
                     "results": solver_container,
                     "dinits": self.distances,
-                    "alphas ": self.alphas,
+                    "alphas": self.alphas,
                     "massids": self.massids,
                 },
                 file=f,
@@ -536,7 +536,7 @@ class EnergyLossModel:
                 obj={
                     "results": solver_container,
                     "dmins": dmins,
-                    "alphas ": self.alphas,
+                    "alphas": self.alphas,
                     "massids": self.massids,
                 },
                 file=f,
