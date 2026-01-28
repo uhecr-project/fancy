@@ -180,8 +180,8 @@ data {
 
     /* systematic uncertainties, as global shifts */
     real logE_sys_unc;
-    // real mean_lnA_sys_unc;
-    // real var_lnA_sys_unc;
+    real mean_lnA_sys_unc;
+    real var_lnA_sys_unc;
 
     /* Nex */
     int <lower=0> Nbeta_egmfs;
@@ -240,8 +240,8 @@ parameters {
 
     vector[N] nu_lnAs; /* latent variable for sampling lnA (Zsrcs) */
     /* global systematic uncertainties (shift) for lnA */
-    real mean_lnA_sys_unc;
-    real var_lnA_sys_unc;
+    // real mean_lnA_sys_unc;
+    // real var_lnA_sys_unc;
 
 }
 
@@ -320,8 +320,8 @@ model {
   nu_lnAs ~ normal(0.0, 1.0);
 
   // global systematic uncertainties (shift) for lnA : normal distribution
-  mean_lnA_sys_unc ~ normal(0.0, 1.0);
-  var_lnA_sys_unc ~ normal(0.0, 1.0);
+  // mean_lnA_sys_unc ~ normal(0.0, 1.0);
+  // var_lnA_sys_unc ~ normal(0.0, 1.0);
 
    // --- binned lnA likelihood ---
   for (l in 1:NEbins) {

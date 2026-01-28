@@ -97,6 +97,7 @@ class AllSkyMapCartopy:
         ylims=[-90, 90],
         fontsize=12,
         draw_ylabels=True,
+        text_zorder=10,
         **kwargs,
     ):
         """
@@ -150,6 +151,7 @@ class AllSkyMapCartopy:
                 ha="center",
                 transform=self.transform,
                 fontsize=fontsize,
+                zorder=text_zorder
             )
 
     def set_extent(self, glob=True, extents=None):

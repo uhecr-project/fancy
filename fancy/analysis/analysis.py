@@ -55,6 +55,8 @@ class Analysis:
         "logE_sys_unc",
         "mean_lnA_stat_unc",
         "var_lnA_stat_unc",
+        "mean_lnA_sys_unc",
+        "var_lnA_sys_unc",
         "Nbeta_egmfs",
         "log10_beta_egmf_grid",
         "log_wexp_earth_grid",
@@ -342,8 +344,8 @@ class Analysis:
         self.fit_inputs["logE_sys_unc"] = self.data.detector.logE_sys
         self.fit_inputs["mean_lnA_stat_unc"] = self.data.detector.mean_lnA_stat
         self.fit_inputs["var_lnA_stat_unc"] = self.data.detector.var_lnA_stat
-        # self.fit_inputs["mean_lnA_sys_unc"] = self.data.detector.mean_lnA_sys
-        # self.fit_inputs["var_lnA_sys_unc"] = self.data.detector.var_lnA_sys
+        self.fit_inputs["mean_lnA_sys_unc"] = self.data.detector.mean_lnA_sys
+        self.fit_inputs["var_lnA_sys_unc"] = self.data.detector.var_lnA_sys
 
         # for omega_det, deal with this depending on gmf model
         if self.gmf_model == "None":

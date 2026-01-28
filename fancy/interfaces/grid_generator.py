@@ -102,6 +102,7 @@ class GridGenerator:
             }.
         """
         self.eff_exp_model = EffectiveExposure(data=self.data, gmf_model=self.gmf_model)
+        print(f"Loading effective exposure tables for detector {self.detector_type} with mass model {self.mass_model}...")
         self.eff_exp_model.load_from_tables()
         # self.eff_exp_model.initialise_grids(**effexp_model_kwargs)
         # self.eff_exp_model.compute_effective_exposure(n_jobs=n_jobs)

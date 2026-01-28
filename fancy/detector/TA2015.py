@@ -63,7 +63,8 @@ deltat2 = (period_2_end - period_2_start).days / 365.25
 deltat = (period_last_end - period_1_start).days / 365.25
 
 # total exposures in [km^2 sr yr]
-alpha_T = 8300  # 2008 - 2015
+alpha_T = 30500.0
+# alpha_T = 8300  # 2008 - 2015
 alpha_T_1 = 3690  # 2008 - 2012
 alpha_T_2 = alpha_T - alpha_T_1  # 2012 - 2015
 
@@ -91,7 +92,8 @@ kappa_d = kappa_dval(sig_omega)
 f_E = 0.20
 
 # threshold energy [EeV]
-Eth = 57
+# Eth = 57
+Eth = 32
 
 # systematic uncertainty
 f_E_sys = 0.05

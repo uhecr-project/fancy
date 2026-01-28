@@ -63,7 +63,7 @@ kappa_d = kappa_dval(sig_omega)
 
 # reconstruction uncertainty for energy
 # calibration unc ~ 14%, SD resolution ~ 7%, add in quadrature
-f_E = 0.156
+f_E = 0.15
 
 # threshold energy [EeV]
 Eth = 32
