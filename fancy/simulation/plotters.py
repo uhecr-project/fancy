@@ -211,8 +211,10 @@ def plot_energy(data: Data, truths: dict, config: dict):
             # get the energy grid
             axs[0].loglog(
                 config["energy_grid"],
-                config["spectrum_grid"][:, alpha_idx, ims, k]
-                * truths["mass_fracs"][ims, k],
+                config["energy_grid"]**3 
+                * config["spectrum_grid"][:, alpha_idx, ims, k]
+                * truths["mass_fracs"][ims, k]
+                * truths["Nex_per_src"][k] / truths["Nex"],
                 color=f"C{ims}",
                 ls=dis_lss[k],
                 label=f"{massid}, {dis_labels[k]}",
@@ -220,13 +222,15 @@ def plot_energy(data: Data, truths: dict, config: dict):
 
         tot_espect_per_d = np.sum(
             config["spectrum_grid"][:, alpha_idx, :, k]
-            * truths["mass_fracs"][np.newaxis, :, k],
+            * truths["mass_fracs"][np.newaxis, :, k]
+            * truths["Nex_per_src"][k] / truths["Nex"],
             axis=-1,
         )
 
         axs[0].loglog(
             config["energy_grid"],
-            tot_espect_per_d,
+            config["energy_grid"]**3 
+            * tot_espect_per_d,
             color="k",
             ls=dis_lss[k],
             lw=2,
@@ -249,7 +253,7 @@ def plot_energy(data: Data, truths: dict, config: dict):
 
     # plot total spectrum
     axs[0].loglog(
-        config["energy_grid"], tot_espect, color="k", ls="-", lw=3, label="total"
+        config["energy_grid"], config["energy_grid"]**3 * tot_espect, color="k", ls="-", lw=3, label="total"
     )
 
     # plot total histogrammed energy samples
@@ -270,19 +274,20 @@ def plot_energy(data: Data, truths: dict, config: dict):
     )
     yvals = hist_vals / np.sum(hist_vals) / np.diff(ebinedges)
     yerr = np.sqrt(hist_vals) / np.sum(hist_vals) / np.diff(ebinedges)  # Error bars
+    xvals = np.sqrt(ebinedges[:-1] * ebinedges[1:])
     axs[0].errorbar(
-        np.sqrt(ebinedges[:-1] * ebinedges[1:]),
-        yvals,
-        yerr=yerr,
+        xvals,
+        xvals**3 * yvals,
+        yerr=xvals**3 * yerr,
         fmt="o",
         label="sampled",
         color="gray",
     )
 
     axs[0].set_xlabel(r"$E$ [EeV]")
-    axs[0].set_ylabel("energy spectrum")
+    axs[0].set_ylabel("E$^3$ energy spectrum")
     axs[0].legend()
-    axs[0].set_ylim(ymin=1e-7, ymax=1)
+    axs[0].set_ylim(ymin=1e0, ymax=1e6)
 
     axs[1].set_xlabel(r"$E$ [EeV]")
     axs[1].set_ylabel("counts")

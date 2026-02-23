@@ -128,7 +128,7 @@ class Simulation:
             "Rmax": 1.7,
         },
         energy_loss_model_kwargs: dict = {
-            "massids" : [402, 1407, 2814]
+            "massids" : [402, 1407, 2814, 5626]
         },
     ) -> None:
         """
@@ -234,10 +234,11 @@ class Simulation:
         self: Self,
         mass_fracs: np.ndarray,
         alphas: np.ndarray,
-        source_fraction: float = 0.5,
         beta_egmf: float = 1,
+        source_fraction: Union[float, None] = None,
         Lsrcs: Union[np.ndarray, None] = None,
         Nex: Union[int, None] = None,
+        F0 : Union[float, None] = None,
     ) -> dict:
         """
         Set the truths for the simulation.
@@ -250,18 +251,27 @@ class Simulation:
         alphas : np.ndarray
             the spectral indices for the sources
             Shape should be (Nsrcs+1)
-        source_fraction : float, optional
-            fraction of sources to use, by default 0.5
         beta_egmf : float, optional
             the magnetic spread parameter to use.
             By default set to 1 nG Mpc^1/2
+        source_fraction : float, optional
+            fraction of sources to use, by default 0.5.
+            If None, then Lsrcs or Nex must be provided.
         Lsrcs: np.ndarray, optional, default = None
             luminosity of the sources, by default None
             If None, then Nex must be provided.
             Shape must be (Nsrcs,)
         Nex : int, optional
             total number of expected events in the simulation, by default None
-            If None, then Lsrcs must be provided.
+            If None, then Lsrcs and F0 must be provided.
+
+            This only works in tandem with source_fraction at the moment.
+        F0 : float, optional
+            the background flux at Earth, by default None.
+            Units in km^-2 sr^-1 yr^-1.
+            If None, then Nex or source_fraction must be provided.
+
+            This only works in tandem with Lsrcs at the moment.
 
         Returns
         -------
@@ -287,6 +297,14 @@ class Simulation:
             raise ValueError(
                 "Either Lsrcs or Nex must be provided. Both cannot be provided."
             )
+        if (source_fraction is not None) and (F0 is not None):
+            raise ValueError(
+                "Either source_fraction or F0 must be provided. Both cannot be provided."
+            )
+        if (source_fraction is None) and (F0 is None):
+            raise ValueError(
+                "Either source_fraction or F0 must be provided. Both cannot be None."
+            )
 
         # set the truth values based on the input parameters
         fit_truths = {
@@ -297,6 +315,7 @@ class Simulation:
             "Lsrcs": Lsrcs,
             "Nex": Nex,
             "src_frac": source_fraction,
+            "F0" : F0
         }
 
         fit_truths = self.__calculate_flux_truths(fit_truths)
@@ -421,6 +440,7 @@ class Simulation:
             fit_truths["log10_Lsrcs"] = np.log10(Lsrcs)
             fit_truths["Nex_src"] = Nex_src
             fit_truths["Nex_bg"] = Nex_bg
+            fit_truths["F0"] = Nex_bg / w_exp_earth[-1]
 
             # fit_truths["Nex_per_src"] = np.ceil(
             #     np.concatenate([Fearths_truths, [Nex_bg / w_exp_earth[-1]]]).T * w_exp_earth
@@ -443,13 +463,21 @@ class Simulation:
                 Nex_src += Fearths_truths[k] * w_exp_earth[k]
             
             Nex_src = np.ceil(Nex_src).astype(int)
-            Nex = np.ceil(Nex_src / fit_truths["src_frac"]).astype(int)
-            Nex_bg = Nex - Nex_src
+
+            if fit_truths["src_frac"] is not None:
+                Nex = np.ceil(Nex_src / fit_truths["src_frac"]).astype(int)
+                Nex_bg = Nex - Nex_src
+                fit_truths["F0"] = Nex_bg / w_exp_earth[-1]
+            elif fit_truths["F0"] is not None:
+                Nex_bg = np.ceil(fit_truths["F0"] * w_exp_earth[-1]).astype(int)
+                Nex = Nex_src + Nex_bg
+                fit_truths["src_frac"] = Nex_src / Nex
 
             fit_truths["Nex"] = Nex
             fit_truths["Nex_src"] = Nex_src
             fit_truths["Nex_bg"] = Nex_bg
             fit_truths["log10_Lsrcs"] = np.log10(fit_truths["Lsrcs"])
+            
         else:
             raise ValueError(
                 "Either Nex or Lsrcs must be provided in the truths dictionary."
@@ -461,12 +489,10 @@ class Simulation:
         fit_truths["Qearths"] = Qearths_truths
         fit_truths["Fsrcs"] = Fsrcs_truths
         fit_truths["log10_Fsrcs"] = np.log10(Fsrcs_truths)
+        fit_truths["log10_F0"] = np.log10(fit_truths["F0"])
 
         fit_truths["Fearths"] = Fearths_truths
         fit_truths["log10_Fearths"] = np.log10(Fearths_truths)
-
-        fit_truths["F0"] = Nex_bg / w_exp_earth[-1]
-        fit_truths["log10_F0"] = np.log10(fit_truths["F0"])
 
         fit_truths["Ftot"] = np.sum(Fearths_truths) + fit_truths["F0"]
         fit_truths["log10_Ftot"] = np.log10(fit_truths["Ftot"])

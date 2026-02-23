@@ -117,7 +117,7 @@ class Analysis:
             "Rmax": 1.7,
         },
         energy_loss_model_kwargs: dict = {
-            "massids":[402, 1407, 2814]
+            "massids":[402, 1407, 2814, 5626]
         },
     ) -> None:
         """

@@ -39,9 +39,20 @@ class GMFBackPropagation:
         "UF23baseTurb",
         "PT11",
         "TF17",
-        "KST24",  # to include in the future
+        "KST24",
     ]  # type of GMF models
     __Nmodels_UF23: int = 8  # number of models in UF23
+
+    # __UF23_models : typing.ClassVar[dict] = {
+    #     "base" : 0,
+    #     "neCL" : 1,
+    #     "expX" : 2,
+    #     "spur" : 3,
+    #     "cre10" : 4,
+    #     "synCG" : 5,
+    #     "twistX" : 6,
+    #     "nebCor" : 7
+    # }
 
     def __init__(self: Self, data: Data, gmf_model: str = "JF12") -> None:
         """
@@ -74,7 +85,12 @@ class GMFBackPropagation:
         self.var_lnA_stat = data.detector.var_lnA_stat
         self.var_lnA_sys = data.detector.var_lnA_sys
 
-
+        # if "UF23" in gmf_model:
+        #     uf23_model = gmf_model.replace("UF23", "").replace("Turb", "")
+        #     assert uf23_model in self.__UF23_models.keys() or uf23_model == "all", (
+        #         f"GMF model {gmf_model} is not an available UF23 model."
+        #     )
+        # else:
         assert gmf_model in self.__gmf_models, (
             f"GMF model {gmf_model} is not an available GMF model."
         )
@@ -316,15 +332,23 @@ class GMFBackPropagation:
         elif self.gmf_model == "UF23all":
             gmf_cr = cr.UF23Field(mt_num)
 
-        elif self.gmf_model == "UF23base":
-            gmf_cr = cr.UF23Field(0)
-
         elif self.gmf_model == "UF23allTurb":
             seed = int(rng.integers(low=0, high=10000000))
 
             gmf_cr = cr.UF23Field(mt_num)
             gmf_cr.randomStriated(seed)
             gmf_cr.randomTurbulent(seed)
+
+        # elif self.gmf_model.find("UF23") != -1:
+        #     uf23_model = self.gmf_model.replace("UF23", "").replace("Turb", "")
+        #     gmf_cr = cr.UF23Field(self.__UF23_models[uf23_model])
+
+        #     if self.gmf_model.find("Turb") != -1:
+        #         seed = int(rng.integers(low=0, high=10000000))
+
+                
+        #         gmf_cr.randomStriated(seed)
+        #         gmf_cr.randomTurbulent(seed)
 
         elif self.gmf_model == "UF23baseTurb":
             seed = int(rng.integers(low=0, high=10000000))
@@ -337,6 +361,8 @@ class GMFBackPropagation:
             gmf_cr = cr.PT11Field()
         elif self.gmf_model == "TF17":
             gmf_cr = cr.TF17Field()
+        elif self.gmf_model == "KST24":
+            gmf_cr = cr.KST24Field()
         else:
             raise NotImplementedError(
                 f"GMF model {self.gmf_model} is not implemented yet."

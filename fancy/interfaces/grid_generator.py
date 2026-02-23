@@ -85,7 +85,7 @@ class GridGenerator:
     def get_effective_exposure_grid(
         self: Self,
         effexp_model_kwargs: dict = {
-            "beta_egmf_gridparams": (1e-3, 1, 10),
+            "beta_egmf_gridparams": (1e-3, 10, 10),
             "R_gridparams": (1, 500, 25),
         },
         n_jobs: int = 4,
