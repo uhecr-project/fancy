@@ -103,6 +103,7 @@ class Analysis:
     def initialise_grid(
         self : Self,
         energy_gridparams: tuple = (32, 250, 50),
+        lnA_energy_gridparams = None,
         effexp_model_kwargs : dict = {
             "beta_egmf_gridparams" : (1e-3, 50, 30),
             "R_gridparams" : (1, 500, 30),
@@ -117,7 +118,7 @@ class Analysis:
             "Rmax": 1.7,
         },
         energy_loss_model_kwargs: dict = {
-            "massids":[402, 1407, 2814, 5626]
+            "massids":[201, 402, 1407, 2814, 5626]
         },
     ) -> None:
         """
@@ -132,6 +133,11 @@ class Analysis:
             The grid parameters for the energy values.
             given as (E_min, E_max, Nbins), by default (32, 500, 50).
             The grid will be logarithmically spaced in energy.
+        lnA_energy_gridparams : tuple, optional
+            The grid parameters for the lnA energy values.
+            given as (E_min, E_max, Nbins), by default None.
+
+            If None, the grid parameters will be set to match the energy grid of the detector's lnA mass model.
         effexp_model_kwargs : dict, optional
             The keyword arguments for the effective exposure model.
             By default set to:
@@ -170,11 +176,14 @@ class Analysis:
         )
 
         # for the lnA grid parameters, use the detector's mass model
-        lnA_energy_gridparams = (
-            np.min(np.exp(self.data.detector.lnA_logE_grid)),
-            np.max(np.exp(self.data.detector.lnA_logE_grid)),
-            len(self.data.detector.lnA_logE_grid),
-        )
+        if lnA_energy_gridparams is not None:
+            lnA_energy_gridparams = lnA_energy_gridparams
+        else:
+            lnA_energy_gridparams = (
+                np.min(np.exp(self.data.detector.lnA_logE_grid)),
+                np.max(np.exp(self.data.detector.lnA_logE_grid)),
+                len(self.data.detector.lnA_logE_grid),
+            )
 
         grid_generator.get_energy_mass_grid(
             energy_gridparams,
@@ -322,7 +331,7 @@ class Analysis:
 
         # TODO: compiling stan like this is deprecated, should fix this at some point
         self.stan_model = CmdStanModel(
-            stan_file=str(path_to_stan_file), stanc_options=stanc_options, cpp_options=cpp_options
+            stan_file=str(path_to_stan_file), stanc_options=stanc_options, cpp_options=cpp_options, force_compile=True
         )
 
     def prepare_fit_inputs(self: Self) -> None:
@@ -358,6 +367,10 @@ class Analysis:
             self.fit_inputs["N"], self.nthreads_per_chain
         )
         print(f"Using grain size of {self.fit_inputs['grain_size']} for {self.fit_inputs['N']} events.")
+
+        # NB: should update this to deal with non-data data types
+        if self.analysis_type == self.spatial_type:
+            pass
         
         # warn if anything is None
         missing_keys = [k for k, v in self.fit_inputs.items() if v is None]
@@ -429,10 +442,15 @@ class Analysis:
             "log10_Ftot" : -2,
             "beta_egmf" : 0.5,
             "nu_lnAs": np.full(self.fit_inputs['N'], 0.5),
-            "mean_lnA_sys_unc" : 0.0,
-            "var_lnA_sys_unc" : 0.0,
         }
         # different parameter names and configurations for background only fits
+        if self.spatial_type:
+            inits_dict.pop("alphas")
+            inits_dict.pop("mass_fracs")
+            inits_dict.pop("logE_true")
+        elif self.energy_type:
+            inits_dict.pop("beta_egmf")
+            inits_dict.pop("nu_lnAs")
         if self.bg_only:
             inits_dict.pop("flux_frac")
             inits_dict.pop("log10_Ftot")

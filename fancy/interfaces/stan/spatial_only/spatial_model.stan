@@ -102,12 +102,8 @@ functions {
           
           // iterate over sources + isotropic background
           for (k in 1:Nsrcs+1) {
-              // energy sampling (spectrum at Earth + truncated lognormal)
-              lp_i[k] += energy_spectrum_lpdf(logE_true[i] | alphas[k], logE_grid, alpha_grid, log(espect_mfs[k]));
-              lp_i[k] += truncated_lognormal_lpdf(Edet[i] | logE_true[i] + logE_sys_unc, logE_stat_unc, Emin, Emax);
 
               // spatial likelihood (EGMF and GMF deflections for source, isotropic for background)
-
               if (k <= Nsrcs) {
                 /* GMF and EGMF deflections */
                 real kappa_egmf = get_kappa(Rtrue, beta_egmf, D[k]/10.0);
@@ -192,7 +188,13 @@ data {
     array[Nsrcs, NAsrcs] vector[Nalphas] esrc_ratio_grid;
 
     /* computation parameters */
-    int<lower=1> grain_size; /* for reduce_sum, generally N / (4 * ncores) is a good estimate */
+    int<lower=1> grain_size; /* for reduce_sum, generatlly N / (4 * ncores) is a good estimate */
+
+    /* imports for fixed parameters */
+    vector <lower=min(alpha_grid), upper=max(alpha_grid)>  [Nsrcs+1] alphas;
+    array[Nsrcs+1] simplex[NAsrcs] mass_fracs;
+
+    vector <lower=log(Emin), upper=log(Emax)>[N] logE_true;
 }
 
 transformed data {
@@ -220,12 +222,6 @@ transformed data {
 
 parameters {
 
-    /* spectral information */
-    vector <lower=alpha_min, upper=alpha_max>  [Nsrcs+1] alphas;
-
-    /* mass fractions (in future, 2D structure with sources) */
-    array[Nsrcs+1] simplex[NAsrcs] mass_fracs;
-
     /* flux fraction per source (+ BG) */
     simplex[Nsrcs+1] flux_frac;        
 
@@ -235,17 +231,12 @@ parameters {
     /* EGMF spread parameter, in nG Mpc^1/2 */
     real<lower=beta_egmf_min, upper=beta_egmf_max> beta_egmf;
 
-    /* latent parameters for energy */
-    vector <lower=logEmin, upper=logEmax>[N] logE_true;
-
     vector[N] nu_lnAs; /* latent variable for sampling lnA (Zsrcs) */
-    /* global systematic uncertainties (shift) for lnA */
-    // real mean_lnA_sys_unc;
-    // real var_lnA_sys_unc;
 
 }
 
 transformed parameters {
+
   // --- only quantities needed downstream ---
   vector[Nsrcs+1] F;
   array[Nsrcs+1] matrix [Nalphas, NEs] espect_mfs;
@@ -299,13 +290,6 @@ transformed parameters {
 
 model {
   // --- priors ---
-  // spectral indices : normal distribution
-  alphas ~ normal(0.0, 2.0);
-
-  // mass fractions : Dirichlet distribution per source
-  for (k in 1:Nsrcs+1) {
-    mass_fracs[k] ~ dirichlet([2.0, 2.0, 2.0]);
-  }
 
   // flux fraction weights: Dirichlet-like prior
   flux_frac ~ dirichlet([2.0, 2.0]);
@@ -314,24 +298,10 @@ model {
   log10_Ftot ~ normal(-1.0, 3.0);
 
   // magnetic spread: normal in log10
-  beta_egmf ~ normal(0.0, 1.0);
+  beta_egmf ~ normal(0.0, 3.0);
 
   // latent variables for lnA : normal distribution
   nu_lnAs ~ normal(0.0, 1.0);
-
-  // global systematic uncertainties (shift) for lnA : normal distribution
-  // mean_lnA_sys_unc ~ normal(0.0, 1.0);
-  // var_lnA_sys_unc ~ normal(0.0, 1.0);
-
-   // --- binned lnA likelihood ---
-  for (l in 1:NEbins) {
-    target += left_truncated_normal_lpdf(mean_lnA_det[l] |
-              mean_lnA_true[l] + mean_lnA_sys_unc,
-              mean_lnA_stat_unc[l], 0.0);
-    target += left_truncated_normal_lpdf(var_lnA_det[l] |
-              var_lnA_true[l] + var_lnA_sys_unc,
-              var_lnA_stat_unc[l], -2.0);
-  }
 
   // --- parallelized unbinned likelihood ---
   target += reduce_sum(

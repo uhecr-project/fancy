@@ -128,7 +128,7 @@ class Simulation:
             "Rmax": 1.7,
         },
         energy_loss_model_kwargs: dict = {
-            "massids" : [402, 1407, 2814, 5626]
+            "massids" : [201, 402, 1407, 2814, 5626]
         },
     ) -> None:
         """
@@ -451,7 +451,7 @@ class Simulation:
             Qearths_truths = Qsrcs_truths * w_exp_earth[:-1] / w_exp_src
 
             Fsrcs_truths = np.zeros(self.Nsrcs)  # excluding the background source
-            Fearths_truths = np.zeros(self.Nsrcs)  # including the background source
+            Fearths_truths = np.zeros(self.Nsrcs)  # excluding the background source
             Nex_src = 0.0
             for k in range(self.Nsrcs):
                 Fsrcs_truths[k] = Qsrcs_truths[k] / (
