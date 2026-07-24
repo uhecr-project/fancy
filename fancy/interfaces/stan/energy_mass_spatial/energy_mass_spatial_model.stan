@@ -11,14 +11,14 @@ functions {
      /**
     * sample from the energy spectrum at Earth
     * @param E energy in EeV
-    * @param alpha spectral index
     * @param log_en_grid : grid of log(E) values for interpolation
-    * @param alph_grid : grid of alpha values for interpolation
     * @param espect_mfs : mass fraction weighted energy spectrum at Earth. Shape in (Nalphas, NEs)
     * @return log probability density of the energy spectrum at Earth
     */
-    real energy_spectrum_lpdf(real logE, real alpha, array [] real log_en_grid, array [] real alph_grid, matrix log_espect_mfs) {
-        return interp2d(alpha, logE, alph_grid, log_en_grid, to_array_2d(log_espect_mfs));
+    real energy_spectrum_lpdf(real logE, 
+                          vector log_en_grid,
+                          vector log_espect_at_alpha) {
+        return interpolate(log_en_grid, log_espect_at_alpha, logE);
     }
 
     /**
@@ -38,21 +38,15 @@ functions {
     * Define the fik PDF.
     * NB: Cannot be vectorised.
     * Uses sinh(kappa) ~ exp(kappa)/2 
-    * approximation for kappa > 100.
+    * approximation for kappa > 100. -> 
+    * Now taken care in utils/log_sinh()
     */
+
     real fik_lpdf(vector v, vector mu, real kappa, real kappa_d) {
-    
-    real lprob;
-    real inner = sqrt(dot_self((kappa_d * v) + (kappa * mu)));
-    
-    if (kappa > 100 || kappa_d > 100) {
-        lprob = log(kappa * kappa_d) - log(4 * pi() * inner) + inner - (kappa + kappa_d) + log(2);
-    }
-    else {   
-        lprob = log(kappa * kappa_d) - log(4 * pi() * sinh(kappa) * sinh(kappa_d)) + log(sinh(inner)) - log(inner);
-    }
-    
-    return lprob;   
+      real inner = sqrt(dot_self((kappa_d * v) + (kappa * mu)));
+      return log(kappa) + log(kappa_d) - log(4 * pi())
+            - log_sinh(kappa) - log_sinh(kappa_d)
+            + log_sinh(inner) - log(inner);
     }
 
 // --- per-event likelihood chunk for reduce_sum ---
@@ -62,8 +56,8 @@ functions {
       vector alphas,                // alphas per source
       vector F,                     // fluxes per source
       array [] real alpha_grid,     // grid of alpha for energy interpolation
-      array [] real logE_grid,    // grid of log10(E) for energy interpolation
-      array [] matrix espect_mfs,   // energy spectra at Earth per source
+      vector logE_grid,    // grid of log10(E) for energy interpolation
+      array [] vector log_espect_at_alpha,   // energy spectra at Earth per source
       vector logE_true,                 // latent true energies
       vector Edet,                  // detected energies
       real logE_stat_unc,           // statistical energy uncertainty (log-normal)
@@ -71,7 +65,7 @@ functions {
       real Emin, real Emax,          // energy range for truncated lognormal likelihood
       vector mean_lnA_true,         // mean lnA per energy bin per source
       vector var_lnA_true,          // variance of lnA per energy bin per source
-      array[] real lnA_logE_grid,   // grid of energy bins for finding the mean and variance of lnA per energy
+      vector lnA_logE_grid_vec,   // grid of energy bins for finding the mean and variance of lnA per energy
       vector nu_lnAs,              // latent variable for sampling Zsrcs
       array [] vector omega_det,    // detected directions
       vector kappa_ds,              // deflection parameters including GMF and arrival direction uncertainty
@@ -92,9 +86,9 @@ functions {
           vector[Nsrcs+1] lp_i = log(F);
 
           // pre-computation for the rigidity
-          // computing the mean and variance of lnA through a binned search
-          real mean_lnA = mean_lnA_true[binary_search(logE_true[i], lnA_logE_grid)];
-          real var_lnA = var_lnA_true[binary_search(logE_true[i], lnA_logE_grid)];
+          // computing the mean and variance of lnA through interpolation
+          real mean_lnA = interpolate(lnA_logE_grid_vec, mean_lnA_true, logE_true[i]);
+          real var_lnA  = interpolate(lnA_logE_grid_vec, var_lnA_true,  logE_true[i]);
 
           // // calculating the true charge and rigidity
           real Zsrc = 0.5 * exp(mean_lnA + sqrt(var_lnA) * nu_lnAs[i]);
@@ -102,9 +96,8 @@ functions {
           
           // iterate over sources + isotropic background
           for (k in 1:Nsrcs+1) {
-              // energy sampling (spectrum at Earth + truncated lognormal)
-              lp_i[k] += energy_spectrum_lpdf(logE_true[i] | alphas[k], logE_grid, alpha_grid, log(espect_mfs[k]));
-              lp_i[k] += truncated_lognormal_lpdf(Edet[i] | logE_true[i] + logE_sys_unc, logE_stat_unc, Emin, Emax);
+              // energy sampling (spectrum at Earth + truncated lognormal -> now after the k-loop)
+              lp_i[k] += energy_spectrum_lpdf(logE_true[i] | logE_grid, log_espect_at_alpha[k]);
 
               // spatial likelihood (EGMF and GMF deflections for source, isotropic for background)
 
@@ -131,6 +124,10 @@ functions {
 
           // log-sum-exp over sources + isotropic background
           lp_chunk += log_sum_exp(lp_i);
+
+          // we add the detector uncertainties of the energies here. 
+          // since it doesnt depend on the distance k
+          lp_chunk += truncated_lognormal_lpdf(Edet[i] | logE_true[i] + logE_sys_unc, logE_stat_unc, Emin, Emax);
       }
 
       return lp_chunk;
@@ -212,6 +209,8 @@ transformed data {
 
   // --- precompute 1D arrays for interpolation ---
   vector[Nalphas] alpha_grid_vec = to_vector(alpha_grid);
+  vector[NEs] logE_grid_vec = to_vector(logE_grid);
+  vector[NEbins] lnA_logE_grid_vec = to_vector(lnA_logE_grid);
 
   // number of events for reduced sum
     array[N] int event_ids;
@@ -252,6 +251,7 @@ transformed parameters {
   array[Nsrcs+1] matrix [Nalphas, NEbins] mulnA_mfs;
   array[Nsrcs+1] matrix [Nalphas, NEbins] varlnA_mfs;
   vector[Nsrcs+1] wexp_earths;
+  array[Nsrcs+1] vector[NEs] log_espect_at_alpha;
 
   // initialise
   F = rep_vector(0.0, Nsrcs+1);
@@ -275,6 +275,17 @@ transformed parameters {
         alpha_grid, log10_beta_egmf_grid,
         to_array_2d(log_wexp_earth_grid[k,j])
       ));
+
+    }
+
+    // since the alpha is only source dependent, and not dependent
+    // per event, we can already just interpolate it here and store the
+    // spectrum per "distance". 
+    // this is fine since we are already in the transformed_parameters block.
+    for (ee in 1:NEs) {
+      log_espect_at_alpha[k][ee] = interpolate(alpha_grid_vec,
+                                              log(espect_mfs[k][, ee]),
+                                              alphas[k]);
     }
   }
 
@@ -304,7 +315,7 @@ model {
 
   // mass fractions : Dirichlet distribution per source
   for (k in 1:Nsrcs+1) {
-    mass_fracs[k] ~ dirichlet([2.0, 2.0, 2.0]);
+    mass_fracs[k] ~ dirichlet([2.0, 2.0, 2.0, 2.0]);
   }
 
   // flux fraction weights: Dirichlet-like prior
@@ -313,8 +324,10 @@ model {
   // total flux : normal distribution in log10
   log10_Ftot ~ normal(-1.0, 3.0);
 
-  // magnetic spread: normal in log10
-  beta_egmf ~ normal(0.0, 1.0);
+  // magnetic spread: normal distribution
+  // prior uncertainty is 10 since we do not have enough
+  // handle on it.
+  beta_egmf ~ normal(0.0, 10.0);
 
   // latent variables for lnA : normal distribution
   nu_lnAs ~ normal(0.0, 1.0);
@@ -341,8 +354,8 @@ model {
     alphas,                         // spectral indices
     F,                              // fluxes per source
     alpha_grid,                     // alpha grid for interpolation        
-    logE_grid,                      // log10(E) grid for interpolation  
-    espect_mfs,                     // energy spectra at Earth per source
+    logE_grid_vec,                      // log10(E) grid for interpolation  
+    log_espect_at_alpha,                 // log(energy spectra) at Earth per source (also per alpha)
     logE_true,                      // latent true energies
     Edet,                           // detected energies
     logE_stat_unc,                  // statistical energy uncertainty (log-normal)
@@ -350,7 +363,7 @@ model {
     Emin, Emax,     // energy range for truncated lognormal likelihood
     mean_lnA_true,                  // mean lnA per energy bin per source
     var_lnA_true,                   // variance of lnA per energy bin per source
-    lnA_logE_grid,                      // grid of energy bins in lnA
+    lnA_logE_grid_vec,                      // grid of energy bins in lnA
     nu_lnAs,                       // latent variable for sampling lnA
     omega_det,                      // detected directions
     kappa_ds,                       // deflection parameters including GMF and arrival direction uncertainty
@@ -410,7 +423,7 @@ generated quantities {
       real Zsrc = 0.5 * exp(mean_lnA + sqrt(var_lnA) * nu_lnAs[i]);
       real Rtrue = exp(logE_true[i]) / Zsrc;
       for (k in 1:(Nsrcs+1)) {
-        loglik_event[i,k] += energy_spectrum_lpdf(logE_true[i] | alphas[k], logE_grid, alpha_grid, log(espect_mfs[k]));
+        loglik_event[i,k] += energy_spectrum_lpdf(logE_true[i] | logE_grid_vec, log_espect_at_alpha[k]);
         loglik_event[i,k] += truncated_lognormal_lpdf(Edet[i] | logE_true[i] + logE_sys_unc, logE_stat_unc, Emin, Emax);
         loglik_event_energy[i,k] = loglik_event[i,k];
         if (k <= Nsrcs) {

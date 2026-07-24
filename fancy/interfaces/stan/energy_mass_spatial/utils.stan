@@ -232,19 +232,30 @@ real truncated_normal_lpdf(real x, real mu, real sigma, real xmin, real xmax) {
     return log_pdf - log_cdf_diff; // Adjusted log PDF for truncation
 }
 
+// real truncated_lognormal_lpdf(real x, real mu, real sigma, real xmin, real xmax) {
+//     real log_pdf = lognormal_lpdf(x | mu, sigma); // Log PDF of lognormal
+//     real log_cdf_diff = log(lognormal_cdf(xmax | mu, sigma) - lognormal_cdf(xmin | mu, sigma)); // Log of normalization constant
+//     return log_pdf - log_cdf_diff; // Adjusted log PDF for truncation
+// }
+
+// real left_truncated_normal_lpdf(real x, real mu, real sigma, real xmin) {
+//     if (x < xmin) {
+//         return negative_infinity(); // x is outside the truncation range
+//     }
+//     real log_pdf = normal_lpdf(x | mu, sigma); // Log PDF of normal
+//     real log_cdf_diff = log(1 - Phi((xmin-mu) / sigma)); // Log of normalization constant
+//     return log_pdf - log_cdf_diff; // Adjusted log PDF for truncation
+// }
+
 real truncated_lognormal_lpdf(real x, real mu, real sigma, real xmin, real xmax) {
-    real log_pdf = lognormal_lpdf(x | mu, sigma); // Log PDF of lognormal
-    real log_cdf_diff = log(lognormal_cdf(xmax | mu, sigma) - lognormal_cdf(xmin | mu, sigma)); // Log of normalization constant
-    return log_pdf - log_cdf_diff; // Adjusted log PDF for truncation
+  return lognormal_lpdf(x | mu, sigma)
+       - log_diff_exp(lognormal_lcdf(xmax | mu, sigma),
+                      lognormal_lcdf(xmin | mu, sigma));
 }
 
 real left_truncated_normal_lpdf(real x, real mu, real sigma, real xmin) {
-    if (x < xmin) {
-        return negative_infinity(); // x is outside the truncation range
-    }
-    real log_pdf = normal_lpdf(x | mu, sigma); // Log PDF of normal
-    real log_cdf_diff = log(1 - Phi((xmin-mu) / sigma)); // Log of normalization constant
-    return log_pdf - log_cdf_diff; // Adjusted log PDF for truncation
+  if (x < xmin) return negative_infinity();
+  return normal_lpdf(x | mu, sigma) - normal_lccdf(xmin | mu, sigma);
 }
 
 /**
@@ -257,3 +268,7 @@ real left_truncated_normal_lpdf(real x, real mu, real sigma, real xmin) {
   vector soft_argmax_weights(vector x, real tau) {
       return softmax(x / tau);
   }
+
+real log_sinh(real x) {
+  return x > 30 ? x - log(2) : log(sinh(x));
+}

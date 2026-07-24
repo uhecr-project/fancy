@@ -384,6 +384,7 @@ class Analysis:
         seed: Union[int, None] = None,
         warmup: Union[int, None] = None,
         inits : Union[dict, None] = None,
+        init_model : Union[str, None] = None,
         **kwargs: dict,
     ):
         """
@@ -404,6 +405,9 @@ class Analysis:
         inits : Union[dict, None], default=None
             initial values for the parameters.
             If None, the default initial values are used.
+        init_model : Union[str, None], default=None
+            whether to use the variational inference (VI) output as initial values for the parameters.
+            Default is None. If "pathfinder", the PathFinder output will be used as initial values for the parameters.
         kwargs : dict
             additional arguments to pass to the fit method
 
@@ -434,15 +438,36 @@ class Analysis:
             print("Setting warmup to 1000.")
             warmup = 1000
 
-        inits_dict={
-            "alphas" : [-1, 1],
-            "mass_fracs" : np.full((self.fit_inputs["Nsrcs"]+1, self.fit_inputs["NAsrcs"]), 1 / self.fit_inputs["NAsrcs"]),
-            "logE_true" : [np.median(np.log(self.fit_inputs["Edet"]))] * self.fit_inputs['N'],
-            "flux_frac" : [0.1, 0.9],
-            "log10_Ftot" : -2,
-            "beta_egmf" : 0.5,
-            "nu_lnAs": np.full(self.fit_inputs['N'], 0.5),
-        }
+        if init_model is None:
+            print("Not using variational inference (VI) output as initial values for the parameters.")
+            inits_dict={
+                "alphas" : [-1, 1],
+                "mass_fracs" : np.full((self.fit_inputs["Nsrcs"]+1, self.fit_inputs["NAsrcs"]), 1 / self.fit_inputs["NAsrcs"]),
+                "logE_true" : [np.median(np.log(self.fit_inputs["Edet"]))] * self.fit_inputs['N'],
+                "flux_frac" : [0.1, 0.9],
+                "log10_Ftot" : -2,
+                "beta_egmf" : 0.5,
+                "nu_lnAs": np.full(self.fit_inputs['N'], 0.5),
+            }
+        elif init_model == "pathfinder":
+            print("Using PathFinder variational inference (VI) output as initial values for the parameters.")
+            pathfinder = self.stan_model.pathfinder(
+                data=self.fit_inputs
+            )
+            inits_dict = pathfinder.create_inits()[0]
+
+        elif init_model == "vi":
+            print("Using variational inference (VI) output as initial values for the parameters.")
+            vi = self.stan_model.variational(
+                data=self.fit_inputs,
+                required_converged=False, # we don't require convergence for the VI output, just want to use it as initial values
+                seed=seed,
+                **kwargs,
+            )
+            inits_dict = {var: samples.mean(axis=0) for var, samples in vi.stan_variables(mean=False).items()}
+
+        # raise Exception("The following code is not yet implemented for cmdstanpy backend. Please use pystan backend for now.")
+
         # different parameter names and configurations for background only fits
         if self.spatial_type:
             inits_dict.pop("alphas")
@@ -461,6 +486,10 @@ class Analysis:
         if inits is not None:
             print("Using user-provided initial values for the parameters.")
             inits_dict = inits
+
+        # print("Initial values for the parameters:")
+        # for key, value in inits_dict.items():
+        #     print(f"  {key}: {value}")
             
         
         # fit

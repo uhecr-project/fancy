@@ -468,7 +468,7 @@ class EnergyLossModel:
             Default is 1.7 EV, which is the approximate value from
             Erhlet et al 2023.
         dmins : list[float], default=None
-            the minimum distances to inject from.
+            the distances to stop injecting.
             Default is [4, 50] Mpc.
         z_max : float, default=3
             the maximum redshift to start from.
@@ -490,7 +490,7 @@ class EnergyLossModel:
 
         solver_container = []
 
-        for i, dmin in enumerate(self.dmins):
+        for i, dmin in enumerate(dmins):
             print(f"Current distance: {dmin:.2f} Mpc")
 
             solvers_per_dmin = []
