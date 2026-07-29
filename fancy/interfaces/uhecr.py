@@ -8,6 +8,7 @@ from typing_extensions import Self
 
 from fancy.plotting import AllSkyMapCartopy as AllSkyMap
 from fancy.utils.coordinates import get_coordinates, uv_to_coord
+from fancy.utils.helpers import create_dataset_compressed
 from fancy.utils.package_data import get_path_to_datafiles
 
 __all__ = ["Uhecr"]
@@ -307,7 +308,7 @@ class Uhecr:
         properties = self.__get_properties(analysis_type)
 
         for key, value in properties.items():
-            file_handle.create_dataset(key, data=value)
+            create_dataset_compressed(file_handle, key, value)
 
     def __find_area(self: Self, exp_factor: float = 1.0) -> list:
         """

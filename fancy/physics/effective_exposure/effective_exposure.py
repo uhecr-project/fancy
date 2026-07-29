@@ -24,7 +24,11 @@ class EffectiveExposure:
     """Class to manage calculation of the effective exposure from given source(s), and constructs tables that will be passed to stan for interpolation."""
 
     def __init__(
-        self: Self, data: Data, gmf_model: str = "None", verbose: bool = False
+        self: Self,
+        data: Data,
+        gmf_model: str = "None",
+        verbose: bool = False,
+        lazy_gmf_lens: bool = False,
     ) -> None:
         """
         Class to manage calculation of the effective exposure from given source(s).
@@ -37,6 +41,12 @@ class EffectiveExposure:
             the GMF model to consider. Default is None, which ignores GMF effects
         verbose : bool, default=False
             to print out additional statements for debugging or not.
+        lazy_gmf_lens : bool, default=False
+            If True, defer loading the (RAM-heavy) CRPropa magnetic lens map until
+            it is actually needed, i.e. the first time `calculate_lensed_map` is
+            called. Set this to True when effective exposure tables are expected to
+            be loaded from cache via `load_from_tables()`, since in that case the
+            lens map is never used.
         """
         self.data = data
         self.verbose = verbose
@@ -46,7 +56,7 @@ class EffectiveExposure:
         self.detector_type = data.detector.label
         self.mass_model = data.detector.mass_model
         self.gmf_model = gmf_model
-        self.gmf_lens = GMFLensing(gmf_model=self.gmf_model)
+        self.gmf_lens = GMFLensing(gmf_model=self.gmf_model, lazy=lazy_gmf_lens)
 
         # parameters otherwised used here
         self.beta_egmf_grid = None
@@ -176,6 +186,9 @@ class EffectiveExposure:
             the number of jobs to parallelise over for each source.
             ignored if only one source.
         """
+        if self.__computed_effective_exposure:
+            print("Effective exposure has already been computed / loaded in. Returning existing results.")
+            return self.effective_exposure
         # prepare arguments
         exp_args = [
             (

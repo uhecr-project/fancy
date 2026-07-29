@@ -43,16 +43,16 @@ class GMFBackPropagation:
     ]  # type of GMF models
     __Nmodels_UF23: int = 8  # number of models in UF23
 
-    # __UF23_models : typing.ClassVar[dict] = {
-    #     "base" : 0,
-    #     "neCL" : 1,
-    #     "expX" : 2,
-    #     "spur" : 3,
-    #     "cre10" : 4,
-    #     "synCG" : 5,
-    #     "twistX" : 6,
-    #     "nebCor" : 7
-    # }
+    __UF23_models : typing.ClassVar[dict] = {
+        "base" : 0,
+        "neCL" : 1,
+        "expX" : 2,
+        "spur" : 3,
+        "cre10" : 4,
+        "synCG" : 5,
+        "twistX" : 6,
+        "nebCor" : 7
+    }
 
     def __init__(self: Self, data: Data, gmf_model: str = "JF12") -> None:
         """
@@ -339,16 +339,16 @@ class GMFBackPropagation:
             gmf_cr.randomStriated(seed)
             gmf_cr.randomTurbulent(seed)
 
-        # elif self.gmf_model.find("UF23") != -1:
-        #     uf23_model = self.gmf_model.replace("UF23", "").replace("Turb", "")
-        #     gmf_cr = cr.UF23Field(self.__UF23_models[uf23_model])
+        elif self.gmf_model.find("UF23") != -1:
+            uf23_model = self.gmf_model.replace("UF23", "").replace("Turb", "")
+            gmf_cr = cr.UF23Field(self.__UF23_models[uf23_model])
 
-        #     if self.gmf_model.find("Turb") != -1:
-        #         seed = int(rng.integers(low=0, high=10000000))
+            if self.gmf_model.find("Turb") != -1:
+                seed = int(rng.integers(low=0, high=10000000))
 
                 
-        #         gmf_cr.randomStriated(seed)
-        #         gmf_cr.randomTurbulent(seed)
+                gmf_cr.randomStriated(seed)
+                gmf_cr.randomTurbulent(seed)
 
         elif self.gmf_model == "UF23baseTurb":
             seed = int(rng.integers(low=0, high=10000000))
@@ -369,7 +369,7 @@ class GMFBackPropagation:
             )
 
         # Propagation model, parameters: (B-field model, target error, min step, max step)
-        sim.add(cr.PropagationCK(gmf_cr, 1e-4, 0.1 * cr.parsec, 100 * cr.parsec))
+        sim.add(cr.PropagationCK(gmf_cr, 1e-3, 0.1 * cr.parsec, 100 * cr.parsec))
 
         sim.add(obs)  # add observer at galactic boundary
         return sim

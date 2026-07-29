@@ -1,5 +1,6 @@
 """Simulation class for energy + mass + spatial"""
 
+import json
 import os
 import pickle
 import tempfile
@@ -17,7 +18,7 @@ from typing_extensions import List, Self, Tuple, Union
 from fancy import Data
 from fancy.physics.gmf import GMFLensing, GMFBackPropagation
 from fancy.interfaces.grid_generator import GridGenerator
-from fancy.utils.helpers import km_per_Mpc, theta_igmfs
+from fancy.utils.helpers import create_dataset_compressed, km_per_Mpc, theta_igmfs
 from fancy.simulation.helpers import (
     get_Edet,
     get_mean_lnA_det,
@@ -32,6 +33,56 @@ from fancy.simulation.plotters import *
 from vMF import sample_vMF
 
 charge_massid_map = {101: 1, 402: 2, 1407: 7, 2814: 14, 5626: 26}
+
+
+def _encode_truths_value(value):
+    """
+    Recursively convert one `Simulation.truths` value into something
+    JSON-serialisable, tagging non-trivial types so `_decode_truths_value`
+    can invert the conversion exactly.
+
+    SkyCoord is stored as its Galactic (l, b) in degrees -- every SkyCoord
+    written into `truths` throughout this module is ultimately built in (or
+    trivially convertible to) the Galactic frame, so this avoids ambiguity
+    about which frame to restore.
+    """
+    if value is None:
+        return None
+    if isinstance(value, SkyCoord):
+        return {
+            "__type__": "SkyCoord",
+            "l_deg": np.atleast_1d(value.galactic.l.deg).tolist(),
+            "b_deg": np.atleast_1d(value.galactic.b.deg).tolist(),
+            "scalar": value.isscalar,
+        }
+    if isinstance(value, np.ndarray):
+        return {"__type__": "ndarray", "data": value.tolist(), "dtype": str(value.dtype)}
+    if isinstance(value, (np.integer, np.floating, np.bool_)):
+        return value.item()
+    if isinstance(value, dict):
+        return {k: _encode_truths_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_encode_truths_value(v) for v in value]
+    return value
+
+
+def _decode_truths_value(value):
+    """Invert `_encode_truths_value`."""
+    if isinstance(value, dict):
+        tag = value.get("__type__")
+        if tag == "SkyCoord":
+            coord = SkyCoord(
+                l=np.array(value["l_deg"]) * u.deg,
+                b=np.array(value["b_deg"]) * u.deg,
+                frame="galactic",
+            )
+            return coord[0] if value["scalar"] else coord
+        if tag == "ndarray":
+            return np.array(value["data"], dtype=value["dtype"])
+        return {k: _decode_truths_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_decode_truths_value(v) for v in value]
+    return value
 
 
 class Simulation:
@@ -77,6 +128,7 @@ class Simulation:
         # other objects we store for later
         self.truths = {}
         self.config = {}
+        self._grid_init_kwargs = None
 
         # grid related parameters
         self.energy_grid = None
@@ -178,6 +230,19 @@ class Simulation:
             source_evo is the source evolution model (only "SFR" is implemented),
             and Rmax is the maximum rigidity (in EV).
         """
+        # remember the exact kwargs used, so `save_truths`/`load` can replay
+        # this call and deterministically regenerate the grids (the PriNCe
+        # solvers and effective-exposure tables underlying this are disk-cached
+        # per (dinits, Rmax, ...), so repeat calls are cheap, not recomputed).
+        self._grid_init_kwargs = {
+            "energy_gridparams": energy_gridparams,
+            "lnA_energy_gridparams": lnA_energy_gridparams,
+            "effexp_model_kwargs": effexp_model_kwargs,
+            "src_inj_kwargs": src_inj_kwargs,
+            "bg_inj_kwargs": bg_inj_kwargs,
+            "energy_loss_model_kwargs": energy_loss_model_kwargs,
+        }
+
         grid_generator = GridGenerator(data=self.data, gmf_model=self.gmf_model)
 
         grid_generator.get_effective_exposure_grid(effexp_model_kwargs, self.n_jobs)
@@ -741,6 +806,7 @@ class Simulation:
         var_lnA_stat: Union[float, np.ndarray],
         mean_lnA_sys: float = 0.0,
         var_lnA_sys: float = 0.0,
+        lnA_interp_energy_grid: Union[np.ndarray, None] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Apply the detector response to the true values for the mean and variance of lnA.
@@ -764,9 +830,29 @@ class Simulation:
         """
         if isinstance(mean_lnA_stat, float):
             mean_lnA_stat = np.full(self.NElnAs, mean_lnA_stat)
+        else:
+            # interpolate the mean_lnA_stat to the energy bins if it is an array
+            if lnA_interp_energy_grid is not None:
+                mean_lnA_stat = np.interp(
+                    self.lnA_energy_grid, lnA_interp_energy_grid, mean_lnA_stat
+                )
+            else:
+                raise ValueError(
+                    "If mean_lnA_stat is an array, then lnA_interp_energy_grid must be provided."
+                )
 
         if isinstance(var_lnA_stat, float):
             var_lnA_stat = np.full(self.NElnAs, var_lnA_stat)
+        else:
+            # interpolate the var_lnA_stat to the energy bins if it is an array
+            if lnA_interp_energy_grid is not None:
+                var_lnA_stat = np.interp(
+                    self.lnA_energy_grid, lnA_interp_energy_grid, var_lnA_stat
+                )
+            else:
+                raise ValueError(
+                    "If var_lnA_stat is an array, then lnA_interp_energy_grid must be provided."
+                )
 
         mean_lnA_dets = np.array(
             [
@@ -1078,23 +1164,25 @@ class Simulation:
             if self.detector_type in list(file.keys()):
                 del file[self.detector_type]
             simulated_data = file.create_group(f"{self.detector_type}")
-            simulated_data.create_dataset("day", data=days_sim)
-            simulated_data.create_dataset("year", data=years_sim)
-            simulated_data.create_dataset("theta", data=zeniths_sim)
+            create_dataset_compressed(simulated_data, "day", days_sim)
+            create_dataset_compressed(simulated_data, "year", years_sim)
+            create_dataset_compressed(simulated_data, "theta", zeniths_sim)
             if gmf_model != "None":
-                simulated_data.create_dataset(
-                    "rigidity", data=self.truths["rigidity_bp"]
+                create_dataset_compressed(
+                    simulated_data, "rigidity", self.truths["rigidity_bp"]
                 )
-            simulated_data.create_dataset("energy", data=self.truths["Edets"])
-            simulated_data.create_dataset("ra", data=ras_det)
-            simulated_data.create_dataset("dec", data=decs_det)
-            simulated_data.create_dataset("glat", data=glats_det)
-            simulated_data.create_dataset("glon", data=glons_det)
-            simulated_data.create_dataset(
-                "exposure", data=self.truths["exposure_factor"]
+            create_dataset_compressed(simulated_data, "energy", self.truths["Edets"])
+            create_dataset_compressed(simulated_data, "ra", ras_det)
+            create_dataset_compressed(simulated_data, "dec", decs_det)
+            create_dataset_compressed(simulated_data, "glat", glats_det)
+            create_dataset_compressed(simulated_data, "glon", glons_det)
+            create_dataset_compressed(
+                simulated_data, "exposure", self.truths["exposure_factor"]
             )
-            simulated_data.create_dataset(
-                "kappa_ds", data=self.config["kappa_det"] * np.ones(self.truths["Nex"])
+            create_dataset_compressed(
+                simulated_data,
+                "kappa_ds",
+                self.config["kappa_det"] * np.ones(self.truths["Nex"]),
             )
 
             if gmf_model != "None":
@@ -1103,18 +1191,21 @@ class Simulation:
                 if config_key in gmfdefl_datas_grp.keys():
                     del gmfdefl_datas_grp[config_key]
                 gmfdefl_datas_config_grp = gmfdefl_datas_grp.create_group(config_key)
-                gmfdefl_datas_config_grp.create_dataset(
-                    "kappa_gmf", data=self.truths["kappa_gmfs"]
+                create_dataset_compressed(
+                    gmfdefl_datas_config_grp, "kappa_gmf", self.truths["kappa_gmfs"]
                 )
-                gmfdefl_datas_config_grp.create_dataset(
-                    "thetaP", data=self.truths["theta_gmfs"]
+                create_dataset_compressed(
+                    gmfdefl_datas_config_grp, "thetaP", self.truths["theta_gmfs"]
                 )
-                gmfdefl_datas_config_grp.create_dataset(
-                    "glons_gb", data=self.truths["skycoord_gb_truths_bp"].galactic.l.deg
+                create_dataset_compressed(
+                    gmfdefl_datas_config_grp,
+                    "glons_gb",
+                    self.truths["skycoord_gb_truths_bp"].galactic.l.deg,
                 )
-                gmfdefl_datas_config_grp.create_dataset(
+                create_dataset_compressed(
+                    gmfdefl_datas_config_grp,
                     "glats_gb",
-                    data=self.truths["skycoord_gb_truths_bp"].galactic.b.deg,
+                    self.truths["skycoord_gb_truths_bp"].galactic.b.deg,
                 )
 
         # save the mean and variance of lnA
@@ -1124,18 +1215,115 @@ class Simulation:
             det_grp = file.create_group(f"{self.detector_type}")
             simulated_data = det_grp.create_group(self.mass_model)
 
-            simulated_data.create_dataset(
-                "mean_log10E", data=np.log10(self.lnA_energy_grid)
+            create_dataset_compressed(
+                simulated_data, "mean_log10E", np.log10(self.lnA_energy_grid)
             )
 
-            simulated_data.create_dataset(
-                "mean_lnA", data=self.truths["mean_lnA_dets"]
+            create_dataset_compressed(
+                simulated_data, "mean_lnA", self.truths["mean_lnA_dets"]
             )
-            simulated_data.create_dataset("var_lnA", data=self.truths["var_lnA_dets"])
-            simulated_data.create_dataset("mean_stat", data=self.config["mean_lnA_stat"])
-            simulated_data.create_dataset("var_stat", data=self.config["var_lnA_stat"])
-            simulated_data.create_dataset("mean_sys", data=self.config["mean_lnA_sys"])
-            simulated_data.create_dataset("var_sys", data=self.config["var_lnA_sys"])
+            create_dataset_compressed(
+                simulated_data, "var_lnA", self.truths["var_lnA_dets"]
+            )
+            create_dataset_compressed(
+                simulated_data, "mean_stat", self.config["mean_lnA_stat"]
+            )
+            create_dataset_compressed(
+                simulated_data, "var_stat", self.config["var_lnA_stat"]
+            )
+            create_dataset_compressed(
+                simulated_data, "mean_sys", self.config["mean_lnA_sys"]
+            )
+            create_dataset_compressed(
+                simulated_data, "var_sys", self.config["var_lnA_sys"]
+            )
+
+    def save_truths(self: Self, outfile: str) -> None:
+        """
+        Save `self.truths`, plus the metadata needed to reconstruct this
+        Simulation object (source/detector labels, gmf/mass model, and the
+        `initialise_grids` kwargs), to a JSON file.
+
+        This replaces pickling the full Simulation object: the truths
+        (including SkyCoord objects, stored as Galactic l/b) are restored
+        exactly, while the grids in `self.config` are cheap to regenerate
+        deterministically via `initialise_grids` (see `Simulation.load`) since
+        the underlying PriNCe/effective-exposure tables are disk-cached.
+
+        Parameters
+        ----------
+        outfile: str
+            path to the output JSON file.
+        """
+        if self._grid_init_kwargs is None:
+            raise ValueError("Run `initialise_grids` first!")
+
+        payload = {
+            "detector_type": self.detector_type,
+            "mass_model": self.mass_model,
+            "source_type": self.source_type,
+            "gmf_model": self.gmf_model,
+            "grid_init_kwargs": _encode_truths_value(self._grid_init_kwargs),
+            "truths": _encode_truths_value(self.truths),
+        }
+
+        with open(outfile, "w") as f:
+            json.dump(payload, f)
+
+    @classmethod
+    def load(
+        cls: type,
+        truths_file: str,
+        data_h5: str,
+        lnA_h5: str,
+        n_jobs: Union[int, None] = None,
+    ) -> Self:
+        """
+        Reconstruct a Simulation from a `save_truths` JSON file plus the
+        UHECRdata_sim.h5 / lnAdata_sim.h5 files written by `save`.
+
+        `Data` is rebuilt from the saved labels (source/detector/mass_model/
+        gmf_model) and the two h5 files, `initialise_grids` is re-run with the
+        exact kwargs used originally (cheap: the PriNCe/effective-exposure
+        tables it depends on are disk-cached per (dinits, Rmax, ...) rather
+        than recomputed), and `truths` is restored directly from the JSON --
+        it is not recomputed, since several of its entries (e.g. from
+        `generate_samples`/`backpropagate_events`) are stochastic or expensive
+        (CRPropa) and must match exactly what was fit.
+
+        Parameters
+        ----------
+        truths_file: str
+            path to the JSON file written by `save_truths`.
+        data_h5: str
+            path to the UHECRdata_sim.h5 file written by `save`.
+        lnA_h5: str
+            path to the lnAdata_sim.h5 file written by `save`.
+        n_jobs: int, optional
+            forwarded to `Simulation.__init__`.
+        """
+        with open(truths_file, "r") as f:
+            payload = json.load(f)
+
+        data = Data()
+        data.add_source(label=payload["source_type"])
+        data.add_detector(
+            label=payload["detector_type"],
+            mass_model=payload["mass_model"],
+            lnA_moments_filename=lnA_h5,
+        )
+        data.add_uhecr(
+            label=payload["detector_type"],
+            mass_model=payload["mass_model"],
+            gmf_model=payload["gmf_model"],
+            filename=data_h5,
+        )
+
+        simulation = cls(data, gmf_model=payload["gmf_model"], n_jobs=n_jobs)
+        simulation.initialise_grids(**_decode_truths_value(payload["grid_init_kwargs"]))
+        simulation.truths = _decode_truths_value(payload["truths"])
+
+        return simulation
 
     def plot_samples(
         self: Self, plotting_mode: str = "all"

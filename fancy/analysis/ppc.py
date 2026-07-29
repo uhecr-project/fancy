@@ -13,6 +13,7 @@ class PPC:
         fit: cmdstanpy.stanfit.mcmc.CmdStanMCMC,
         data: Data,
         gmf_model : str,
+        simulation : Simulation
     ) -> None:
         """
         Generate PPCs (Posterior Predictive Checks) from (energy + spatial) fit results.
@@ -25,9 +26,10 @@ class PPC:
         self.fit = fit
         self.data = data
         self.gmf_model = gmf_model
+        self.simulation = simulation
 
     def get_ppc(
-        self: Self, N_ppc_samples: int = 100, seed: Union[int, None] = None
+        self: Self, N_ppc_samples: int = 100, seed: Union[int, None] = None, **grid_kwargs
     ) -> Tuple[List, List[SkyCoord], np.ndarray, np.ndarray]:
         """
         Calculate the poseterior predictive checks for the fit results.
@@ -92,7 +94,7 @@ class PPC:
 
             # generate a new instance of the simulation
             sim_ppc = Simulation(data=self.data, gmf_model=self.gmf_model)
-            sim_ppc.initialise_grids()
+            sim_ppc.initialise_grids(**grid_kwargs)
             # set the truths here
             sim_ppc.set_truths(**hyperparams_vals)
 

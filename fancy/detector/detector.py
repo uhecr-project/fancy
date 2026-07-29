@@ -11,6 +11,7 @@ from scipy import integrate, stats
 from typing_extensions import Self, Tuple
 
 from fancy.detector.exposure import m_dec, m_integrand
+from fancy.utils.helpers import create_dataset_compressed
 from fancy.utils.package_data import get_path_to_datafiles
 from fancy.plotting import AllSkyMapCartopy as AllSkyMap
 
@@ -283,7 +284,7 @@ class Detector:
         for key, value in self.properties.items():
             if key == "period_start":
                 continue
-            file_handle.create_dataset(key, data=value)
+            create_dataset_compressed(file_handle, key, value)
 
     def plot_skymap(
         self: Self,

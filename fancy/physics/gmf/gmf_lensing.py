@@ -29,7 +29,9 @@ class GMFLensing:
     }
     __npix: int = 49152  # pixelisation of order 6
 
-    def __init__(self: Self, gmf_model: str = "JF12") -> None:
+    def __init__(
+        self: Self, gmf_model: str = "JF12", lazy: bool = False
+    ) -> None:
         """
         Class that handles forward simulations of GMF deflections (lensing / weighted vMF maps).
 
@@ -37,23 +39,37 @@ class GMFLensing:
         ----------
         gmf_model: str, default JF12
             The desired GMF model for GMF lensing
+        lazy: bool, default False
+            If True, defer loading the (RAM-heavy) CRPropa magnetic lens map from
+            disk until it is actually needed (i.e. on first call to
+            `apply_lens_to_map` or `apply_lens_with_particles`).
+            Useful when the caller may end up never using the lens, e.g. because
+            cached results will be loaded from tables instead.
         """
         if crpropa is None:
             raise ImportError("CRPropa must be installed to use this functionality.")
 
         self.gmf_model = gmf_model
+        self._lazy = lazy
+        self.gmf_lens = None
 
         # read in GMF lens if we have GMF enabled
         if gmf_model in list(self.__lens_names.keys()):
-            path_to_lens = str(get_path_to_lens(self.__lens_names[self.gmf_model]))
-            self.gmf_lens = crpropa.MagneticLens(path_to_lens)
             self.disable_gmf = False
+            if not lazy:
+                self.__load_lens()
         elif gmf_model == "None":
             self.disable_gmf = True
         else:
             raise NotImplementedError(
                 f"Lensing for GMF model {gmf_model} not yet implemented."
             )
+
+    def __load_lens(self: Self) -> None:
+        """Load the CRPropa magnetic lens map from disk, if not already loaded."""
+        if self.gmf_lens is None:
+            path_to_lens = str(get_path_to_lens(self.__lens_names[self.gmf_model]))
+            self.gmf_lens = crpropa.MagneticLens(path_to_lens)
 
     def apply_lens_with_particles(
         self: Self, rigidities: np.ndarray, coordinates: SkyCoord
@@ -73,6 +89,9 @@ class GMFLensing:
         astropy.coordinates.SkyCoord
             arrival directions of samples at Earth in Galactic coordinates
         """
+        if not self.disable_gmf:
+            self.__load_lens()
+
         # now GMF lensing
         particle_map = crpropa.ParticleMapsContainer()
         Nsamples = coordinates.shape[0]
@@ -134,6 +153,7 @@ class GMFLensing:
 
         # apply lensing
         if not self.disable_gmf:
+            self.__load_lens()
             particles.applyLens(R * crpropa.EeV, self.gmf_lens)
 
         # obtain the lensed weights

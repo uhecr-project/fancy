@@ -2,9 +2,37 @@
 
 import numpy as np
 import astropy.units as u
+import h5py
 from scipy.stats import lognorm
 
-km_per_Mpc = 3.08567758e19 
+km_per_Mpc = 3.08567758e19
+
+
+def create_dataset_compressed(
+    file_handle: h5py.Group, name: str, data, compression_opts: int = 4
+) -> h5py.Dataset:
+    """
+    Create an h5py dataset with gzip compression, skipping compression for
+    scalars and 0-length arrays (h5py does not support chunked/filtered
+    storage for those, and would raise TypeError).
+
+    Parameters
+    ----------
+    file_handle: h5py.Group
+        the group (or file) to create the dataset in.
+    name: str
+        the dataset name.
+    data:
+        the data to store.
+    compression_opts: int, default=4
+        gzip compression level (0-9).
+    """
+    arr = np.asarray(data)
+    if arr.ndim == 0 or arr.size == 0:
+        return file_handle.create_dataset(name, data=data)
+    return file_handle.create_dataset(
+        name, data=data, compression="gzip", compression_opts=compression_opts
+    )
 
 
 def theta_igmf(R: float, beta_egmf: float, D: float, lc_mpc: float = 1) -> float:

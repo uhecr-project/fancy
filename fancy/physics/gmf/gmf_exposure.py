@@ -488,7 +488,7 @@ class GMFExposure:
             )
 
         # Propagation model, parameters: (B-field model, target error, min step, max step)
-        sim.add(cr.PropagationCK(gmf_cr, 1e-4, 0.1 * cr.parsec, 100 * cr.parsec))
+        sim.add(cr.PropagationCK(gmf_cr, 1e-3, 0.1 * cr.parsec, 100 * cr.parsec))
 
         sim.add(obs)  # add observer at galactic boundary
         return sim

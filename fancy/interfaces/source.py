@@ -6,6 +6,7 @@ import h5py
 from typing_extensions import Self, Union
 
 from fancy.utils.coordinates import get_coordinates, uv_to_coord, coord_to_uv
+from fancy.utils.helpers import create_dataset_compressed
 from fancy.utils.package_data import get_path_to_datafiles
 
 from fancy.plotting import AllSkyMapCartopy as AllSkyMap
@@ -127,7 +128,7 @@ class Source:
         properties = self.__get_properties()
 
         for key, value in properties.items():
-            file_handle.create_dataset(key, data=value)
+            create_dataset_compressed(file_handle, key, value)
 
     def select_sources(self : Self, selection : list) -> None:
         """Select sources by providing certain indices from a list."""

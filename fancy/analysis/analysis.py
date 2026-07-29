@@ -13,7 +13,7 @@ import arviz as az
 from fancy.interfaces.data import Data
 from fancy.interfaces.grid_generator import GridGenerator
 from fancy.simulation import Simulation
-from fancy.utils.helpers import pick_grain_size
+from fancy.utils.helpers import create_dataset_compressed, pick_grain_size
 from fancy.utils.package_data import (
     get_path_to_stan_file,
     get_path_to_stan_includes,
@@ -99,6 +99,7 @@ class Analysis:
         self.nthreads_per_chain = None
         self.fit_inputs = {key: None for key in self.fit_input_keys}
         self.fit = None
+        self.inits_dict = None
 
     def initialise_grid(
         self : Self,
@@ -492,6 +493,11 @@ class Analysis:
         #     print(f"  {key}: {value}")
             
         
+        # keep the resolved inits (fixed / pathfinder / VI-derived / user-provided)
+        # so they can be recovered later via `save`, without needing to re-run
+        # pathfinder/VI or re-derive the fixed dict.
+        self.inits_dict = inits_dict
+
         # fit
         print("Performing fitting...")
         self.fit = self.stan_model.sample(
@@ -584,12 +590,37 @@ class Analysis:
             # fit inputs
             fit_input_handle = fit_handle.create_group("input")
             for key, value in self.fit_inputs.items():
-                fit_input_handle.create_dataset(key, data=value)
+                create_dataset_compressed(fit_input_handle, key, value)
 
-            # samples
+            # initial values used to start the chains (fixed dict / pathfinder
+            # / VI-derived / user-provided -- see `fit_model`), so the exact
+            # inits can be recovered without re-running pathfinder/VI.
+            if self.inits_dict is not None:
+                inits_handle = fit_handle.create_group("inits")
+                for key, value in self.inits_dict.items():
+                    create_dataset_compressed(inits_handle, key, value)
+
+            # samples (includes loglik_event, since it is a generated quantity
+            # returned by stan_variables())
             samples = fit_handle.create_group("samples")
             for key, value in self.chain.items():
-                samples.create_dataset(key, data=value)
+                create_dataset_compressed(samples, key, value)
 
             # log posterior
-            samples.create_dataset("log_post", data=self.fit.method_variables()["lp__"])
+            create_dataset_compressed(
+                samples, "log_post", self.fit.method_variables()["lp__"]
+            )
+
+            # sampler diagnostics (small per-chain/per-draw arrays, plus the
+            # cmdstan `diagnose` report) -- kept so the raw CmdStanMCMC / its
+            # pickle is no longer needed to check divergences, treedepth,
+            # E-BFMI, step size, etc.
+            diagnostics = fit_handle.create_group("diagnostics")
+            diagnostics.attrs["diagnose_report"] = self.fit.diagnose()
+            diagnostics.create_dataset("divergences", data=self.fit.divergences)
+            diagnostics.create_dataset("max_treedepths", data=self.fit.max_treedepths)
+            diagnostics.create_dataset("step_size", data=self.fit.step_size)
+            method_vars = self.fit.method_variables()
+            for key in ("divergent__", "treedepth__", "energy__", "n_leapfrog__"):
+                if key in method_vars:
+                    create_dataset_compressed(diagnostics, key, method_vars[key])
