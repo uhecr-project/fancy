@@ -58,7 +58,7 @@ int binary_search(real value, array [] real binedges)
     int R = size(binedges);
     int a;
     if (value < binedges[1])
-        return 0;
+        return 1;
     else if(value > binedges[R])
         // return R+1;
         return R;
@@ -224,4 +224,51 @@ real interp2d(real x, real y, array[] real xp, array[] real yp, array[,] real fp
   real y_vals_high = interpolate(to_vector(xp), to_vector(fp[:, idx_yp1]), x);
   real val = interpolate(to_vector(yp[idx_y:idx_yp1]), [y_vals_low, y_vals_high]', y);
   return val;
+}
+
+real truncated_normal_lpdf(real x, real mu, real sigma, real xmin, real xmax) {
+    real log_pdf = normal_lpdf(x | mu, sigma); // Log PDF of normal
+    real log_cdf_diff = log(Phi((xmax - mu) / sigma) - Phi((xmin - mu) / sigma)); // Log of normalization constant
+    return log_pdf - log_cdf_diff; // Adjusted log PDF for truncation
+}
+
+// real truncated_lognormal_lpdf(real x, real mu, real sigma, real xmin, real xmax) {
+//     real log_pdf = lognormal_lpdf(x | mu, sigma); // Log PDF of lognormal
+//     real log_cdf_diff = log(lognormal_cdf(xmax | mu, sigma) - lognormal_cdf(xmin | mu, sigma)); // Log of normalization constant
+//     return log_pdf - log_cdf_diff; // Adjusted log PDF for truncation
+// }
+
+// real left_truncated_normal_lpdf(real x, real mu, real sigma, real xmin) {
+//     if (x < xmin) {
+//         return negative_infinity(); // x is outside the truncation range
+//     }
+//     real log_pdf = normal_lpdf(x | mu, sigma); // Log PDF of normal
+//     real log_cdf_diff = log(1 - Phi((xmin-mu) / sigma)); // Log of normalization constant
+//     return log_pdf - log_cdf_diff; // Adjusted log PDF for truncation
+// }
+
+real truncated_lognormal_lpdf(real x, real mu, real sigma, real xmin, real xmax) {
+  return lognormal_lpdf(x | mu, sigma)
+       - log_diff_exp(lognormal_lcdf(xmax | mu, sigma),
+                      lognormal_lcdf(xmin | mu, sigma));
+}
+
+real left_truncated_normal_lpdf(real x, real mu, real sigma, real xmin) {
+  if (x < xmin) return negative_infinity();
+  return normal_lpdf(x | mu, sigma) - normal_lccdf(xmin | mu, sigma);
+}
+
+/**
+  * Calculate the softmax weights for a vector x with temperature tau.
+  * This is used to calculate the weights for the source charge number.
+  * @param x vector of values to calculate softmax weights for
+  * @param tau dampening parameter for softmax, lower means more peaked distribution
+  * @return vector of softmax weights
+  */
+  vector soft_argmax_weights(vector x, real tau) {
+      return softmax(x / tau);
+  }
+
+real log_sinh(real x) {
+  return x > 30 ? x - log(2) : log(sinh(x));
 }

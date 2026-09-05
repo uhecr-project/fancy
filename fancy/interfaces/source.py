@@ -72,6 +72,8 @@ class Source:
             dict containing source properties.
         """
         self.label = source_properties["label"]
+        if isinstance(self.label, bytes):
+            self.label = self.label.decode("UTF-8")
 
         self.N = source_properties["N"]
         self.unit_vector = source_properties["unit_vector"]

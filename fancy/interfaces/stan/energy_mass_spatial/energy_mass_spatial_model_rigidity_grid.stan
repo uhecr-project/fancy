@@ -1,5 +1,9 @@
 /**
- * Energy + lnA model
+ * Energy + lnA model, with a rigidity-resolved kappa_GMF(R) table used in
+ * place of the flat kappa_ds for the spatial likelihood term. omega_det is
+ * unchanged (still the rigidity-marginalised mean direction) -- only the
+ * deflection-parameter magnitude is interpolated at each event's latent
+ * Rtrue, instead of using one rigidity-marginalised kappa_ds per event.
  *
  * @author Keito Watanabe
  * @date March 2024
@@ -68,12 +72,14 @@ functions {
       vector lnA_logE_grid_vec,   // grid of energy bins for finding the mean and variance of lnA per energy
       vector nu_lnAs,              // latent variable for sampling Zsrcs
       array [] vector omega_det,    // detected directions
-      vector kappa_ds,              // deflection parameters including GMF and arrival direction uncertainty
+      vector kappa_ds,              // deflection parameters including GMF and arrival direction uncertainty (unused, kept for compatibility)
       array [] vector omega_src,    // source directions
       real beta_egmf,         // EGMF spread parameter
       vector D,                     // source distances
       int Nsrcs,                     // number of sources
-      vector exp_factors          // exposure correction factors per event
+      vector exp_factors,          // exposure correction factors per event
+      vector log10_gmf_Rgrid,        // shared rigidity grid (log10 EV) for kappa_GMF(R) interpolation
+      array [] vector log_kappa_gmf_grid  // per-event log(kappa_GMF) on log10_gmf_Rgrid
   ) {
       real lp_chunk = 0.0;  // log likelihood for this chunk
       int len = size(slice_i); // number of events in this chunk
@@ -93,7 +99,14 @@ functions {
           // // calculating the true charge and rigidity
           real Zsrc = 0.5 * exp(mean_lnA + sqrt(var_lnA) * nu_lnAs[i]);
           real Rtrue = exp(logE_true[i]) / Zsrc;
-          
+
+          // rigidity-resolved kappa_GMF, interpolated (log10 R, log kappa)
+          // at this event's latent Rtrue -- replaces the flat kappa_ds
+          // for the spatial likelihood below.
+          real kappa_gmf_interp = exp(interpolate(
+            log10_gmf_Rgrid, log_kappa_gmf_grid[i], log10(Rtrue)
+          ));
+
           // iterate over sources + isotropic background
           for (k in 1:Nsrcs+1) {
               // energy sampling (spectrum at Earth + truncated lognormal -> now after the k-loop)
@@ -107,9 +120,9 @@ functions {
                 lp_i[k] += fik_lpdf(
                   omega_det[i] | omega_src[k],
                   kappa_egmf,
-                  kappa_ds[i]
+                  kappa_gmf_interp
                 );
-              }  
+              }
               
               else {
                 /* isotropic background */
@@ -149,9 +162,14 @@ data {
     vector[N] Edet;
     array[N] unit_vector[3] omega_det; /* arrival directions */
     vector[N] exposure_factor; /* exposure correction factors per event */
-    vector[N] kappa_ds; /* deflection parameters, including GMF deflections + arrival direction uncertainty */
+    vector[N] kappa_ds; /* deflection parameters, including GMF deflections + arrival direction uncertainty (unused, kept for compatibility) */
     array[NEbins] real mean_lnA_det;
     array[NEbins] real var_lnA_det;
+
+    /* rigidity-resolved kappa_GMF(R) table, used in place of kappa_ds */
+    int<lower=1> Nr_gmf; /* number of rigidity grid points */
+    vector[Nr_gmf] log10_gmf_Rgrid; /* shared rigidity grid, log10(EV) */
+    array[N] vector[Nr_gmf] log_kappa_gmf_grid; /* log(kappa_GMF) per event, on log10_gmf_Rgrid */
 
     /* model */
     int<lower=0> Nalphas;   /* number of alpha grid points */
@@ -366,12 +384,14 @@ model {
     lnA_logE_grid_vec,                      // grid of energy bins in lnA
     nu_lnAs,                       // latent variable for sampling lnA
     omega_det,                      // detected directions
-    kappa_ds,                       // deflection parameters including GMF and arrival direction uncertainty
+    kappa_ds,                       // deflection parameters including GMF and arrival direction uncertainty (unused, kept for compatibility)
     omega_src,                      // source directions
     beta_egmf,                // EGMF spread parameter
     D,                              // source distances
     Nsrcs,                           // number of sources
-    exposure_factor               // exposure correction factors per event
+    exposure_factor,               // exposure correction factors per event
+    log10_gmf_Rgrid,                // shared rigidity grid (log10 EV) for kappa_GMF(R) interpolation
+    log_kappa_gmf_grid              // per-event log(kappa_GMF) on log10_gmf_Rgrid
   );
 
   // --- Poisson normalization ---
@@ -414,28 +434,25 @@ generated quantities {
     array[N] vector[Nsrcs+1] loglik_event;
     array[N] vector[Nsrcs+1] loglik_event_energy;
     array[N] vector[Nsrcs+1] loglik_event_spatial;
-    array[NEbins] vector[Nsrcs+1] loglik_event_mass;
-
     vector[N] kappa_egmfs;
-    vector[N] rigidities;
     for (i in 1:N) {
       loglik_event[i] = log(F);
-
-      real mean_lnA = interpolate(lnA_logE_grid_vec, mean_lnA_true, logE_true[i]);
-      real var_lnA = interpolate(lnA_logE_grid_vec, var_lnA_true, logE_true[i]);
+      int Ebin_idx = binary_search(logE_true[i], lnA_logE_grid);
+      real mean_lnA = mean_lnA_true[Ebin_idx];
+      real var_lnA = var_lnA_true[Ebin_idx];
       real Zsrc = 0.5 * exp(mean_lnA + sqrt(var_lnA) * nu_lnAs[i]);
       real Rtrue = exp(logE_true[i]) / Zsrc;
-
-      rigidities[i] = Rtrue;
-
+      real kappa_gmf_interp = exp(interpolate(
+        log10_gmf_Rgrid, log_kappa_gmf_grid[i], log10(Rtrue)
+      ));
       for (k in 1:(Nsrcs+1)) {
         loglik_event[i,k] += energy_spectrum_lpdf(logE_true[i] | logE_grid_vec, log_espect_at_alpha[k]);
         loglik_event[i,k] += truncated_lognormal_lpdf(Edet[i] | logE_true[i] + logE_sys_unc, logE_stat_unc, Emin, Emax);
         loglik_event_energy[i,k] = loglik_event[i,k];
         if (k <= Nsrcs) {
           real kappa_egmf = get_kappa(Rtrue, beta_egmf, D[k]/10.0);
-          loglik_event[i,k] += fik_lpdf(omega_det[i]|omega_src[k], kappa_egmf, kappa_ds[i]);
-          loglik_event_spatial[i,k] = fik_lpdf(omega_det[i]|omega_src[k], kappa_egmf, kappa_ds[i]);
+          loglik_event[i,k] += fik_lpdf(omega_det[i]|omega_src[k], kappa_egmf, kappa_gmf_interp);
+          loglik_event_spatial[i,k] = fik_lpdf(omega_det[i]|omega_src[k], kappa_egmf, kappa_gmf_interp);
 
           kappa_egmfs[i] = kappa_egmf;
         } else {
@@ -443,16 +460,6 @@ generated quantities {
           loglik_event_spatial[i,k] = -log(4*pi());
         }
       }
-    }
-
-    for (l in 1:NEbins) {
-
-        loglik_event[l] += left_truncated_normal_lpdf(mean_lnA_det[l] |
-            mean_lnA_true[l] + mean_lnA_sys_unc,
-            mean_lnA_stat_unc[l], 0.0);
-        loglik_event[l] += left_truncated_normal_lpdf(var_lnA_det[l] |
-            var_lnA_true[l] + var_lnA_sys_unc,
-            var_lnA_stat_unc[l], -2.0);
     }
         
 }

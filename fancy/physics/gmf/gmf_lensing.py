@@ -29,6 +29,8 @@ class GMFLensing:
     }
     __npix: int = 49152  # pixelisation of order 6
 
+    _lens_cache: typing.ClassVar[dict] = {}  # class-level, shared across instances
+
     def __init__(
         self: Self, gmf_model: str = "JF12", lazy: bool = False
     ) -> None:
@@ -65,11 +67,14 @@ class GMFLensing:
                 f"Lensing for GMF model {gmf_model} not yet implemented."
             )
 
-    def __load_lens(self: Self) -> None:
-        """Load the CRPropa magnetic lens map from disk, if not already loaded."""
+    def __load_lens(self):
         if self.gmf_lens is None:
-            path_to_lens = str(get_path_to_lens(self.__lens_names[self.gmf_model]))
-            self.gmf_lens = crpropa.MagneticLens(path_to_lens)
+            if self.gmf_model in self._lens_cache:
+                self.gmf_lens = self._lens_cache[self.gmf_model]
+            else:
+                path_to_lens = str(get_path_to_lens(self.__lens_names[self.gmf_model]))
+                self.gmf_lens = crpropa.MagneticLens(path_to_lens)
+                self._lens_cache[self.gmf_model] = self.gmf_lens
 
     def apply_lens_with_particles(
         self: Self, rigidities: np.ndarray, coordinates: SkyCoord

@@ -282,6 +282,80 @@ class GMFBackPropagation:
             uhecr_time_delays,
         )
 
+    def run_single_backpropagation_fixed_seed(self: Self, bt_arg: tuple, seed: int) -> tuple:
+        """
+        Same as `run_single_backpropagation`, but forces every field-setup
+        call (every 50 samples, same cadence as the production path) to
+        reuse the SAME explicit turbulent/striated field seed, instead of
+        drawing fresh OS entropy each time.
+
+        Test-only method for the turbulence-correlation diagnostic in
+        new_uhecr_model/lnA_sensitivity/gmf_backpropagation/ -- not used by
+        any production code path. Kept fully separate from
+        `run_single_backpropagation` so the validated production behaviour
+        is untouched by this addition.
+
+        Parameters
+        ----------
+        bt_arg : tuple
+            tuple containing the UHECR index, sampled arrival directions and sampled rigidities.
+        seed : int
+            explicit field seed, reused across every field-setup call in this run.
+
+        Returns
+        -------
+        Same return shape as `run_single_backpropagation`.
+        """
+        uhecr_idx, uhecr_uvs, uhecr_Rs = bt_arg
+        uhecr_defl_uvs = np.zeros_like(uhecr_uvs)
+        uhecr_time_delays = np.zeros(uhecr_uvs.shape[0])
+
+        pos_earth = cr.Vector3d(-8.5, 0, 0) * cr.kpc
+        pid = -cr.nucleusId(1, 1)
+
+        obs = cr.Observer()
+        obs.add(cr.ObserverSurface(cr.Sphere(cr.Vector3d(0), 20 * cr.kpc)))
+
+        uhecr_mean_defl_v3d = cr.Vector3d(0.0, 0.0, 0.0)
+
+        for k, uhecr_uv in enumerate(uhecr_uvs):
+            if k % 50 == 0:
+                mt_num = int(np.floor(k / (len(uhecr_uvs) // self.__Nmodels_UF23)))
+                sim = self.__setup_simulation(obs, mt_num, seed=seed)
+
+            uhecr_vector3d = cr.Vector3d(*uhecr_uv)
+
+            c = cr.Candidate(
+                cr.ParticleState(pid, uhecr_Rs[k] * cr.EeV, pos_earth, uhecr_vector3d)
+            )
+            sim.run(c)
+
+            uhecr_time_delays[k] = self.__get_time_delay(c, pos_earth)
+            uhecr_defl_v3d = c.current.getDirection()
+
+            uhecr_defl_uvs[k, :] = np.array(
+                [uhecr_defl_v3d.x, uhecr_defl_v3d.y, uhecr_defl_v3d.z]
+            )
+
+            if np.any(np.isnan(uhecr_defl_v3d)):
+                continue
+
+            uhecr_mean_defl_v3d += uhecr_defl_v3d
+
+        uhecr_mean_defl_v3d /= len(uhecr_Rs)
+        uhecr_mean_defl_uv = np.array(
+            [uhecr_mean_defl_v3d.x, uhecr_mean_defl_v3d.y, uhecr_mean_defl_v3d.z]
+        )
+        uhecr_mean_defl_uv /= np.linalg.norm(uhecr_mean_defl_uv)
+
+        return (
+            uhecr_idx,
+            uhecr_uvs,
+            uhecr_defl_uvs,
+            uhecr_mean_defl_uv,
+            uhecr_time_delays,
+        )
+
     def __get_time_delay(self: Self, c, pos_earth) -> np.ndarray:
         """
         Return delay between entering the galactic disc and arrival at Earth through magnetic field.
@@ -303,7 +377,7 @@ class GMFBackPropagation:
             / (60 * 60 * 24 * 365)
         )
 
-    def __setup_simulation(self: Self, obs, mt_num: int):
+    def __setup_simulation(self: Self, obs, mt_num: int, seed: int = None):
         """
         Prepare the crpropa backtracking simulation.
 
@@ -313,6 +387,13 @@ class GMFBackPropagation:
             CRPropa observer object
         mt_num : int
             the montel number for the UF23 model
+        seed : int, optional
+            explicit seed for the turbulent/striated field realization. If
+            None (default), a fresh seed is drawn from OS entropy every call,
+            exactly as before -- this parameter is purely additive and does
+            not change existing behaviour when omitted. Only needed to force
+            multiple calls to reuse the SAME field realization (e.g. for the
+            turbulence-correlation test in new_uhecr_model/lnA_sensitivity/).
 
         Returns
         -------
@@ -322,40 +403,43 @@ class GMFBackPropagation:
         sim = cr.ModuleList()
         rng = np.random.default_rng()
 
+        def _resolve_seed():
+            return seed if seed is not None else int(rng.integers(low=0, high=10000000))
+
         # setup magnetic field
         if self.gmf_model == "JF12":
-            seed = int(rng.integers(low=0, high=10000000))
+            field_seed = _resolve_seed()
             gmf_cr = cr.JF12Field()
-            gmf_cr.randomStriated(seed)
-            gmf_cr.randomTurbulent(seed)
+            gmf_cr.randomStriated(field_seed)
+            gmf_cr.randomTurbulent(field_seed)
 
         elif self.gmf_model == "UF23all":
             gmf_cr = cr.UF23Field(mt_num)
 
         elif self.gmf_model == "UF23allTurb":
-            seed = int(rng.integers(low=0, high=10000000))
+            field_seed = _resolve_seed()
 
             gmf_cr = cr.UF23Field(mt_num)
-            gmf_cr.randomStriated(seed)
-            gmf_cr.randomTurbulent(seed)
+            gmf_cr.randomStriated(field_seed)
+            gmf_cr.randomTurbulent(field_seed)
 
         elif self.gmf_model.find("UF23") != -1:
             uf23_model = self.gmf_model.replace("UF23", "").replace("Turb", "")
             gmf_cr = cr.UF23Field(self.__UF23_models[uf23_model])
 
             if self.gmf_model.find("Turb") != -1:
-                seed = int(rng.integers(low=0, high=10000000))
+                field_seed = _resolve_seed()
 
-                
-                gmf_cr.randomStriated(seed)
-                gmf_cr.randomTurbulent(seed)
+
+                gmf_cr.randomStriated(field_seed)
+                gmf_cr.randomTurbulent(field_seed)
 
         elif self.gmf_model == "UF23baseTurb":
-            seed = int(rng.integers(low=0, high=10000000))
+            field_seed = _resolve_seed()
 
             gmf_cr = cr.UF23Field(0)
-            gmf_cr.randomStriated(seed)
-            gmf_cr.randomTurbulent(seed)
+            gmf_cr.randomStriated(field_seed)
+            gmf_cr.randomTurbulent(field_seed)
 
         elif self.gmf_model == "PT11":
             gmf_cr = cr.PT11Field()
@@ -547,3 +631,91 @@ class GMFBackPropagation:
             open(outfile, "wb"),
             protocol=-1,
         )
+
+
+class RigidityResolvedGMFBackPropagation(GMFBackPropagation):
+    """
+    GMFBackPropagation subclass that additionally computes kappa_GMF on a
+    fixed rigidity grid (instead of only the rigidity-marginalised kappa_GMF
+    from run_backpropagation/compute_kappa_gmf).
+
+    The marginalised omega_det / kappa_GMF computed by the parent class are
+    left completely untouched -- this only adds `kappa_gmf_grid` and
+    `R_grid`, meant to be interpolated against an event's latent rigidity
+    inside the Stan fit, for direct comparison against the marginalised
+    kappa_GMF.
+    """
+
+    # rigidity grid (in EV) validated via new_uhecr_model/lnA_sensitivity/gmf_backpropagation:
+    # log-spaced, densified below R=20 EV where kappa_GMF(R) and the interpolation
+    # error both vary fastest.
+    DEFAULT_R_GRID = np.array(
+        [2.0, 2.517, 3.169, 3.988, 5.02, 7.96, 12.62, 20.0]
+    )
+
+    def run_backpropagation_rigidity_grid(
+        self: Self,
+        R_grid: np.ndarray = None,
+        Nsamples_per_R: int = 300,
+        njobs: int = 4,
+    ) -> None:
+        """
+        Backpropagate at each fixed rigidity in R_grid (no lnA/rigidity
+        marginalisation) and fit kappa_GMF at each grid point.
+
+        Populates `self.R_grid` (shape [Nr]) and `self.kappa_gmf_grid`
+        (shape [Nuhecrs, Nr]).
+
+        Parameters
+        ----------
+        R_grid : np.ndarray, optional
+            fixed rigidities (in EV) to backpropagate at. Defaults to
+            DEFAULT_R_GRID.
+        Nsamples_per_R : int, default=300
+            number of backpropagation samples per event per rigidity grid
+            point (must be >=8 for UF23-family models).
+        njobs : int, default=4
+            number of parallel jobs for backpropagation.
+        """
+        if R_grid is None:
+            R_grid = self.DEFAULT_R_GRID
+        R_grid = np.asarray(R_grid, dtype=float)
+
+        Nsamples = Nsamples_per_R
+        if self.gmf_model.find("UF23all") != -1:
+            Nsamples = int(Nsamples * 8)  # number of models in UF23
+        assert Nsamples >= 8, (
+            "Nsamples_per_R must be >=8 for UF23-family models (mt_num division)."
+        )
+
+        Nr = len(R_grid)
+        self.R_grid = R_grid
+        self.kappa_gmf_grid = np.zeros((self.Nuhecrs, Nr))
+
+        for j, R_fixed in enumerate(R_grid):
+            bt_args = []
+            for i in range(self.Nuhecrs):
+                uhecr_sampled_uvs = sample_vMF(
+                    self.uhecr_uv[i], self.kappa_det, num_samples=Nsamples
+                )
+                uhecr_fixed_Rs = np.full(Nsamples, R_fixed)
+                bt_args.append((i, uhecr_sampled_uvs, uhecr_fixed_Rs))
+
+            results = ParallelPbar(f"Backpropagating at R={R_fixed:.3g} EV: ")(
+                n_jobs=njobs
+            )(delayed(self.run_single_backpropagation)(arg) for arg in bt_args)
+
+            # populate defl_sampled_uvs / defl_mean_uvs for this grid point,
+            # then reuse _get_kappa_gmf(uhecr_idx) unmodified
+            self.defl_sampled_uvs = np.zeros((self.Nuhecrs, Nsamples, 3))
+            self.defl_mean_uvs = np.zeros((self.Nuhecrs, 3))
+            for uhecr_idx, ars, dls, dlm, td in results:
+                nan_mask = np.isnan(dls)
+                if nan_mask.any():
+                    a_sample_with_nonans = dls[~np.any(nan_mask, axis=1)][0:1]
+                    dls = np.where(nan_mask, a_sample_with_nonans, dls)
+                self.defl_sampled_uvs[uhecr_idx, ...] = dls
+                self.defl_mean_uvs[uhecr_idx, :] = dlm
+
+            for i in range(self.Nuhecrs):
+                self.kappa_gmf_grid[i, j] = self._get_kappa_gmf(i)

@@ -195,7 +195,11 @@ class Data:
 
         return skymap
 
-    def load_from_analysis_file(self: Self, filename: str) -> None:
+    def load_from_analysis_file(
+        self: Self,
+        filename: str,
+        lnA_moments_filename: str = "lnA_moments_data.h5",
+    ) -> None:
         """
         Load data from an Analysis output file.
 
@@ -203,6 +207,11 @@ class Data:
         ----------
         filename: str
             file name of the Analysis output file.
+        lnA_moments_filename: str, default="lnA_moments_data.h5"
+            the lnA moments file to load onto the reconstructed detector (not
+            itself persisted in the Analysis output file -- see
+            ``Detector.load_lnA_data``). Pass a "...sim..." path to use a
+            simulation-specific lnA moments file instead of the default.
         """
         # Read out information on data and detector
         uhecr_properties = {}
@@ -230,7 +239,12 @@ class Data:
         source = Source()
         source.load_from_properties(source_properties)
 
-        detector = Detector(detector_properties)
+        detector_label = detector_properties["label"]
+        if isinstance(detector_label, bytes):
+            detector_label = detector_label.decode("UTF-8")
+        detector = Detector(detector_label)
+        detector.get_exposure_properties()
+        detector.load_lnA_data(lnA_filename=lnA_moments_filename)
 
         # Add to data object
         self.uhecr = uhecr

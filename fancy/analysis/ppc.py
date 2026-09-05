@@ -10,7 +10,7 @@ import cmdstanpy
 class PPC:
     def __init__(
         self: Self,
-        fit: cmdstanpy.stanfit.mcmc.CmdStanMCMC,
+        fit: "Union[cmdstanpy.stanfit.mcmc.CmdStanMCMC, FitResult]",
         data: Data,
         gmf_model : str,
         simulation : Simulation
@@ -20,8 +20,16 @@ class PPC:
 
         Parameters
         ----------
-        - fit : cmdstanpy.stanfit.mcmc.CmdStanMCMC
-            The fit results from a CmdStanMCMC model.
+        - fit : cmdstanpy.stanfit.mcmc.CmdStanMCMC or fancy.analysis.analysis.FitResult
+            The fit results, either a live CmdStanMCMC from `Analysis.fit_model()`
+            or the read-only h5-backed `FitResult` shim returned by
+            `Analysis.load()`. Only `stan_variable`/`stan_variables` are used
+            here (both call sites: `get_ppc`, `compute_assos_prob`), and both
+            objects expose that same interface, so no logic in this class
+            needs to change based on which one is passed in. The type hint is
+            a plain string (not a real import of `FitResult`) to avoid a
+            circular import between `fancy.analysis.ppc` and
+            `fancy.analysis.analysis`.
         """
         self.fit = fit
         self.data = data
@@ -118,7 +126,8 @@ class PPC:
                     self.simulation.config["kappa_det"],
                     self.simulation.config["logE_sys"]
                 )
-                skycoord_gb_dets, _ = sim_ppc.backpropagate_events()
+                # skycoord_gb_dets, _ = sim_ppc.backpropagate_events()
+                skycoord_gb_dets = None
             except OverflowError:
                 # if the simulation fails due to overflow, skip this sample
                 print(f"Overflow error for sample {ippc}, skipping.")

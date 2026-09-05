@@ -41,6 +41,10 @@ class Uhecr:
         self.unit_vector_gb = None
         self.kappa_gmfs = None
 
+        # stubs for rigidity-resolved kappa_GMF(R) table (optional)
+        self.log10_gmf_Rgrid = None
+        self.log_kappa_gmf_grid = None
+
     def __get_angular_uncertainty(self: Self) -> float:
         """Get angular reconstruction uncertainty from label."""
         if self.label == "TA2015":
@@ -144,6 +148,11 @@ class Uhecr:
                     ()
                 ]  # deflection parameter
 
+                # read the rigidity-resolved kappa_GMF(R) table, if present
+                if "log10_gmf_Rgrid" in data["gmf"][config_key] and "log_kappa_gmf_grid" in data["gmf"][config_key]:
+                    self.log10_gmf_Rgrid = data["gmf"][config_key]["log10_gmf_Rgrid"][()]
+                    self.log_kappa_gmf_grid = data["gmf"][config_key]["log_kappa_gmf_grid"][()]
+
                 # read the exposure factors
                 if "exposure_factor" in data["gmf"][config_key]:
                     self.exposure = data["gmf"][config_key][
@@ -183,7 +192,13 @@ class Uhecr:
         uhecr_properties: dict
             dict containing UHECR properties.
         """
-        self.label = uhecr_properties["label"]
+        label = uhecr_properties["label"]
+        # h5py returns fixed-length string datasets as bytes; __find_area's
+        # "auger2022" in self.label / "TA2015" in self.label membership
+        # checks require str, so decode here (this is the only construction
+        # path that reads label back from an h5 dataset instead of a plain
+        # str passed by the caller).
+        self.label = label.decode() if isinstance(label, bytes) else label
 
         # Read from input dict
         self.unit_vector = uhecr_properties["unit_vector"]
@@ -193,8 +208,13 @@ class Uhecr:
         self.exposure = uhecr_properties["exposure"] if "exposure" in uhecr_properties else np.ones(self.N)
 
         self.zenith_angle = uhecr_properties["zenith_angle"]
-        self.year = uhecr_properties["years"]
-        self.day = uhecr_properties["days"]
+        # year/day are only meaningful for real (non-simulated) UHECR data --
+        # __get_properties() never persists them, so a file written by
+        # Analysis.save() (e.g. for a simulated fit) will not have "years"/
+        # "days" keys. Fall back to None rather than KeyError, matching the
+        # existing "exposure" fallback above.
+        self.year = uhecr_properties["years"] if "years" in uhecr_properties else None
+        self.day = uhecr_properties["days"] if "days" in uhecr_properties else None
 
         self.period = self.__find_period()
         self.A = self.__find_area()
@@ -349,12 +369,11 @@ class Uhecr:
         elif "auger2022" in self.label:
             from ..detector.auger2022 import A, M, period_start
 
-            # get period for each event - in years, taking into account days
-            start_julianyear = period_start.year + period_start.day / 365.25
-            deltats = (self.year + self.day / 365.25) - start_julianyear
-
             # very hacky, but only exists currently for backwards compatibility anyways
-            if len(self.exposure) > 0:
+            if self.year is not None and self.day is not None and len(self.exposure) > 0:
+                # get period for each event - in years, taking into account days
+                start_julianyear = period_start.year + period_start.day / 365.25
+                deltats = (self.year + self.day / 365.25) - start_julianyear
                 area = self.exposure / (M * deltats)
             else:
                 area = np.tile(A, self.N)
@@ -379,6 +398,13 @@ class Uhecr:
         Dates are based on dates in table 1 in Abreu et al. (2010) or in Collaboration et al. 2014.
         """
         period = []
+        if self.year is None or self.day is None:
+            # year/day are not persisted for simulated UHECR data (see
+            # __get_properties / load_from_properties), so a Uhecr
+            # reconstructed via Analysis.load() has neither -- fall back to a
+            # uniform period rather than erroring in np.nditer([None, None]).
+            print(f"no year/day data found for {self.label}. setting uniform period")
+            return np.ones(self.N, dtype=int)
         if self.label == "auger2014":
             from ..detector.auger2014 import (
                 period_1_end,

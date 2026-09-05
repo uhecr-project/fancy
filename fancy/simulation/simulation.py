@@ -16,7 +16,7 @@ from scipy.interpolate import CubicSpline, RegularGridInterpolator
 from typing_extensions import List, Self, Tuple, Union
 
 from fancy import Data
-from fancy.physics.gmf import GMFLensing, GMFBackPropagation
+from fancy.physics.gmf import GMFLensing, GMFBackPropagation, RigidityResolvedGMFBackPropagation
 from fancy.interfaces.grid_generator import GridGenerator
 from fancy.utils.helpers import create_dataset_compressed, km_per_Mpc, theta_igmfs
 from fancy.simulation.helpers import (
@@ -1070,7 +1070,12 @@ class Simulation:
 
     # add some function to backtrack samples to get the kappa_GMF per mass model
     def backpropagate_events(
-        self: Self, n_samples: int = 500, n_jobs: int = 4
+        self: Self,
+        n_samples: int = 500,
+        n_jobs: int = 4,
+        compute_rigidity_grid: bool = False,
+        rigidity_grid: np.ndarray = None,
+        n_samples_per_rigidity: int = 300,
     ) -> Tuple[SkyCoord, np.ndarray]:
         """
         Backpropagate the sampled & exposure-applied events at Earth back to the GB.
@@ -1081,6 +1086,18 @@ class Simulation:
             the number of samples for backpropagation simulation
         n_jobs: int
             the number of jobs to use for parallelisation
+        compute_rigidity_grid: bool, default=False
+            if True, additionally backpropagate at a fixed rigidity grid
+            (via RigidityResolvedGMFBackPropagation) to get a rigidity-resolved
+            kappa_GMF(R) table, on top of the usual rigidity-marginalised
+            kappa_GMF / omega_det. Has no effect on omega_det / kappa_ds,
+            which are computed exactly as before.
+        rigidity_grid: np.ndarray, optional
+            fixed rigidities (in EV) for the kappa_GMF(R) table. Defaults to
+            RigidityResolvedGMFBackPropagation.DEFAULT_R_GRID.
+        n_samples_per_rigidity: int, default=300
+            number of backpropagation samples per event per rigidity grid
+            point.
         """
         if self.gmf_model == "None":
             print(
@@ -1098,7 +1115,7 @@ class Simulation:
                 self.truths["Nex"], fill_value=np.sqrt(7552 / self.config["kappa_det"])
             )  # no GMF deflection
             return self.truths["skycoord_earth_dets"], self.truths["kappa_gmfs"]
-        
+
         # first write data to temporary file such that Data can read it
         outfile = (
             tempfile.mkstemp()[1] + "sim.h5"
@@ -1118,7 +1135,8 @@ class Simulation:
         )
 
         # now perform GMF back propagation
-        gmfbackprop = GMFBackPropagation(data_for_bp, self.gmf_model)
+        backprop_cls = RigidityResolvedGMFBackPropagation if compute_rigidity_grid else GMFBackPropagation
+        gmfbackprop = backprop_cls(data_for_bp, self.gmf_model)
         gmfbackprop.run_backpropagation(n_samples, njobs=n_jobs, parallel=True)
         gmfbackprop.compute_kappa_gmf(njobs=n_jobs)
 
@@ -1129,6 +1147,15 @@ class Simulation:
             self.truths["theta_gmfs"] = np.rad2deg(gmfbackprop.thetaPs)
             self.truths["skycoord_gb_truths_bp"] = gmfbackprop.uhecr_coords_gb
             self.truths["kappa_ds"] = gmfbackprop.kappa_gmfs
+
+        # additionally compute the rigidity-resolved kappa_GMF(R) table,
+        # leaving omega_det / kappa_ds above untouched
+        if compute_rigidity_grid:
+            gmfbackprop.run_backpropagation_rigidity_grid(
+                R_grid=rigidity_grid, Nsamples_per_R=n_samples_per_rigidity, njobs=n_jobs
+            )
+            self.truths["log10_gmf_Rgrid"] = np.log10(gmfbackprop.R_grid)
+            self.truths["log_kappa_gmf_grid"] = np.log(gmfbackprop.kappa_gmf_grid)
 
         return gmfbackprop.uhecr_coords_gb, gmfbackprop.kappa_gmfs
 
@@ -1207,6 +1234,18 @@ class Simulation:
                     "glats_gb",
                     self.truths["skycoord_gb_truths_bp"].galactic.b.deg,
                 )
+
+                if "log10_gmf_Rgrid" in self.truths and "log_kappa_gmf_grid" in self.truths:
+                    create_dataset_compressed(
+                        gmfdefl_datas_config_grp,
+                        "log10_gmf_Rgrid",
+                        self.truths["log10_gmf_Rgrid"],
+                    )
+                    create_dataset_compressed(
+                        gmfdefl_datas_config_grp,
+                        "log_kappa_gmf_grid",
+                        self.truths["log_kappa_gmf_grid"],
+                    )
 
         # save the mean and variance of lnA
         with h5py.File(lnA_outfile, "a") as file:
@@ -1322,6 +1361,29 @@ class Simulation:
         simulation = cls(data, gmf_model=payload["gmf_model"], n_jobs=n_jobs)
         simulation.initialise_grids(**_decode_truths_value(payload["grid_init_kwargs"]))
         simulation.truths = _decode_truths_value(payload["truths"])
+
+        # `apply_mass_response`/`apply_energy_directional_response` are not
+        # re-run here (they are stochastic / their outputs are already in
+        # `truths` above), but downstream consumers (e.g. `PPC.get_ppc`) read
+        # detector-response parameters from `config`, not `truths`. These are
+        # deterministic given `data.detector` -- restore them the same way
+        # `generate_simulated_datasets.py` originally set them (mean/var_lnA_sys
+        # at their function defaults, since that script never overrides them).
+        simulation.config["mean_lnA_stat"] = np.interp(
+            simulation.lnA_energy_grid,
+            data.detector.lnA_logE_grid,
+            data.detector.mean_lnA_stat,
+        )
+        simulation.config["var_lnA_stat"] = np.interp(
+            simulation.lnA_energy_grid,
+            data.detector.lnA_logE_grid,
+            data.detector.var_lnA_stat,
+        )
+        simulation.config["mean_lnA_sys"] = 0.0
+        simulation.config["var_lnA_sys"] = 0.0
+        simulation.config["logE_stat"] = data.detector.logE_stat
+        simulation.config["logE_sys"] = data.detector.logE_sys
+        simulation.config["kappa_det"] = data.detector.kappa_d
 
         return simulation
 

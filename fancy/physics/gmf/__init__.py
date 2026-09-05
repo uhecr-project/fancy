@@ -3,7 +3,7 @@ import requests
 import shutil
 
 from .gmf_lensing import GMFLensing
-from .gmf_backpropagation import GMFBackPropagation
+from .gmf_backpropagation import GMFBackPropagation, RigidityResolvedGMFBackPropagation
 from .gmf_exposure import GMFExposure
 
 def install_gmflens():

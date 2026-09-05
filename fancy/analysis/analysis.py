@@ -6,6 +6,7 @@ from typing import Union
 import cmdstanpy
 import h5py
 import numpy as np
+from scipy.interpolate import interp1d
 from cmdstanpy import CmdStanModel
 from typing_extensions import Self  # change to typing for py>3.11
 import arviz as az
@@ -20,14 +21,62 @@ from fancy.utils.package_data import (
 )
 
 
+class FitResult:
+    """Read-only, h5-backed stand-in for a ``cmdstanpy.CmdStanMCMC``.
+
+    Exposes just the subset of the cmdstanpy interface that the plotting code
+    and ``PPC`` actually use (``stan_variable``, ``stan_variables``,
+    ``method_variables``, ``divergences``, ``max_treedepths``, ``step_size``,
+    ``diagnose``), backed directly by the ``fit/samples`` and
+    ``fit/diagnostics`` groups written by :meth:`Analysis.save`. This avoids
+    ever needing to re-run HMC or unpickle a raw ``CmdStanMCMC`` just to
+    regenerate plots from a previously-saved fit.
+    """
+
+    def __init__(self: Self, samples: dict, diagnostics: dict) -> None:
+        self._samples = samples
+        self._diagnostics = diagnostics
+
+    def stan_variable(self: Self, var: str) -> np.ndarray:
+        return self._samples[var]
+
+    def stan_variables(self: Self) -> dict:
+        return self._samples
+
+    def method_variables(self: Self) -> dict:
+        method_vars = {"lp__": self._diagnostics["log_post"]}
+        for key in ("divergent__", "treedepth__", "energy__", "n_leapfrog__"):
+            if key in self._diagnostics:
+                method_vars[key] = self._diagnostics[key]
+        return method_vars
+
+    @property
+    def divergences(self: Self) -> np.ndarray:
+        return self._diagnostics["divergences"]
+
+    @property
+    def max_treedepths(self: Self) -> np.ndarray:
+        return self._diagnostics["max_treedepths"]
+
+    @property
+    def step_size(self: Self) -> np.ndarray:
+        return self._diagnostics["step_size"]
+
+    def diagnose(self: Self) -> str:
+        report = self._diagnostics.get("diagnose_report", "")
+        return report if isinstance(report, str) else report.decode()
+
+
 class Analysis:
     """Container to manage the inputs and outputs of the fits."""
 
     # pre-defined analysis types
     energy_type = "energy_only"
     mass_type = "mass_only"
-    spatial_type = "spatial_only"
+    spatial_type = "spatial_only" # NOTE: this case is only possible as debug
+    mass_spatial_type = "mass_spatial"
     energy_mass_type = "energy_mass"
+    energy_spatial_type = "energy_spatial"
     energy_mass_spatial_type = "energy_mass_spatial"
 
     fit_input_keys = [  # noqa: RUF012
@@ -71,7 +120,8 @@ class Analysis:
         data: Data,
         gmf_model : str = "None",
         analysis_type: str = energy_mass_spatial_type,
-        background_only : bool = False
+        background_only : bool = False,
+        use_rigidity_grid : bool = False,
     ) -> None:
         """
         Container to manage the inputs and outputs of the fits.
@@ -83,20 +133,30 @@ class Analysis:
             All such information should already be initialised (see relevant class for
             more information.)
         gmf_model: str, default="None"
-            The GMF model to consider. 
+            The GMF model to consider.
         analysis_type: str, default=energy_mass_spatial
             The analysis type to consider.
         background_only : bool, default=False
             Whether to consider only background sources in the analysis.
+        use_rigidity_grid : bool, default=False
+            If True (only supported for analysis_type=energy_mass_spatial or
+            analysis_type=spatial_only), compiles the rigidity-resolved
+            kappa_GMF(R) model variant, which requires log10_gmf_Rgrid /
+            log_kappa_gmf_grid to be present in the loaded data / simulation
+            (see RigidityResolvedGMFBackPropagation).
         """
         self.data = data
         self.gmf_model = gmf_model
         self.analysis_type = analysis_type
         self.bg_only = background_only
+        self.use_rigidity_grid = use_rigidity_grid
 
         self.stan_model = None
         self.grid_config = None
         self.nthreads_per_chain = None
+        # instance-level copy: appending optional keys (e.g. the rigidity-resolved
+        # kappa_GMF grid) must not leak into the shared class-level list
+        self.fit_input_keys = list(self.fit_input_keys)
         self.fit_inputs = {key: None for key in self.fit_input_keys}
         self.fit = None
         self.inits_dict = None
@@ -238,7 +298,7 @@ class Analysis:
 
         self.fit_inputs["Nsrcs"] = simulation.Nsrcs
         self.fit_inputs["D"] = simulation.data.source.distance
-        self.fit_inputs["omega_src"] = simulation.source_uvs
+        self.fit_inputs["omega_src"] = simulation.source_uvs[:-1,:] # exclude background source
         self.fit_inputs["N"] = simulation.truths['Nex']
         self.fit_inputs["Edet"] = simulation.truths['Edets']
         self.fit_inputs["kappa_ds"] = simulation.truths["kappa_ds"]
@@ -260,15 +320,50 @@ class Analysis:
         self.fit_inputs["NAsrcs"] = simulation.Nmass_fracs
         self.fit_inputs["alpha_grid"] = simulation.alpha_grid
         self.fit_inputs["logE_grid"] = np.log(simulation.energy_grid)
+        self.fit_inputs["Emin"] = np.min(simulation.energy_grid)
+        self.fit_inputs["Emax"] = np.max(simulation.energy_grid)
         self.fit_inputs["earth_spectrum_grid"] = simulation.spectrum_grid.T
         self.fit_inputs["lnA_logE_grid"] = np.log(simulation.lnA_energy_grid)
         self.fit_inputs["mean_lnA_grid"] = simulation.mean_lnA_grid.T
         self.fit_inputs["var_lnA_grid"] = simulation.var_lnA_grid.T
-        self.fit_inputs["Nbeta_egmfs"] = len(simulation.beta_egmf_grid)
-        self.fit_inputs["log10_beta_egmf_grid"] = np.log10(simulation.beta_egmf_grid.value)
-        self.fit_inputs["log_wexp_earth_grid"] = np.moveaxis(simulation.log_wexp_earth_grid, (0,1,2,3), (0,2,3,1))
-        self.fit_inputs["log_wexp_src_grid"] = np.moveaxis(simulation.log_wexp_src_grid, (0,1,2,3), (0,2,3,1))
         self.fit_inputs["esrc_ratio_grid"] = simulation.esrc_ratio_grid.T
+
+        # energy_only has no beta_egmf axis in its Stan declaration: it never
+        # models EGMF deflection, so log_wexp_earth_grid/log_wexp_src_grid
+        # must be collapsed from (Nsrcs[+1], Nalphas, Nbeta_egmfs, NAsrcs) down
+        # to (Nsrcs[+1], Nalphas, NAsrcs) before the usual moveaxis to
+        # (Nsrcs[+1], NAsrcs, Nalphas). We slice at this simulation's truth
+        # beta_egmf (not beta_egmf->0) so Nex matches the exposure the data
+        # was actually drawn from, keeping ablated and full fits comparable.
+        if self.analysis_type == self.energy_type or self.analysis_type == self.mass_type or self.analysis_type == self.energy_mass_type:
+            log10_beta_egmf_truth = simulation.truths["log10_beta_egmf"]
+            log10_beta_egmf_grid = np.log10(simulation.beta_egmf_grid.value)
+
+            def _slice_at_truth_beta_egmf(log_wexp_grid: np.ndarray) -> np.ndarray:
+                # log_wexp_grid shape: (Nk, Nalphas, Nbeta_egmfs, NAsrcs)
+                interpolator = interp1d(
+                    log10_beta_egmf_grid, log_wexp_grid, axis=2
+                )
+                return interpolator(log10_beta_egmf_truth)  # (Nk, Nalphas, NAsrcs)
+
+            self.fit_inputs["log_wexp_earth_grid"] = np.moveaxis(
+                _slice_at_truth_beta_egmf(simulation.log_wexp_earth_grid), (0, 1, 2), (0, 2, 1)
+            )
+            self.fit_inputs["log_wexp_src_grid"] = np.moveaxis(
+                _slice_at_truth_beta_egmf(simulation.log_wexp_src_grid), (0, 1, 2), (0, 2, 1)
+            )
+            # energy_model.stan has no beta_egmf axis at all: drop these keys
+            # rather than leaving them None, or the missing-keys check below
+            # would reject a perfectly valid energy_only fit_inputs dict.
+            for key in ("Nbeta_egmfs", "log10_beta_egmf_grid"):
+                self.fit_inputs.pop(key, None)
+                if key in self.fit_input_keys:
+                    self.fit_input_keys.remove(key)
+        else:
+            self.fit_inputs["Nbeta_egmfs"] = len(simulation.beta_egmf_grid)
+            self.fit_inputs["log10_beta_egmf_grid"] = np.log10(simulation.beta_egmf_grid.value)
+            self.fit_inputs["log_wexp_earth_grid"] = np.moveaxis(simulation.log_wexp_earth_grid, (0,1,2,3), (0,2,3,1))
+            self.fit_inputs["log_wexp_src_grid"] = np.moveaxis(simulation.log_wexp_src_grid, (0,1,2,3), (0,2,3,1))
 
         # for omega_det, deal with this depending on gmf model
         if simulation.gmf_model == "None":
@@ -278,11 +373,41 @@ class Analysis:
         omega_det.representation_type = "cartesian"
         self.fit_inputs["omega_det"] = omega_det.cartesian.xyz.value.T
 
+        # rigidity-resolved kappa_GMF(R) table, only if it was computed
+        # (leaves kappa_ds / omega_det above untouched either way)
+        if "log10_gmf_Rgrid" in simulation.truths and "log_kappa_gmf_grid" in simulation.truths:
+            self.fit_inputs["Nr_gmf"] = len(simulation.truths["log10_gmf_Rgrid"])
+            self.fit_inputs["log10_gmf_Rgrid"] = simulation.truths["log10_gmf_Rgrid"]
+            self.fit_inputs["log_kappa_gmf_grid"] = simulation.truths["log_kappa_gmf_grid"]
+            for key in ("log10_gmf_Rgrid", "log_kappa_gmf_grid"):
+                if key not in self.fit_input_keys:
+                    self.fit_input_keys.append(key)
+
+        self._calculate_grain_size()
+
+        if self.analysis_type == self.spatial_type:
+            # then we explicitly give the alphas, mass fracs, and logE_true to the fit, rather than letting them be free parameters
+            self.fit_inputs["alphas"] = simulation.truths["alphas"]
+            self.fit_inputs["mass_fracs"] = simulation.truths["mass_fracs"].T #?
+            self.fit_inputs["logE_true"] = np.log(simulation.truths["Etruths"])
+
+        if self.analysis_type == self.mass_spatial_type:
+            # we give the DETECTED energies, since we do not know them apriori
+            self.fit_inputs["logE_det"] = np.log(simulation.truths["Edets"])
 
         # warn if anything is None
         missing_keys = [k for k, v in self.fit_inputs.items() if v is None]
         if len(missing_keys) > 0:
             raise ValueError(f"Missing fit inputs: {missing_keys}")
+
+
+
+    def _calculate_grain_size(self: Self) -> None:
+        """Calculate the grain size for the fit."""
+        self.fit_inputs["grain_size"] = pick_grain_size(
+            self.fit_inputs["N"], self.nthreads_per_chain
+        )
+        print(f"Using grain size of {self.fit_inputs['grain_size']} for {self.fit_inputs['N']} events.")
         
 
     def compile_stan_model(self: Self, stan_threads : int = 4) -> None:
@@ -295,7 +420,25 @@ class Analysis:
             number of stan threads per chain to run
         """
         # get path to the stan file
-        stan_ext = "_background.stan" if self.bg_only else ".stan"
+        if self.use_rigidity_grid:
+            if self.analysis_type not in (
+                self.energy_mass_spatial_type,
+                self.spatial_type,
+                self.mass_spatial_type,
+            ):
+                raise ValueError(
+                    "use_rigidity_grid is only supported for "
+                    f"analysis_type={self.energy_mass_spatial_type} or "
+                    f"{self.spatial_type}."
+                )
+            if self.bg_only:
+                raise ValueError(
+                    "use_rigidity_grid has no background-only variant."
+                )
+            stan_ext = "_rigidity_grid.stan"
+        else:
+            stan_ext = "_background.stan" if self.bg_only else ".stan"
+
         if self.analysis_type == self.energy_type:
             stan_path = get_path_to_stan_includes(self.energy_type)
             path_to_stan_file = get_path_to_stan_file(
@@ -315,6 +458,11 @@ class Analysis:
             stan_path = get_path_to_stan_includes(self.energy_mass_type)
             path_to_stan_file = get_path_to_stan_file(
                 self.energy_mass_type, f"energy_mass_model{stan_ext}"
+            )
+        elif self.analysis_type == self.mass_spatial_type:
+            stan_path = get_path_to_stan_includes(self.mass_spatial_type)
+            path_to_stan_file = get_path_to_stan_file(
+                self.mass_spatial_type, f"mass_spatial_model{stan_ext}"
             )
         elif self.analysis_type == self.energy_mass_spatial_type:
             stan_path = get_path_to_stan_includes(self.energy_mass_spatial_type)
@@ -363,15 +511,18 @@ class Analysis:
         else:
             self.fit_inputs["omega_det"] = self.data.uhecr.coords_gb.cartesian.xyz.value.T
 
-        # calculate the grain size
-        self.fit_inputs["grain_size"] = pick_grain_size(
-            self.fit_inputs["N"], self.nthreads_per_chain
-        )
-        print(f"Using grain size of {self.fit_inputs['grain_size']} for {self.fit_inputs['N']} events.")
+        # rigidity-resolved kappa_GMF(R) table, only if it was loaded
+        # (leaves kappa_ds / omega_det above untouched either way)
+        if self.data.uhecr.log10_gmf_Rgrid is not None and self.data.uhecr.log_kappa_gmf_grid is not None:
+            self.fit_inputs["Nr_gmf"] = len(self.data.uhecr.log10_gmf_Rgrid)
+            self.fit_inputs["log10_gmf_Rgrid"] = self.data.uhecr.log10_gmf_Rgrid
+            self.fit_inputs["log_kappa_gmf_grid"] = self.data.uhecr.log_kappa_gmf_grid
+            for key in ("Nr_gmf", "log10_gmf_Rgrid", "log_kappa_gmf_grid"):
+                if key not in self.fit_input_keys:
+                    self.fit_input_keys.append(key)
 
-        # NB: should update this to deal with non-data data types
-        if self.analysis_type == self.spatial_type:
-            pass
+        # calculate the grain size
+        self._calculate_grain_size()
         
         # warn if anything is None
         missing_keys = [k for k, v in self.fit_inputs.items() if v is None]
@@ -470,18 +621,18 @@ class Analysis:
         # raise Exception("The following code is not yet implemented for cmdstanpy backend. Please use pystan backend for now.")
 
         # different parameter names and configurations for background only fits
-        if self.spatial_type:
-            inits_dict.pop("alphas")
-            inits_dict.pop("mass_fracs")
-            inits_dict.pop("logE_true")
-        elif self.energy_type:
-            inits_dict.pop("beta_egmf")
-            inits_dict.pop("nu_lnAs")
+        # if self.spatial_type:
+        #     inits_dict.pop("alphas")
+        #     inits_dict.pop("mass_fracs")
+        #     inits_dict.pop("logE_true")
+        # elif self.energy_type:
+        #     inits_dict.pop("beta_egmf")
+        #     inits_dict.pop("nu_lnAs")
         if self.bg_only:
-            inits_dict.pop("flux_frac")
-            inits_dict.pop("log10_Ftot")
-            inits_dict.pop("alphas")
-            inits_dict.pop("mass_fracs")
+            # inits_dict.pop("flux_frac")
+            # inits_dict.pop("log10_Ftot")
+            # inits_dict.pop("alphas")
+            # inits_dict.pop("mass_fracs")
             inits_dict["alpha_bg"] = 1
             inits_dict["mass_fracs_bg"] = np.full((self.fit_inputs["NAsrcs"]), 1 / self.fit_inputs["NAsrcs"])
         if inits is not None:
@@ -512,50 +663,84 @@ class Analysis:
             **kwargs,
         )
 
-        # Diagnositics
-        print("Checking all diagnostics...")
-        print(self.fit.diagnose())
+        # # Diagnositics
+        # print("Checking all diagnostics...")
+        # print(self.fit.diagnose())
 
         self.chain = self.fit.stan_variables()
         print("Done!")
         return self.fit
-    
-    def run_diagnostics(self: Self) -> None:
+
+    @classmethod
+    def load(
+        cls,
+        infile: str,
+        gmf_model: str = "None",
+        lnA_moments_filename: str = "lnA_moments_data.h5",
+    ) -> Self:
         """
-        Run a more sophisticated diagnostics on the fit output.
+        Reconstruct an ``Analysis`` instance from a file written by :meth:`save`.
+
+        Rebuilds ``data`` (source/uhecr/detector), ``fit_inputs``, ``inits_dict``,
+        and a read-only :class:`FitResult` shim (assigned to ``self.fit``,
+        exposing ``stan_variable``/``stan_variables``/``method_variables``/
+        ``diagnose`` etc.) directly from the saved HDF5 groups. This never
+        re-runs HMC and never unpickles a raw ``CmdStanMCMC`` -- everything
+        needed for downstream plotting (spectra, skymaps, posteriors, PPCs) is
+        already present in the file. ``stan_model`` is left as ``None`` since
+        the Stan model is not needed (and not compiled) for plotting-only use.
+
+        Parameters
+        ----------
+        infile : str
+            path to a ``.h5`` file previously written by :meth:`save`.
+        gmf_model : str, default="None"
+            the GMF model this fit used. Not stored in the saved file (it's a
+            load-time argument to ``Uhecr``/``Data``, not a persisted
+            attribute), so callers who need it downstream (e.g. PPC
+            generation) must pass it back in explicitly.
+        lnA_moments_filename : str, default="lnA_moments_data.h5"
+            lnA moments file for the reconstructed ``Detector`` (also not
+            persisted in the Analysis output file). Pass the simulation's
+            "...sim..." lnA h5 path if this fit used simulated data, matching
+            the ``lnA_moments_filename`` used at fit time.
 
         Returns
         -------
-        df : pd.DataFrame
-            Dataframe containing the summary statistics for the parameters.
-        flags : dict
-            Dictionary containing flags for the diagnostics.
-        summary_txt : str
-            Summary text of the diagnostics.
+        analysis : Analysis
         """
-        if self.fit is None:
-            raise ValueError("Run `fit_model` first!")
-        
-        raise NotImplementedError("Diagnostics not yet implemented for cmdstanpy backend.")
+        data = Data()
+        data.load_from_analysis_file(infile, lnA_moments_filename=lnA_moments_filename)
 
-        # idata = az.from_cmdstanpy(
-        #     posterior=self.fit,           # your cmdstanpy fit object
-        #     observed_data=self.fit_inputs,  # your simulated data
-        # )
+        with h5py.File(infile, "r") as f:
+            fit_inputs = {key: value[()] for key, value in f["fit"]["input"].items()}
+            samples = {key: value[()] for key, value in f["fit"]["samples"].items()}
+            diagnostics = {}
+            for key, value in f["fit"]["diagnostics"].items():
+                diagnostics[key] = value[()]
+            if "diagnose_report" in f["fit"]["diagnostics"].attrs:
+                diagnostics["diagnose_report"] = f["fit"]["diagnostics"].attrs["diagnose_report"]
+            inits_dict = None
+            if "inits" in f["fit"]:
+                inits_dict = {key: value[()] for key, value in f["fit"]["inits"].items()}
 
-        # var_base_names = [key for key in self.chain.keys() if key != "lp__"]
-        # df, flags, summary_txt = run_single_diagnostics(idata, var_base_names=var_base_names)
+        log_post = samples.pop("log_post")
+        diagnostics["log_post"] = log_post
 
-        # print(summary_txt)
-        # if any(flags[k] for k in ["any_bad_rhat", "any_bad_ess_bulk", 
-        #                       "any_bad_ess_tail", "any_bad_ebfmi", "has_divergences"]):
-        #     print("⚠️ Some diagnostics failed:")
-        #     print(flags)
+        use_rigidity_grid = "log10_gmf_Rgrid" in fit_inputs
 
-        # return df, flags, summary_txt
-    
-    def plot_diagnostics(self : Self, truths : dict = {}) -> None:
-        pass
+        analysis = cls(
+            data,
+            gmf_model=gmf_model,
+            use_rigidity_grid=use_rigidity_grid,
+        )
+        analysis.fit_inputs = fit_inputs
+        analysis.fit_input_keys = list(fit_inputs.keys())
+        analysis.inits_dict = inits_dict
+        analysis.chain = samples
+        analysis.fit = FitResult(samples, diagnostics)
+
+        return analysis
 
     def save(self: Self, outfile: str) -> None:
         """
