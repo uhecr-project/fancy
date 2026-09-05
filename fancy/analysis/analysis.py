@@ -366,7 +366,7 @@ class Analysis:
             self.fit_inputs["log_wexp_src_grid"] = np.moveaxis(simulation.log_wexp_src_grid, (0,1,2,3), (0,2,3,1))
 
         # for omega_det, deal with this depending on gmf model
-        if simulation.gmf_model == "None":
+        if self.gmf_model == "None":
             omega_det = simulation.truths['skycoord_earth_dets']
         else:
             omega_det = simulation.truths['skycoord_gb_truths_bp']
@@ -378,7 +378,13 @@ class Analysis:
         if "log10_gmf_Rgrid" in simulation.truths and "log_kappa_gmf_grid" in simulation.truths:
             self.fit_inputs["Nr_gmf"] = len(simulation.truths["log10_gmf_Rgrid"])
             self.fit_inputs["log10_gmf_Rgrid"] = simulation.truths["log10_gmf_Rgrid"]
+
             self.fit_inputs["log_kappa_gmf_grid"] = simulation.truths["log_kappa_gmf_grid"]
+            # if gmf model is set to None, then we set the log_kappa_gmf_grid to be a constant value of kappa_det, which is the kappa value for the detector
+            # in this way we do not break / alter the stan model.
+            if self.gmf_model == "None":
+                self.fit_inputs["log_kappa_gmf_grid"] = np.full_like(simulation.truths["log_kappa_gmf_grid"], simulation.config['kappa_det'])
+
             for key in ("log10_gmf_Rgrid", "log_kappa_gmf_grid"):
                 if key not in self.fit_input_keys:
                     self.fit_input_keys.append(key)
@@ -394,6 +400,15 @@ class Analysis:
         if self.analysis_type == self.mass_spatial_type:
             # we give the DETECTED energies, since we do not know them apriori
             self.fit_inputs["logE_det"] = np.log(simulation.truths["Edets"])
+
+        if self.analysis_type == self.energy_spatial_type:
+            # the variance can be negative in the measurement. So we explicitly set
+            # the variance to be zero if it is negative. This is a hack to avoid the Stan model from crashing.
+            self.fit_inputs["var_lnA_det"] = np.where(
+                simulation.truths['var_lnA_dets'] > 0,
+                simulation.truths['var_lnA_dets'],
+                0.0
+            )
 
         # warn if anything is None
         missing_keys = [k for k, v in self.fit_inputs.items() if v is None]
@@ -425,11 +440,12 @@ class Analysis:
                 self.energy_mass_spatial_type,
                 self.spatial_type,
                 self.mass_spatial_type,
+                self.energy_spatial_type
             ):
                 raise ValueError(
                     "use_rigidity_grid is only supported for "
                     f"analysis_type={self.energy_mass_spatial_type} or "
-                    f"{self.spatial_type}."
+                    f"{self.spatial_type} or {self.mass_spatial_type} or {self.energy_spatial_type}."
                 )
             if self.bg_only:
                 raise ValueError(
@@ -463,6 +479,11 @@ class Analysis:
             stan_path = get_path_to_stan_includes(self.mass_spatial_type)
             path_to_stan_file = get_path_to_stan_file(
                 self.mass_spatial_type, f"mass_spatial_model{stan_ext}"
+            )
+        elif self.analysis_type == self.energy_spatial_type:
+            stan_path = get_path_to_stan_includes(self.energy_spatial_type)
+            path_to_stan_file = get_path_to_stan_file(
+                self.energy_spatial_type, f"energy_spatial_model{stan_ext}"
             )
         elif self.analysis_type == self.energy_mass_spatial_type:
             stan_path = get_path_to_stan_includes(self.energy_mass_spatial_type)

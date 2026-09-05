@@ -92,8 +92,8 @@ kappa_d = kappa_dval(sig_omega)
 f_E = 0.20
 
 # threshold energy [EeV]
-# Eth = 57
-Eth = 32 # make same as Auger threshold for comparison
+Eth = 57
+# Eth = 32 # make same as Auger threshold for comparison
 
 # systematic uncertainty
 # f_E_sys = 0.05
