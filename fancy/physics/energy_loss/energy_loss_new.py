@@ -87,7 +87,7 @@ class EnergyLossModel:
         massids: list[int]
             list of massids to use for the injection solver.
             The massids are defined using the usual convention in prince.
-            Default is [101(H), 402(He), 1407(N), 2814(Ni), 5626(Fe)].
+            Default is [101(H), 402(He), 1407(N), 2814(Si), 5626(Fe)].
         resources_path: str
             path where resources (kernel, redshift_distance interpolator) is stored
         nthreads: int

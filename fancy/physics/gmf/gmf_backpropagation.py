@@ -549,18 +549,34 @@ class GMFBackPropagation:
         uhecr_idx : int
             the UHECR index
         """
+        return self._fit_kappa_gmf(
+            self.defl_sampled_uvs[uhecr_idx, :, :],
+            self.defl_mean_uvs[uhecr_idx, :],
+        )
+
+    def _fit_kappa_gmf(self: Self, defl_uvs: np.ndarray, defl_mean_uv: np.ndarray) -> float:
+        """
+        Fit kappa_GMF to a vMF distribution given deflected unit vectors and
+        their mean direction directly (no dependence on `self.defl_sampled_uvs`
+        / `self.defl_mean_uvs`), so this is safe to call from parallel workers
+        indexed by anything other than a plain UHECR index (e.g. (event,
+        rigidity) pairs in `RigidityResolvedGMFBackPropagation`).
+
+        Parameters
+        ----------
+        defl_uvs : np.ndarray
+            deflected unit vectors, shape (Nsamples, 3)
+        defl_mean_uv : np.ndarray
+            mean direction of the deflected unit vectors, shape (3,)
+        """
         # nested function for conviencience
         rng_kgmf = np.random.default_rng()
 
         fit = self.vMF_model.sample(
             data={
-                "n": self.defl_sampled_uvs[uhecr_idx, :, :],  # deflected unit vectors
-                "N": self.defl_sampled_uvs.shape[
-                    1
-                ],  # shape of the deflected unit vectors
-                "mu": self.defl_mean_uvs[
-                    uhecr_idx, :
-                ],  # mean direction of deflected vectors
+                "n": defl_uvs,  # deflected unit vectors
+                "N": defl_uvs.shape[0],  # shape of the deflected unit vectors
+                "mu": defl_mean_uv,  # mean direction of deflected vectors
             },
             iter_warmup=1000,
             iter_sampling=2000,
@@ -666,6 +682,19 @@ class RigidityResolvedGMFBackPropagation(GMFBackPropagation):
         Populates `self.R_grid` (shape [Nr]) and `self.kappa_gmf_grid`
         (shape [Nuhecrs, Nr]).
 
+        Both the CRPropa backpropagation and the vMF kappa_GMF fit are
+        dispatched as one flat pool of (event, rigidity) jobs each, instead
+        of Nr sequential per-rigidity passes -- this is a pure scheduling
+        change (better load-balancing across the fixed njobs worker pool,
+        one parallel dispatch instead of Nr back-to-back ones) and does not
+        share any CRPropa field/turbulence realization across rigidity grid
+        points: every (event, rigidity) job still calls
+        `run_single_backpropagation` independently, exactly as before, so
+        the per-job physics/statistics are unchanged (see project memory --
+        field-sharing across rigidities was tested separately and rejected
+        for introducing real bias; this flattening is scheduling-only and
+        does not revisit that).
+
         Parameters
         ----------
         R_grid : np.ndarray, optional
@@ -692,30 +721,58 @@ class RigidityResolvedGMFBackPropagation(GMFBackPropagation):
         self.R_grid = R_grid
         self.kappa_gmf_grid = np.zeros((self.Nuhecrs, Nr))
 
+        # --- build one flat list of (event, rigidity) backprop jobs ---
+        # bt_args entries are still (i, uhecr_sampled_uvs, uhecr_fixed_Rs)
+        # tuples, exactly what run_single_backpropagation expects; we just
+        # additionally remember which (i, j) each job belongs to so results
+        # can be scattered into grid-shaped buffers below.
+        bt_args = []
+        ij_index = []
         for j, R_fixed in enumerate(R_grid):
-            bt_args = []
             for i in range(self.Nuhecrs):
                 uhecr_sampled_uvs = sample_vMF(
                     self.uhecr_uv[i], self.kappa_det, num_samples=Nsamples
                 )
                 uhecr_fixed_Rs = np.full(Nsamples, R_fixed)
                 bt_args.append((i, uhecr_sampled_uvs, uhecr_fixed_Rs))
+                ij_index.append((i, j))
 
-            results = ParallelPbar(f"Backpropagating at R={R_fixed:.3g} EV: ")(
-                n_jobs=njobs
-            )(delayed(self.run_single_backpropagation)(arg) for arg in bt_args)
+        # --- flat parallel dispatch over all Nuhecrs * Nr backprop jobs ---
+        results = ParallelPbar(
+            f"Backpropagating on rigidity grid ({self.Nuhecrs} events x {Nr} rigidities): "
+        )(n_jobs=njobs)(delayed(self.run_single_backpropagation)(arg) for arg in bt_args)
 
-            # populate defl_sampled_uvs / defl_mean_uvs for this grid point,
-            # then reuse _get_kappa_gmf(uhecr_idx) unmodified
-            self.defl_sampled_uvs = np.zeros((self.Nuhecrs, Nsamples, 3))
-            self.defl_mean_uvs = np.zeros((self.Nuhecrs, 3))
-            for uhecr_idx, ars, dls, dlm, td in results:
-                nan_mask = np.isnan(dls)
-                if nan_mask.any():
-                    a_sample_with_nonans = dls[~np.any(nan_mask, axis=1)][0:1]
-                    dls = np.where(nan_mask, a_sample_with_nonans, dls)
-                self.defl_sampled_uvs[uhecr_idx, ...] = dls
-                self.defl_mean_uvs[uhecr_idx, :] = dlm
+        # grid-shaped buffers (event, rigidity) instead of the single
+        # per-pass scratch buffers the sequential-per-rigidity version reused
+        # -- needed because results for all Nr grid points now coexist.
+        defl_sampled_uvs_grid = np.zeros((self.Nuhecrs, Nr, Nsamples, 3))
+        defl_mean_uvs_grid = np.zeros((self.Nuhecrs, Nr, 3))
+        for (i, j), (uhecr_idx, ars, dls, dlm, td) in zip(ij_index, results):
+            assert uhecr_idx == i  # bt_args order matches ij_index order 1:1
+            nan_mask = np.isnan(dls)
+            if nan_mask.any():
+                a_sample_with_nonans = dls[~np.any(nan_mask, axis=1)][0:1]
+                dls = np.where(nan_mask, a_sample_with_nonans, dls)
+            defl_sampled_uvs_grid[i, j, ...] = dls
+            defl_mean_uvs_grid[i, j, :] = dlm
 
-            for i in range(self.Nuhecrs):
-                self.kappa_gmf_grid[i, j] = self._get_kappa_gmf(i)
+        # --- flat parallel dispatch over all Nuhecrs * Nr kappa_GMF fits ---
+        # (this step was previously a serial `for i in range(self.Nuhecrs)`
+        # loop repeated once per rigidity grid point -- unparallelized,
+        # unlike the marginalised-path compute_kappa_gmf. _fit_kappa_gmf
+        # takes its inputs directly rather than reading self.defl_sampled_uvs
+        # / self.defl_mean_uvs by index, so this is safe under concurrent
+        # (i, j) jobs.)
+        kappa_results = ParallelPbar(
+            f"Calculating kappa_GMF on rigidity grid ({self.Nuhecrs} events x {Nr} rigidities): "
+        )(n_jobs=njobs)(
+            delayed(self._fit_kappa_gmf)(
+                defl_sampled_uvs_grid[i, j, ...], defl_mean_uvs_grid[i, j, :]
+            )
+            for i in range(self.Nuhecrs)
+            for j in range(Nr)
+        )
+        for (i, j), kappa in zip(
+            ((i, j) for i in range(self.Nuhecrs) for j in range(Nr)), kappa_results
+        ):
+            self.kappa_gmf_grid[i, j] = kappa

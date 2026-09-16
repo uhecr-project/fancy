@@ -625,9 +625,65 @@ class Analysis:
         elif init_model == "pathfinder":
             print("Using PathFinder variational inference (VI) output as initial values for the parameters.")
             pathfinder = self.stan_model.pathfinder(
-                data=self.fit_inputs
+                data=self.fit_inputs,
             )
-            inits_dict = pathfinder.create_inits()[0]
+            # PathFinder's own approximation can occasionally place a draw
+            # somewhere pathological (e.g. a simplex boundary, or a
+            # beta_egmf/log10_Ftot combination that makes a downstream
+            # truncated-density evaluate to -inf/nan) -- blindly using
+            # create_inits()[0] with no validation meant a single bad draw
+            # would seed every chain identically and make sample() fail
+            # near-instantly on ALL chains (observed as an opaque cmdstanpy
+            # "Operation not permitted" error, since show_console=True is
+            # only set on this pathfinder() call, not on the later
+            # sample() call where the actual crash happens). Confirmed
+            # non-deterministic in practice: an unmodified re-run of the
+            # exact same script sometimes fails and sometimes succeeds,
+            # since create_inits() draws a fresh (unseeded) sample from the
+            # PathFinder approximation every call.
+            #
+            # Fix: request one init candidate per requested chain, and
+            # validate each with the model's own log_prob() (documented by
+            # cmdstanpy as diagnostics-only, which is exactly this use) --
+            # a candidate is accepted only if log_prob() doesn't raise (a
+            # constraint violation, e.g. an invalid simplex) AND every
+            # returned lp__/gradient value is finite. Falls back to the
+            # validated fixed interior init dict (the init_model=None
+            # branch above -- already known to work reliably for this
+            # model, see e.g. map_laplace_truths.py's docstring) if none of
+            # the candidates validate, rather than handing sample() a point
+            # known to be bad.
+            candidates = pathfinder.create_inits(chains=chains)
+            if isinstance(candidates, dict):
+                candidates = [candidates]
+
+            inits_dict = None
+            for i, candidate in enumerate(candidates):
+                try:
+                    log_prob_df = self.stan_model.log_prob(candidate, data=self.fit_inputs)
+                except Exception as e:
+                    print(f"  PathFinder candidate {i} rejected (log_prob raised: {e}).")
+                    continue
+
+                if np.all(np.isfinite(log_prob_df.to_numpy())):
+                    print(f"  PathFinder candidate {i} accepted (lp__={log_prob_df['lp__'].iloc[0]:.3f}).")
+                    inits_dict = candidate
+                    break
+                print(f"  PathFinder candidate {i} rejected (non-finite lp__/gradient).")
+
+            if inits_dict is None:
+                print(f"  All {len(candidates)} PathFinder candidates were invalid -- "
+                      "falling back to the fixed interior init dict instead of an "
+                      "init point known to be bad.")
+                inits_dict = {
+                    "alphas": [-1, 1],
+                    "mass_fracs": np.full((self.fit_inputs["Nsrcs"] + 1, self.fit_inputs["NAsrcs"]), 1 / self.fit_inputs["NAsrcs"]),
+                    "logE_true": [np.median(np.log(self.fit_inputs["Edet"]))] * self.fit_inputs['N'],
+                    "flux_frac": [0.1, 0.9],
+                    "log10_Ftot": -2,
+                    "beta_egmf": 0.5,
+                    "nu_lnAs": np.full(self.fit_inputs['N'], 0.5),
+                }
 
         elif init_model == "vi":
             print("Using variational inference (VI) output as initial values for the parameters.")

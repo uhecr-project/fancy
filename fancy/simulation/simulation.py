@@ -1281,7 +1281,7 @@ class Simulation:
         """
         Save `self.truths`, plus the metadata needed to reconstruct this
         Simulation object (source/detector labels, gmf/mass model, and the
-        `initialise_grids` kwargs), to a JSON file.
+        `initialise_grids` kwargs), to an HDF5 file.
 
         This replaces pickling the full Simulation object: the truths
         (including SkyCoord objects, stored as Galactic l/b) are restored
@@ -1289,10 +1289,17 @@ class Simulation:
         deterministically via `initialise_grids` (see `Simulation.load`) since
         the underlying PriNCe/effective-exposure tables are disk-cached.
 
+        The payload is still built via `_encode_truths_value` into a plain
+        JSON-serialisable dict (arbitrary, irregular nesting -- SkyCoords,
+        ragged per-source arrays, mixed scalars/lists -- that doesn't map
+        cleanly onto native HDF5 groups/datasets), then that JSON string is
+        stored as a single scalar dataset in the HDF5 file, rather than
+        writing a `.json` file directly.
+
         Parameters
         ----------
         outfile: str
-            path to the output JSON file.
+            path to the output HDF5 file.
         """
         if self._grid_init_kwargs is None:
             raise ValueError("Run `initialise_grids` first!")
@@ -1306,8 +1313,8 @@ class Simulation:
             "truths": _encode_truths_value(self.truths),
         }
 
-        with open(outfile, "w") as f:
-            json.dump(payload, f)
+        with h5py.File(outfile, "w") as f:
+            f.create_dataset("payload_json", data=json.dumps(payload))
 
     @classmethod
     def load(
@@ -1318,22 +1325,22 @@ class Simulation:
         n_jobs: Union[int, None] = None,
     ) -> Self:
         """
-        Reconstruct a Simulation from a `save_truths` JSON file plus the
+        Reconstruct a Simulation from a `save_truths` HDF5 file plus the
         UHECRdata_sim.h5 / lnAdata_sim.h5 files written by `save`.
 
         `Data` is rebuilt from the saved labels (source/detector/mass_model/
         gmf_model) and the two h5 files, `initialise_grids` is re-run with the
         exact kwargs used originally (cheap: the PriNCe/effective-exposure
         tables it depends on are disk-cached per (dinits, Rmax, ...) rather
-        than recomputed), and `truths` is restored directly from the JSON --
-        it is not recomputed, since several of its entries (e.g. from
+        than recomputed), and `truths` is restored directly from the saved
+        file -- it is not recomputed, since several of its entries (e.g. from
         `generate_samples`/`backpropagate_events`) are stochastic or expensive
         (CRPropa) and must match exactly what was fit.
 
         Parameters
         ----------
         truths_file: str
-            path to the JSON file written by `save_truths`.
+            path to the HDF5 file written by `save_truths`.
         data_h5: str
             path to the UHECRdata_sim.h5 file written by `save`.
         lnA_h5: str
@@ -1341,8 +1348,8 @@ class Simulation:
         n_jobs: int, optional
             forwarded to `Simulation.__init__`.
         """
-        with open(truths_file, "r") as f:
-            payload = json.load(f)
+        with h5py.File(truths_file, "r") as f:
+            payload = json.loads(f["payload_json"][()])
 
         data = Data()
         data.add_source(label=payload["source_type"])
