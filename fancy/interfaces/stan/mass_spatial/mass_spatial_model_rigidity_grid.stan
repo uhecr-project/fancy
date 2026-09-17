@@ -250,14 +250,23 @@ parameters {
     /* total flux AT EARTH */
     real log10_Ftot;
 
-    /* EGMF spread parameter, in nG Mpc^1/2 */
-    real<lower=beta_egmf_min, upper=beta_egmf_max> beta_egmf;
+    /* EGMF spread parameter, in nG Mpc^1/2, sampled in log10 space since
+       the likelihood (get_kappa, interp2d over log10_beta_egmf_grid) is
+       smooth in log10(beta_egmf) but not in beta_egmf itself -- sampling
+       the linear parameter directly produced a persistent SBC miscalibration
+       and universal R-hat > 1.01 (pre-dates the rigidity-grid GMF exposure
+       work; confirmed via SBC comparison against the non-rigidity-grid model). */
+    real<lower=log10(beta_egmf_min), upper=log10(beta_egmf_max)> log10_beta_egmf;
 
     vector[N] nu_lnAs; /* latent variable for sampling lnA (Zsrcs) */
 
 }
 
 transformed parameters {
+
+  // EGMF spread parameter on its native scale, derived from the sampled
+  // log10_beta_egmf primitive (see parameters block for why).
+  real beta_egmf = pow(10.0, log10_beta_egmf);
 
   // --- only quantities needed downstream ---
   vector[Nsrcs+1] F;
@@ -327,8 +336,11 @@ model {
   // total flux : normal distribution in log10
   log10_Ftot ~ normal(-1.0, 3.0);
 
-  // magnetic spread: normal in log10
-  beta_egmf ~ normal(0.0, 10.0);
+  // magnetic spread: normal distribution directly on log10(beta_egmf), the
+  // scale the likelihood is actually smooth in (see parameters block).
+  // prior uncertainty is 2 in log10 units (i.e. very wide/uninformative)
+  // since we do not have enough handle on it to assume more.
+  log10_beta_egmf ~ normal(0.0, 2.0);
 
   // latent variables for lnA : normal distribution
   nu_lnAs ~ normal(0.0, 1.0);
@@ -382,8 +394,6 @@ generated quantities {
     real Nex_bg = Nex_arr[Nsrcs+1];
 
     real src_frac = Nex_src / Nex;
-
-    real log10_beta_egmf = log10(beta_egmf);
 
     vector[Nsrcs] Lsrcs;
 

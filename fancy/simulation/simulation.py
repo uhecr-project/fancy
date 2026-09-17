@@ -999,22 +999,17 @@ class Simulation:
                     # as well as the exposure factor
                     skycoord_earth_dets.append(skycoord_earth_det)
 
+                    # NOTE: exposure is deliberately evaluated at the Earth-
+                    # frame detected direction, even when GMF deflection is
+                    # enabled. F0/Ftot are defined as flux AT EARTH, and the
+                    # Earth-frame detector acceptance already reflects the
+                    # full observational effect of GMF lensing (however the
+                    # flux was deflected/lensed on its way in is already
+                    # baked into what direction/how many particles actually
+                    # arrive at Earth). A separate Galactic-Boundary-level
+                    # exposure correction would double-count/misattribute
+                    # that physics relative to the Earth-frame normalisation.
                     exposure_factor[uhecr_idx] = m_exp
-                    # set the exposure weights at the galactic boundary if GMF is enabled
-                    if self.gmf_model != "None":
-                        ang_det = healpy.vec2ang(
-                            skycoord_earth_det.cartesian.xyz.value.T, lonlat=True
-                        )
-                        # apply the exposure correction for GMF lensing here
-                        gmf_exp = healpy.get_interp_val(
-                            self.gmf_exp_interpolators(rig),
-                            ang_det[0],
-                            ang_det[1],
-                            lonlat=True
-                        )
-                        # limit zero values to something super small
-                        gmf_exp = max(gmf_exp, 1e-30)
-                        exposure_factor[uhecr_idx] = gmf_exp
                     # we also sample for the detected energy here
                     # truncated lognormal with global shift
                     Edets[uhecr_idx] = Edet
