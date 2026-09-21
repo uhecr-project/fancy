@@ -299,7 +299,7 @@ class Simulation:
         self: Self,
         mass_fracs: np.ndarray,
         alphas: np.ndarray,
-        beta_egmf: float = 1,
+        beta_egmf: Union[float, np.ndarray] = 1,
         source_fraction: Union[float, None] = None,
         Lsrcs: Union[np.ndarray, None] = None,
         Nex: Union[int, None] = None,
@@ -316,9 +316,11 @@ class Simulation:
         alphas : np.ndarray
             the spectral indices for the sources
             Shape should be (Nsrcs+1)
-        beta_egmf : float, optional
-            the magnetic spread parameter to use.
-            By default set to 1 nG Mpc^1/2
+        beta_egmf : float or np.ndarray, optional
+            the magnetic spread parameter(s) to use, per source, in
+            nG Mpc^1/2. A scalar is broadcast to all Nsrcs sources
+            (background has no EGMF deflection). By default set to
+            1 nG Mpc^1/2 for every source.
         source_fraction : float, optional
             fraction of sources to use, by default 0.5.
             If None, then Lsrcs or Nex must be provided.
@@ -371,6 +373,12 @@ class Simulation:
                 "Either source_fraction or F0 must be provided. Both cannot be None."
             )
 
+        # broadcast a scalar beta_egmf to all sources; a per-source array
+        # must match Nsrcs exactly (no implicit truncation/padding)
+        beta_egmf = np.broadcast_to(np.atleast_1d(beta_egmf), (self.Nsrcs,))
+        if beta_egmf.shape != (self.Nsrcs,):
+            raise ValueError(f"beta_egmf must be a scalar or have shape ({self.Nsrcs},)")
+
         # set the truth values based on the input parameters
         fit_truths = {
             "alphas": alphas,
@@ -411,7 +419,18 @@ class Simulation:
         w_exp_src = np.zeros(self.Nsrcs)
         esrc_ratios = np.zeros(self.Nsrcs)
 
+        # background row of wexp_earth_grid is computed at D=3000 Mpc (see
+        # EffectiveExposure.compute_effective_exposure), which drives
+        # kappa_egmf -> 0 for any beta_egmf -- the background exposure is
+        # beta-independent by construction, so any fixed reference value
+        # works for its interpolation.
+        log10_beta_egmf_bg = np.log10(self.beta_egmf_grid.value[0])
+
         for k in range(self.Nsrcs + 1):
+            log10_beta_egmf_k = (
+                fit_truths["log10_beta_egmf"][k] if k < self.Nsrcs else log10_beta_egmf_bg
+            )
+
             f_log10_wexp_earth = RegularGridInterpolator(
                 (self.alpha_grid, np.log10(self.beta_egmf_grid.value)),
                 np.log10(self.wexp_earth_grid[k, ...].value),
@@ -423,7 +442,7 @@ class Simulation:
                 fit_truths["mass_fracs"][:, k]
                 * 10.0
                 ** f_log10_wexp_earth(
-                    (fit_truths["alphas"][k], fit_truths["log10_beta_egmf"])
+                    (fit_truths["alphas"][k], log10_beta_egmf_k)
                 )
             )
 
@@ -444,7 +463,7 @@ class Simulation:
                     fit_truths["mass_fracs"][:, k]
                     * 10.0
                     ** f_log10_wexp_src(
-                        (fit_truths["alphas"][k], fit_truths["log10_beta_egmf"])
+                        (fit_truths["alphas"][k], log10_beta_egmf_k)
                     )
                 )
                 esrc_ratios[k] = f_esrc_ratio(fit_truths["alphas"][k])
@@ -710,7 +729,7 @@ class Simulation:
                     * (
                         theta_igmfs(
                             rigidity_samples * u.EV,
-                            self.truths["beta_egmf"] * (u.nG * u.Mpc ** (1 / 2)),
+                            self.truths["beta_egmf"][k] * (u.nG * u.Mpc ** (1 / 2)),
                             self.data.source.distance[k] * u.Mpc,
                         )
                         / (1 * u.deg)

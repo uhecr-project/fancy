@@ -27,6 +27,7 @@ class Source:
         self.label = None
         self.unit_vector = None
         self.names = None
+        self.egmf_structure = None
 
     def load_from_data_file(self, label: str = "M82", filename: str = "sourcedata.h5") -> None:
         """
@@ -51,6 +52,16 @@ class Source:
             self.coord = get_coordinates(glon, glat)
             self.names = data["name"][()]
 
+            if "egmf_structure" in data:
+                self.egmf_structure = np.array(
+                    [
+                        s.decode("UTF-8") if isinstance(s, bytes) else s
+                        for s in data["egmf_structure"][()]
+                    ]
+                )
+            else:
+                self.egmf_structure = None
+
         self.unit_vector = coord_to_uv(self.coord)
 
     def __get_properties(self: Self) -> dict:
@@ -60,6 +71,8 @@ class Source:
         properties["N"] = self.N
         properties["unit_vector"] = self.unit_vector
         properties["distance"] = self.distance
+        if self.egmf_structure is not None:
+            properties["egmf_structure"] = self.egmf_structure
         return properties
 
     def load_from_properties(self: Self, source_properties: dict) -> None:
@@ -78,6 +91,13 @@ class Source:
         self.N = source_properties["N"]
         self.unit_vector = source_properties["unit_vector"]
         self.distance = source_properties["distance"]
+
+        egmf_structure = source_properties.get("egmf_structure", None)
+        if egmf_structure is not None:
+            egmf_structure = np.array(
+                [s.decode("UTF-8") if isinstance(s, bytes) else s for s in egmf_structure]
+            )
+        self.egmf_structure = egmf_structure
 
         self.coord = uv_to_coord(self.unit_vector)
 
@@ -130,7 +150,18 @@ class Source:
         properties = self.__get_properties()
 
         for key, value in properties.items():
-            create_dataset_compressed(file_handle, key, value)
+            arr = np.asarray(value)
+            if arr.dtype.kind in ("U", "S"):
+                # h5py has no native conversion for numpy's fixed-width
+                # unicode/bytes dtypes -- re-encode as h5py's variable-length
+                # string dtype before writing. A 0-d array (scalar string,
+                # e.g. `label`) must be unwrapped to a plain str first: h5py
+                # can write a raw str/list of str under string_dtype(), but
+                # not a 0-d '<U*' array.
+                data = arr.item() if arr.ndim == 0 else arr.astype(str).tolist()
+                file_handle.create_dataset(key, data=data, dtype=h5py.string_dtype())
+            else:
+                create_dataset_compressed(file_handle, key, value)
 
     def select_sources(self : Self, selection : list) -> None:
         """Select sources by providing certain indices from a list."""
@@ -140,6 +171,8 @@ class Source:
         # make selection
         self.unit_vector = [self.unit_vector[i] for i in selection]
         self.distance = [self.distance[i] for i in selection]
+        if self.egmf_structure is not None:
+            self.egmf_structure = self.egmf_structure[selection]
 
         self.N = len(self.distance)
 
@@ -156,6 +189,8 @@ class Source:
 
         self.unit_vector = [self.unit_vector[i] for i in selection]
         self.distance = [self.distance[i] for i in selection]
+        if self.egmf_structure is not None:
+            self.egmf_structure = self.egmf_structure[selection]
 
         self.N = len(self.distance)
 

@@ -14,6 +14,7 @@ import arviz as az
 from fancy.interfaces.data import Data
 from fancy.interfaces.grid_generator import GridGenerator
 from fancy.simulation import Simulation
+from fancy.utils.egmf_priors import get_log10_beta_egmf_prior
 from fancy.utils.helpers import create_dataset_compressed, pick_grain_size
 from fancy.utils.package_data import (
     get_path_to_stan_file,
@@ -335,16 +336,30 @@ class Analysis:
         # (Nsrcs[+1], NAsrcs, Nalphas). We slice at this simulation's truth
         # beta_egmf (not beta_egmf->0) so Nex matches the exposure the data
         # was actually drawn from, keeping ablated and full fits comparable.
+        # beta_egmf is per-source (shape (Nsrcs,), no background entry), so
+        # each source's row (k < Nsrcs) is sliced at its own truth value;
+        # the background row (k == Nsrcs) uses the grid's first beta value,
+        # matching the convention used elsewhere (its wexp_earth_grid row is
+        # beta-independent by construction -- see
+        # EffectiveExposure.compute_effective_exposure, D=3000 Mpc).
         if self.analysis_type == self.energy_type or self.analysis_type == self.mass_type or self.analysis_type == self.energy_mass_type:
-            log10_beta_egmf_truth = simulation.truths["log10_beta_egmf"]
+            log10_beta_egmf_truth = np.atleast_1d(simulation.truths["log10_beta_egmf"])
             log10_beta_egmf_grid = np.log10(simulation.beta_egmf_grid.value)
 
             def _slice_at_truth_beta_egmf(log_wexp_grid: np.ndarray) -> np.ndarray:
                 # log_wexp_grid shape: (Nk, Nalphas, Nbeta_egmfs, NAsrcs)
-                interpolator = interp1d(
-                    log10_beta_egmf_grid, log_wexp_grid, axis=2
+                n_k = log_wexp_grid.shape[0]
+                sliced = np.empty(
+                    (n_k,) + log_wexp_grid.shape[1:2] + log_wexp_grid.shape[3:]
                 )
-                return interpolator(log10_beta_egmf_truth)  # (Nk, Nalphas, NAsrcs)
+                for k in range(n_k):
+                    log10_beta_k = (
+                        log10_beta_egmf_truth[k] if k < len(log10_beta_egmf_truth)
+                        else log10_beta_egmf_grid[0]
+                    )
+                    interpolator_k = interp1d(log10_beta_egmf_grid, log_wexp_grid[k], axis=1)
+                    sliced[k] = interpolator_k(log10_beta_k)
+                return sliced  # (Nk, Nalphas, NAsrcs)
 
             self.fit_inputs["log_wexp_earth_grid"] = np.moveaxis(
                 _slice_at_truth_beta_egmf(simulation.log_wexp_earth_grid), (0, 1, 2), (0, 2, 1)
@@ -364,6 +379,17 @@ class Analysis:
             self.fit_inputs["log10_beta_egmf_grid"] = np.log10(simulation.beta_egmf_grid.value)
             self.fit_inputs["log_wexp_earth_grid"] = np.moveaxis(simulation.log_wexp_earth_grid, (0,1,2,3), (0,2,3,1))
             self.fit_inputs["log_wexp_src_grid"] = np.moveaxis(simulation.log_wexp_src_grid, (0,1,2,3), (0,2,3,1))
+
+            # this analysis_type's Stan model still has a beta_egmf
+            # parameter/prior (unlike energy_only/mass_only/energy_mass,
+            # handled in the branch above), so it needs the per-source prior
+            # fields too -- prepare_fit_inputs's code path already sets
+            # these, but load_from_simulation is a separate path that never
+            # called it (missed initially: mass_spatial_model_rigidity_grid.stan
+            # declares beta_egmf_prior_mean_log10/sd_log10 unconditionally in
+            # its data block, so leaving them unset breaks the Stan data
+            # JSON with a dims-mismatch error at pathfinder()/sample() time).
+            self._apply_beta_egmf_priors()
 
         # for omega_det, deal with this depending on gmf model
         if self.gmf_model == "None":
@@ -542,13 +568,108 @@ class Analysis:
                 if key not in self.fit_input_keys:
                     self.fit_input_keys.append(key)
 
+        # per-source beta_egmf prior, resolved from each source's
+        # egmf_structure category.
+        self._apply_beta_egmf_priors()
+
         # calculate the grain size
         self._calculate_grain_size()
-        
+
         # warn if anything is None
         missing_keys = [k for k, v in self.fit_inputs.items() if v is None]
         if len(missing_keys) > 0:
             raise ValueError(f"Missing fit inputs: {missing_keys}")
+
+    def _apply_beta_egmf_priors(self: Self) -> None:
+        """
+        Resolve the per-source beta_egmf prior and write it into
+        self.fit_inputs/self.fit_input_keys. Shared by prepare_fit_inputs and
+        load_from_simulation, since the Stan data block requires this field
+        for every rigidity-grid model variant (and its non-rigidity-grid
+        linear-space equivalent) regardless of which method built the rest
+        of fit_inputs.
+
+        The rigidity-grid model samples in log10 space; the non-rigidity-grid
+        model samples beta_egmf directly in linear (nG Mpc^1/2) space, so the
+        two variants need differently scaled prior parameters.
+        """
+        mean_log10, sd_log10, has_category = self.get_beta_egmf_priors()
+        if self.use_rigidity_grid:
+            self.fit_inputs["beta_egmf_prior_mean_log10"] = mean_log10
+            self.fit_inputs["beta_egmf_prior_sd_log10"] = sd_log10
+            for key in ("beta_egmf_prior_mean_log10", "beta_egmf_prior_sd_log10"):
+                if key not in self.fit_input_keys:
+                    self.fit_input_keys.append(key)
+        else:
+            # convert (mean, sd) of a normal in log10 space to a normal
+            # approximation in linear space via the delta method:
+            # mean = 10**mean_log10, sd = mean * ln(10) * sd_log10 -- but
+            # only for sources with an actual egmf_structure category.
+            # Uncategorised sources keep the non-rigidity-grid model's exact
+            # original default, normal(0, 10), rather than the delta-method
+            # image of the log10-space default (normal(0, 2) -> normal(1,
+            # 4.6)), which is a different, narrower and shifted prior.
+            mean_linear = np.where(has_category, 10.0 ** mean_log10, 0.0)
+            sd_linear = np.where(
+                has_category, (10.0 ** mean_log10) * np.log(10.0) * sd_log10, 10.0
+            )
+            self.fit_inputs["beta_egmf_prior_mean"] = mean_linear
+            self.fit_inputs["beta_egmf_prior_sd"] = sd_linear
+            for key in ("beta_egmf_prior_mean", "beta_egmf_prior_sd"):
+                if key not in self.fit_input_keys:
+                    self.fit_input_keys.append(key)
+
+    def get_beta_egmf_priors(
+        self: Self,
+        default_mean: float = 0.0,
+        default_sd: float = 2.0,
+    ) -> tuple:
+        """
+        Resolve per-source priors on log10(beta_egmf) from each source's
+        egmf_structure category (see fancy.utils.egmf_priors).
+
+        Used by prepare_fit_inputs to populate beta_egmf_prior_mean_log10 /
+        beta_egmf_prior_sd_log10 (rigidity-grid model, which samples
+        log10_beta_egmf directly) or, after a linear-space conversion,
+        beta_egmf_prior_mean / beta_egmf_prior_sd (non-rigidity-grid model,
+        which samples beta_egmf directly in linear space).
+
+        Parameters
+        ----------
+        default_mean, default_sd: float
+            prior mean/sd (in log10 space) used for sources with no
+            egmf_structure set, matching the previous global prior
+            (log10_beta_egmf ~ normal(0, 2)).
+
+        Returns
+        -------
+        (mean_log10, sd_log10, has_category): tuple of np.ndarray, each
+        shape (Nsrcs,). has_category is a bool mask, True where a source has
+        an assigned egmf_structure (as opposed to falling back to
+        default_mean/default_sd) -- prepare_fit_inputs uses this to apply
+        the non-rigidity-grid model's exact linear-space default (rather
+        than a delta-method approximation) for uncategorised sources.
+        """
+        egmf_structure = self.data.source.egmf_structure
+        n_src = self.data.source.N
+
+        if egmf_structure is None:
+            means = np.full(n_src, default_mean)
+            sds = np.full(n_src, default_sd)
+            has_category = np.zeros(n_src, dtype=bool)
+            return means, sds, has_category
+
+        means = np.empty(n_src)
+        sds = np.empty(n_src)
+        has_category = np.empty(n_src, dtype=bool)
+        for i, structure in enumerate(egmf_structure):
+            if structure in (None, "", "none"):
+                means[i], sds[i] = default_mean, default_sd
+                has_category[i] = False
+            else:
+                means[i], sds[i] = get_log10_beta_egmf_prior(structure)
+                has_category[i] = True
+        return means, sds, has_category
 
     def fit_model(
         self: Self,
@@ -619,7 +740,7 @@ class Analysis:
                 "logE_true" : [np.median(np.log(self.fit_inputs["Edet"]))] * self.fit_inputs['N'],
                 "flux_frac" : [0.1, 0.9],
                 "log10_Ftot" : -2,
-                "beta_egmf" : 0.5,
+                "log10_beta_egmf" : np.zeros(self.fit_inputs["Nsrcs"]),
                 "nu_lnAs": np.full(self.fit_inputs['N'], 0.5),
             }
         elif init_model == "pathfinder":
@@ -681,7 +802,7 @@ class Analysis:
                     "logE_true": [np.median(np.log(self.fit_inputs["Edet"]))] * self.fit_inputs['N'],
                     "flux_frac": [0.1, 0.9],
                     "log10_Ftot": -2,
-                    "beta_egmf": 0.5,
+                    "log10_beta_egmf": np.zeros(self.fit_inputs["Nsrcs"]),
                     "nu_lnAs": np.full(self.fit_inputs['N'], 0.5),
                 }
 
