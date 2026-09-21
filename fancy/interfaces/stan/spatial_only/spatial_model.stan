@@ -76,7 +76,7 @@ functions {
       array [] vector omega_det,    // detected directions
       vector kappa_ds,              // deflection parameters including GMF and arrival direction uncertainty
       array [] vector omega_src,    // source directions
-      real beta_egmf,         // EGMF spread parameter
+      vector beta_egmf,         // EGMF spread parameter, per source
       vector D,                     // source distances
       int Nsrcs,                     // number of sources
       vector exp_factors          // exposure correction factors per event
@@ -99,14 +99,14 @@ functions {
           // // calculating the true charge and rigidity
           real Zsrc = 0.5 * exp(mean_lnA + sqrt(var_lnA) * nu_lnAs[i]);
           real Rtrue = exp(logE_true[i]) / Zsrc;
-          
+
           // iterate over sources + isotropic background
           for (k in 1:Nsrcs+1) {
 
               // spatial likelihood (EGMF and GMF deflections for source, isotropic for background)
               if (k <= Nsrcs) {
                 /* GMF and EGMF deflections */
-                real kappa_egmf = get_kappa(Rtrue, beta_egmf, D[k]/10.0);
+                real kappa_egmf = get_kappa(Rtrue, beta_egmf[k], D[k]/10.0);
                 lp_i[k] += fik_lpdf(
                   omega_det[i] | omega_src[k],
                   kappa_egmf,
@@ -187,6 +187,14 @@ data {
     array[Nsrcs, NAsrcs] matrix[Nalphas, Nbeta_egmfs] log_wexp_src_grid;
     array[Nsrcs, NAsrcs] vector[Nalphas] esrc_ratio_grid;
 
+    /* per-source prior on beta_egmf (linear nG Mpc^1/2, matching this
+       model's linear-space sampling), resolved from each source's
+       egmf_structure category (filament/void/...; see
+       fancy.utils.egmf_priors). Falls back to normal(0, 10) (the previous
+       global default) for sources with no assigned category. */
+    vector[Nsrcs] beta_egmf_prior_mean;
+    vector<lower=0>[Nsrcs] beta_egmf_prior_sd;
+
     /* computation parameters */
     int<lower=1> grain_size; /* for reduce_sum, generatlly N / (4 * ncores) is a good estimate */
 
@@ -228,8 +236,9 @@ parameters {
     /* total flux AT EARTH */
     real log10_Ftot;
 
-    /* EGMF spread parameter, in nG Mpc^1/2 */
-    real<lower=beta_egmf_min, upper=beta_egmf_max> beta_egmf;
+    /* EGMF spread parameter per source, in nG Mpc^1/2. No background entry:
+       the isotropic background has no EGMF deflection. */
+    vector<lower=beta_egmf_min, upper=beta_egmf_max>[Nsrcs] beta_egmf;
 
     vector[N] nu_lnAs; /* latent variable for sampling lnA (Zsrcs) */
 
@@ -255,6 +264,12 @@ transformed parameters {
     // flux at Earth
     F[k] = pow(10.0, log10_Ftot) * flux_frac[k];
 
+    // background (k == Nsrcs+1) has no per-source beta_egmf; its
+    // wexp_earth_grid row is beta-independent by construction (computed at
+    // D=3000 Mpc, see EffectiveExposure.compute_effective_exposure), so any
+    // fixed reference value on the grid works.
+    real log10_beta_egmf_k = (k <= Nsrcs) ? log10(beta_egmf[k]) : log10_beta_egmf_grid[1];
+
     // accumulate spectra and weights
     for (j in 1:NAsrcs) {
       espect_mfs[k] += mass_fracs[k][j] * earth_spectrum_grid[k,j];
@@ -262,7 +277,7 @@ transformed parameters {
       varlnA_mfs[k][,] += mass_fracs[k][j] * var_lnA_grid[k,j];
 
       wexp_earths[k] += mass_fracs[k][j] * exp(interp2d(
-        alphas[k], log10(beta_egmf),
+        alphas[k], log10_beta_egmf_k,
         alpha_grid, log10_beta_egmf_grid,
         to_array_2d(log_wexp_earth_grid[k,j])
       ));
@@ -297,8 +312,11 @@ model {
   // total flux : normal distribution in log10
   log10_Ftot ~ normal(-1.0, 3.0);
 
-  // magnetic spread: normal in log10
-  beta_egmf ~ normal(0.0, 3.0);
+  // magnetic spread: per-source normal distribution. Mean/sd resolved per
+  // source from egmf_structure (fancy.utils.egmf_priors); falls back to
+  // normal(0, 10) (the previous global default) for sources with no
+  // assigned category.
+  beta_egmf ~ normal(beta_egmf_prior_mean, beta_egmf_prior_sd);
 
   // latent variables for lnA : normal distribution
   nu_lnAs ~ normal(0.0, 1.0);
@@ -341,7 +359,7 @@ generated quantities {
 
     real src_frac = Nex_src / Nex;
 
-    real log10_beta_egmf = log10(beta_egmf);
+    vector[Nsrcs] log10_beta_egmf = log10(beta_egmf);
 
     vector[Nsrcs] Lsrcs;
 
@@ -352,7 +370,7 @@ generated quantities {
       for (j in 1:NAsrcs) {
         esrc_ratios += mass_fracs[k][j] * interpolate(alpha_grid_vec, esrc_ratio_grid[k,j], alphas[k]);
         wexp_src += mass_fracs[k][j] * exp(interp2d(
-          alphas[k], log10_beta_egmf,
+          alphas[k], log10_beta_egmf[k],
           alpha_grid, log10_beta_egmf_grid,
           to_array_2d(log_wexp_src_grid[k,j])
         ));
@@ -384,7 +402,7 @@ generated quantities {
         loglik_event[i,k] += truncated_lognormal_lpdf(Edet[i] | logE_true[i] + logE_sys_unc, logE_stat_unc, Emin, Emax);
         loglik_event_energy[i,k] = loglik_event[i,k];
         if (k <= Nsrcs) {
-          real kappa_egmf = get_kappa(Rtrue, beta_egmf, D[k]/10.0);
+          real kappa_egmf = get_kappa(Rtrue, beta_egmf[k], D[k]/10.0);
           loglik_event[i,k] += fik_lpdf(omega_det[i]|omega_src[k], kappa_egmf, kappa_ds[i]);
           loglik_event_spatial[i,k] = fik_lpdf(omega_det[i]|omega_src[k], kappa_egmf, kappa_ds[i]);
 

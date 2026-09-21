@@ -601,20 +601,21 @@ class Analysis:
                 if key not in self.fit_input_keys:
                     self.fit_input_keys.append(key)
         else:
-            # convert (mean, sd) of a normal in log10 space to a normal
-            # approximation in linear space via the delta method:
-            # mean = 10**mean_log10, sd = mean * ln(10) * sd_log10 -- but
-            # only for sources with an actual egmf_structure category.
-            # Uncategorised sources keep the non-rigidity-grid model's exact
-            # original default, normal(0, 10), rather than the delta-method
-            # image of the log10-space default (normal(0, 2) -> normal(1,
-            # 4.6)), which is a different, narrower and shifted prior.
-            mean_linear = np.where(has_category, 10.0 ** mean_log10, 0.0)
-            sd_linear = np.where(
-                has_category, (10.0 ** mean_log10) * np.log(10.0) * sd_log10, 10.0
-            )
-            self.fit_inputs["beta_egmf_prior_mean"] = mean_linear
-            self.fit_inputs["beta_egmf_prior_sd"] = sd_linear
+            # As of 2026-09-21: use a flat, non-categorised
+            # beta_egmf ~ normal(1, 10) LINEAR-space prior for every source,
+            # regardless of egmf_structure. Session-long testing found this
+            # flat default recovers CenA/M82's truth beta_egmf substantially
+            # better than the egmf_structure-derived category priors
+            # (whether in log10 space or via the linear delta-method
+            # conversion this branch used to apply), and the
+            # category-specific mean/sd values (EGMF_STRUCTURE_LOG10_PRIORS)
+            # were never independently validated. See
+            # project_beta_egmf_src_frac_degeneracy memory for the full
+            # investigation. mean_log10/sd_log10/has_category (resolved
+            # above) are intentionally unused here now.
+            n_src = self.data.source.N
+            self.fit_inputs["beta_egmf_prior_mean"] = np.full(n_src, 1.0)
+            self.fit_inputs["beta_egmf_prior_sd"] = np.full(n_src, 10.0)
             for key in ("beta_egmf_prior_mean", "beta_egmf_prior_sd"):
                 if key not in self.fit_input_keys:
                     self.fit_input_keys.append(key)

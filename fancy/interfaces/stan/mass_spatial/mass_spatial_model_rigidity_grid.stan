@@ -473,7 +473,6 @@ generated quantities {
     // generate the log-likelihood of the event to get the
     // association probability as well
     array[N] vector[Nsrcs+1] loglik_event;
-    array[N] vector[Nsrcs+1] loglik_event_energy;
     array[N] vector[Nsrcs+1] loglik_event_spatial;
     array[NEbins] vector[Nsrcs+1] loglik_event_mass;
 
@@ -494,9 +493,6 @@ generated quantities {
         log10_gmf_Rgrid, log_kappa_gmf_grid[i], log10(Rtrue)
       ) + log_kappa_gmf_syst);
       for (k in 1:(Nsrcs+1)) {
-        loglik_event[i,k] += energy_spectrum_lpdf(logE_det[i] | alphas[k], logE_grid, alpha_grid, log(espect_mfs[k]));
-        loglik_event[i,k] += truncated_lognormal_lpdf(Edet[i] | logE_det[i] + logE_sys_unc, logE_stat_unc, Emin, Emax);
-        loglik_event_energy[i,k] = loglik_event[i,k];
         if (k <= Nsrcs) {
           real kappa_egmf = get_kappa(Rtrue, beta_egmf[k], D[k]/10.0);
           loglik_event[i,k] += fik_lpdf(omega_det[i]|omega_src[k], kappa_egmf, kappa_gmf_interp);
