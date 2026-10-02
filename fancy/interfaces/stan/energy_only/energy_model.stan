@@ -202,7 +202,7 @@ model {
   }
 
   // flux fraction weights: Dirichlet-like prior
-  flux_frac ~ dirichlet([2.0, 2.0]);
+  flux_frac ~ dirichlet(rep_vector(2.0, Nsrcs+1));
 
   // total flux : normal distribution in log10
   log10_Ftot ~ normal(-1.0, 3.0);

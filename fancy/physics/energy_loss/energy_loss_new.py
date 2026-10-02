@@ -48,10 +48,15 @@ class EnergyLossModel:
     In principle this only needs to be accessed if one wants to re-compute the composition weights.
     """
 
+    # injection solver pkls are always solved on a 0.1-spaced alpha grid;
+    # requested alpha_grid steps must be an exact multiple of this and no finer.
+    MIN_ALPHA_STEP = 0.1
+
     prince_cr.config.x_cut = 1e-4
     prince_cr.config.x_cut_proton = 1e-2
     prince_cr.config.tau_dec_threshold = np.inf
     prince_cr.config.linear_algebra_backend = "MKL"
+    # prince_cr.config.cosmic_ray_grid = (7, 13, 40)
     prince_cr.config.secondaries = False  # here we explicitly exclude secondaries
     prince_cr.config.ignore_particles = [  # noqa: RUF012
         0,
@@ -84,6 +89,12 @@ class EnergyLossModel:
         alpha_grid: tuple[float, float, float]
             grid of alpha values to use for the injection solver.
             The grid is defined as (alpha_min, alpha_max, alpha_step).
+            alpha_step must be a multiple of `MIN_ALPHA_STEP` (0.1) and cannot
+            be finer than it -- the injection solver pkls are only ever solved
+            at 0.1 spacing, and `load_injection_solvers` slices that fixed grid
+            down to whatever coarser spacing is requested here. alpha_min and
+            alpha_max must match the solved grid's limits; only the spacing
+            can change.
         massids: list[int]
             list of massids to use for the injection solver.
             The massids are defined using the usual convention in prince.
@@ -93,7 +104,32 @@ class EnergyLossModel:
         nthreads: int
             number of threads used for solver
         """
+        alpha_min, alpha_max, alpha_step = alpha_grid
+        # guard against float remainder noise (e.g. 0.30000000000000004 % 0.1)
+        step_ratio = alpha_step / self.MIN_ALPHA_STEP
+        if alpha_step < self.MIN_ALPHA_STEP or not np.isclose(
+            step_ratio, np.round(step_ratio)
+        ):
+            raise ValueError(
+                f"alpha_grid step ({alpha_step}) must be a multiple of "
+                f"{self.MIN_ALPHA_STEP} and cannot be smaller than it -- the "
+                "injection solver pkls are only solved at this resolution."
+            )
+        # the step must also evenly divide the requested range, or the
+        # requested grid can't land exactly on [alpha_min, alpha_max] --
+        # e.g. step=0.3 over [-3.0, 5.0] (range 8.0) leaves a fractional
+        # remainder and silently overshoots alpha_max via np.arange.
+        n_intervals = (alpha_max - alpha_min) / alpha_step
+        if not np.isclose(n_intervals, np.round(n_intervals)):
+            raise ValueError(
+                f"alpha_grid step ({alpha_step}) does not evenly divide the "
+                f"range [{alpha_min}, {alpha_max}] -- the limits must stay "
+                "exactly the same as the solved grid, so the step must "
+                "divide (alpha_max - alpha_min) with no remainder."
+            )
+
         self.css = css
+        self.alpha_grid = alpha_grid
         self.alphas = np.arange(
             alpha_grid[0], alpha_grid[1] + alpha_grid[2], alpha_grid[2]
         )
@@ -195,12 +231,18 @@ class EnergyLossModel:
             solver_res_dict = pickle.load(f)
             self.solver_res_src = solver_res_dict["results"]
             self.distances = solver_res_dict["dinits"]
-            assert np.all(solver_res_dict["alphas"] == self.alphas), (
-                "alphas do not match!"
-            )
+            alpha_idx = self._resolve_alpha_indices(solver_res_dict["alphas"])
+            needs_alpha_slicing = alpha_idx is not None
+            # None means the pkl's alpha grid already matches self.alphas
+            # exactly -- resolve to an identity index list so the massid
+            # re-sorting branch below (which always needs concrete indices
+            # to iterate) works whether or not alpha slicing is also needed.
+            if alpha_idx is None:
+                alpha_idx = list(range(len(self.alphas)))
 
             # do some sorting with the given mass ids and the
-            # mass ids from the solver results
+            # mass ids from the solver results (and slice down to the
+            # requested, possibly coarser/narrower, alpha grid)
             if not np.all(np.sort(solver_res_dict["massids"]) == np.sort(self.massids)):
                 for mid in self.massids:
                     if mid not in solver_res_dict["massids"]:
@@ -211,28 +253,41 @@ class EnergyLossModel:
                             solver_res_dict["results"][idist][
                                 solver_res_dict["massids"].index(mid)
                             ][ia]
-                            for ia in range(len(self.alphas))
+                            for ia in alpha_idx
                         ]
                         for mid in self.massids
+                    ]
+                    for idist in range(len(self.distances))
+                ]
+            elif needs_alpha_slicing:
+                self.solver_res_src = [
+                    [  # for each distance
+                        [solver_res_dict["results"][idist][ims][ia] for ia in alpha_idx]
+                        for ims in range(len(self.massids))
                     ]
                     for idist in range(len(self.distances))
                 ]
             # print(f"Loaded from {source_solver_file}")
 
         # load the background injection solver here too
+        # bg_solver_file = get_path_to_injection_solvers(
+        #     f"bg_injection_solver_zmax{bg_inj_config['z_max']:.0f}_Rmax{bg_inj_config['Rmax']:.1f}_{bg_inj_config['source_evo']}.pkl"
+        # )
         bg_solver_file = get_path_to_injection_solvers(
-            f"bg_injection_solver_zmax{bg_inj_config['z_max']}_Rmax{bg_inj_config['Rmax']:.1f}_{bg_inj_config['source_evo']}.pkl"
+            f"bg_injection_solver_zmax{bg_inj_config['z_max']:.1f}_Rmax{bg_inj_config['Rmax']:.1f}_{bg_inj_config['source_evo']}.pkl"
         )
         with open(bg_solver_file, "rb") as f:
             solver_res_dict = pickle.load(f)
             self.solver_res_bg = solver_res_dict["results"]
-            self.dmins = solver_res_dict["d_mins"]
-            assert np.all(solver_res_dict["alphas"] == self.alphas), (
-                "alphas do not match!"
-            )
+            self.dmins = solver_res_dict["dmins"]
+            alpha_idx = self._resolve_alpha_indices(solver_res_dict["alphas"])
+            needs_alpha_slicing = alpha_idx is not None
+            if alpha_idx is None:
+                alpha_idx = list(range(len(self.alphas)))
 
             # do some sorting with the given mass ids and the
-            # mass ids from the solver results
+            # mass ids from the solver results (and slice down to the
+            # requested, possibly coarser/narrower, alpha grid)
             if not np.all(np.sort(solver_res_dict["massids"]) == np.sort(self.massids)):
                 for mid in self.massids:
                     if mid not in solver_res_dict["massids"]:
@@ -243,9 +298,17 @@ class EnergyLossModel:
                             solver_res_dict["results"][idist][
                                 solver_res_dict["massids"].index(mid)
                             ][ia]
-                            for ia in range(len(self.alphas))
+                            for ia in alpha_idx
                         ]
                         for mid in self.massids
+                    ]
+                    for idist in range(len(self.distances))
+                ]
+            elif needs_alpha_slicing:
+                self.solver_res_bg = [
+                    [  # for each distance
+                        [solver_res_dict["results"][idist][ims][ia] for ia in alpha_idx]
+                        for ims in range(len(self.massids))
                     ]
                     for idist in range(len(self.distances))
                 ]
@@ -253,6 +316,65 @@ class EnergyLossModel:
             # print(f"Loaded {bg_solver_file}")
 
         self.solvers_loaded = True
+
+    def _resolve_alpha_indices(
+        self: Self, pkl_alphas: np.ndarray
+    ) -> Union[list, None]:
+        """
+        Map ``self.alphas`` (the requested, possibly coarser and/or narrower
+        grid) onto index positions within ``pkl_alphas`` (the grid the
+        injection solver pkl was actually solved at -- always 0.1 spacing).
+
+        Returns ``None`` when the two grids already match exactly (the common
+        case: requesting 0.1 spacing directly), so callers can skip re-slicing
+        and keep using ``solver_res_dict["results"]`` as-is.
+
+        Raises if the requested grid's limits fall outside the pkl's limits,
+        or if the requested spacing doesn't land exactly on the pkl's grid
+        points (which `__init__`'s multiple-of-`MIN_ALPHA_STEP` check should
+        already guarantee, but the pkl's own limits are only known here).
+
+        The requested [min, max] may be the pkl's own limits (the original,
+        most common case: only the spacing coarsens) or a sub-interval of
+        them (e.g. isolating whether a pileup at one edge is caused by that
+        edge specifically, by narrowing the range away from it) -- both are
+        accepted as long as every requested alpha value is an exact point on
+        the pkl's grid. A requested range that extends beyond the pkl's
+        limits is not supported (that needs the pkl regenerated over a wider
+        range) and raises.
+        """
+        pkl_alphas = np.asarray(pkl_alphas)
+
+        if np.array_equal(pkl_alphas, self.alphas):
+            return None
+
+        if (
+            self.alphas.min() < pkl_alphas.min() - 1e-9
+            or self.alphas.max() > pkl_alphas.max() + 1e-9
+        ):
+            raise ValueError(
+                f"Requested alpha_grid limits [{self.alphas.min()}, "
+                f"{self.alphas.max()}] fall outside the injection solver "
+                f"pkl's limits [{pkl_alphas.min()}, {pkl_alphas.max()}]. "
+                "The requested range must be the pkl's own limits or a "
+                "sub-interval of them; a wider range needs the pkl "
+                "regenerated."
+            )
+
+        # locate each requested alpha in the pkl's finer grid
+        idx = np.searchsorted(pkl_alphas, self.alphas)
+        matched = (idx < len(pkl_alphas)) & np.isclose(
+            pkl_alphas[np.clip(idx, 0, len(pkl_alphas) - 1)], self.alphas
+        )
+        if not np.all(matched):
+            missing = self.alphas[~matched]
+            raise ValueError(
+                f"Requested alpha grid values {missing} do not fall exactly "
+                "on the injection solver pkl's grid; the requested step must "
+                f"be an exact multiple of the pkl's step ({np.round(np.diff(pkl_alphas)[0], 6)})."
+            )
+
+        return idx.tolist()
 
     def compute_spectrum_and_lnA(
         self: Self,
@@ -313,6 +435,9 @@ class EnergyLossModel:
         for ims, ia in np.ndindex((len(self.massids), len(self.alphas))):
             # iterate over all distances for sources
             for idis in range(len(self.distances)):
+                # each entry is [UHECRPropagationResult, array], matching the
+                # background branch's (res, _) unpack below -- see
+                # src_injection_solver_*.pkl's ["results"][idist][ims][ia]
                 res = self.solver_res_src[idis][ims][ia]
                 # NB: internal conversion to GeV
                 _, spect_from_src = res.get_solution_group(
@@ -337,6 +462,7 @@ class EnergyLossModel:
                         src_spect * egrid_widths
                     )
 
+            # res = solver_res_bg[ims][ia]
             res, _ = solver_res_bg[ims][ia]
             # NB: internal conversion to GeV
             _, spect_from_bg = res.get_solution_group("CR", egrid=egrid_GeV, epow=0)
@@ -485,6 +611,8 @@ class EnergyLossModel:
         bg_solver_file = get_path_to_injection_solvers(
             f"bg_injection_solver_zmax{z_max}_Rmax{Rmax:.1f}_{source_evo}.pkl"
         )
+        
+        Rmax_GV = Rmax * 1e9  # convert to GV for prince
 
         print("Computing the injection solver")
 
@@ -503,7 +631,7 @@ class EnergyLossModel:
                     # initialise solution class first
                     inj_source = TruncatedInjectionSource(
                         self.prince_run,
-                        params={massid: (alpha, Rmax, 1.0)},
+                        params={massid: (alpha, Rmax_GV, 1.0)},
                         m=(source_evo, 0.0),
                     )
                     # manually setting minimum redshift to which we
@@ -520,7 +648,7 @@ class EnergyLossModel:
                         enable_partial_diff_jacobian=True,
                     )
 
-                    solver.add_source_class(inj_source)  # no source model
+                    solver.add_source_class(inj_source)  # Auger Fit model
 
                     solver.solve(dz=1e-3, verbose=False, progressbar=True)  # solve
 

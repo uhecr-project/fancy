@@ -18,6 +18,7 @@ from fancy.physics import (
     LossLengthModel,
 )
 from fancy.physics.gmf import GMFExposure
+from fancy.utils.helpers import natural_cubic_spline_matrix
 
 charge_massid_map = {101: 1, 402: 2, 1407: 7, 2814: 14, 5626: 26}
 
@@ -53,6 +54,7 @@ class GridGenerator:
         self.Emin = None
         self.Emax = None
         self.alpha_grid = None
+        self.alpha_spline_matrix = None
         self.mass_ids_grid = None
         self.beta_egmf_grid = None
         self.rigidity_grid = None
@@ -182,11 +184,23 @@ class GridGenerator:
         self.energy_grid_widths = np.diff(energy_grid_binedges)
         self.Emin = energy_gridparams[0]
         self.Emax = energy_gridparams[1]
-        self.lnA_energy_grid = np.logspace(
-            np.log10(lnA_energy_gridparams[0]),
-            np.log10(lnA_energy_gridparams[1]),
-            lnA_energy_gridparams[2],
-        )
+        if lnA_energy_gridparams is None:
+            # use the detector's own lnA energy bins (bin centres, in EeV)
+            if self.data.detector.lnA_logE_grid is None:
+                raise ValueError(
+                    "lnA_energy_gridparams=None requires the detector's lnA "
+                    "data (detector.lnA_logE_grid) to be loaded."
+                )
+            self.lnA_energy_grid = np.exp(self.data.detector.lnA_logE_grid)
+        elif isinstance(lnA_energy_gridparams, np.ndarray):
+            # explicit energies (EeV), e.g. the detector's own lnA bins
+            self.lnA_energy_grid = np.asarray(lnA_energy_gridparams, dtype=float)
+        else:
+            self.lnA_energy_grid = np.logspace(
+                np.log10(lnA_energy_gridparams[0]),
+                np.log10(lnA_energy_gridparams[1]),
+                lnA_energy_gridparams[2],
+            )
 
         #  initalise the energy loss model
         self.energy_loss_model = EnergyLossModel(**energy_loss_model_kwargs)
@@ -209,6 +223,11 @@ class GridGenerator:
         self.mean_lnA_grid = lnAs[0, ...]
         self.var_lnA_grid = lnAs[1, ...]
         self.alpha_grid = self.energy_loss_model.alphas
+        # precomputed once from alpha_grid alone (fixed data); consumed by the
+        # "knots method" Stan model variant (energy_mass_spatial_model_alpha_spline.stan)
+        # for natural cubic spline interpolation in place of the default
+        # model's linear interpolation over the same grid.
+        self.alpha_spline_matrix = natural_cubic_spline_matrix(self.alpha_grid)
         self.mass_ids_grid = self.energy_loss_model.massids
         self.charges_grid = np.array(
             [charge_massid_map[massid] for massid in self.mass_ids_grid]
@@ -297,6 +316,7 @@ class GridGenerator:
             "lnA_energy_grid": self.lnA_energy_grid,
             "energy_grid_widths": self.energy_grid_widths,
             "alpha_grid": self.alpha_grid,
+            "alpha_spline_matrix": self.alpha_spline_matrix,
             "mass_ids_grid": self.mass_ids_grid,
             "charges_grid": self.charges_grid,
             "beta_egmf_grid": self.beta_egmf_grid,

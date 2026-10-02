@@ -213,6 +213,58 @@ def source_spectrum(energy : np.ndarray, alpha : float, charge : float, Rmax : f
     exp_cutoff = np.where(energy > Emax, np.exp(1 - energy / Emax), 1.0)
     return energy**-alpha * exp_cutoff
 
+def natural_cubic_spline_matrix(x: np.ndarray) -> np.ndarray:
+    """
+    Build the (n x n) matrix S such that, for any y sampled on the fixed
+    knots ``x``, the natural cubic spline's second derivatives at the knots
+    are ``y2 = S @ y``.
+
+    ``x`` (e.g. ``alpha_grid``) is fixed data, so S depends only on the knot
+    spacing and can be computed once and reused for any y-values evaluated on
+    that grid (e.g. ``espect_mfs``, ``mulnA_mfs``, ``varlnA_mfs``, each of
+    which is a `mass_fracs`-weighted combination of `data`-block grids,
+    recomputed every HMC iteration). Natural boundary conditions are used
+    (y''=0 at both ends), matching the classic natural cubic spline.
+
+    This is the Python-side precompute for the Stan "knots method" spline
+    interpolation used by the `energy_mass_spatial` model's
+    ``_alpha_spline.stan`` variant, in place of the default model's linear
+    interpolation over the same ``alpha_grid`` (see `interpolate()` in
+    `energy_mass_spatial/utils.stan`).
+
+    Parameters
+    ----------
+    x : np.ndarray
+        Strictly increasing 1D array of knot locations (e.g. `alpha_grid`).
+
+    Returns
+    -------
+    S : np.ndarray
+        (n x n) matrix such that `y2 = S @ y` gives the natural cubic
+        spline's second derivatives at the knots, for any y sampled at `x`.
+    """
+    x = np.asarray(x, dtype=float)
+    n = len(x)
+    if n < 3:
+        raise ValueError("natural_cubic_spline_matrix needs at least 3 knots.")
+
+    h = np.diff(x)
+
+    A = np.zeros((n, n))
+    B = np.zeros((n, n))
+    A[0, 0] = 1.0
+    A[-1, -1] = 1.0
+    for i in range(1, n - 1):
+        A[i, i - 1] = h[i - 1] / 6.0
+        A[i, i] = (h[i - 1] + h[i]) / 3.0
+        A[i, i + 1] = h[i] / 6.0
+        B[i, i - 1] = 1.0 / h[i - 1]
+        B[i, i] = -(1.0 / h[i - 1] + 1.0 / h[i])
+        B[i, i + 1] = 1.0 / h[i]
+
+    return np.linalg.solve(A, B)
+
+
 def pick_grain_size(N : int, threads_per_chain : int):
     """
     Get the grain size for stan batch parallelisation.

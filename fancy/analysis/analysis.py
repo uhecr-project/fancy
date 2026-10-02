@@ -123,6 +123,8 @@ class Analysis:
         analysis_type: str = energy_mass_spatial_type,
         background_only : bool = False,
         use_rigidity_grid : bool = False,
+        use_with_systematics : bool = False,
+        use_alpha_spline : bool = False,
     ) -> None:
         """
         Container to manage the inputs and outputs of the fits.
@@ -145,12 +147,31 @@ class Analysis:
             kappa_GMF(R) model variant, which requires log10_gmf_Rgrid /
             log_kappa_gmf_grid to be present in the loaded data / simulation
             (see RigidityResolvedGMFBackPropagation).
+        use_with_systematics : bool, default=False
+            If True (only supported for analysis_type=energy_mass_spatial),
+            compiles the "_with_systematics" model variant, which samples
+            additional latent nuisance parameters (nu_logE_sys,
+            nu_kappa_gmf_sys, nu_mean_lnA_sys, nu_var_lnA_sys) to marginalise
+            over the systematic uncertainties instead of ignoring them.
+        use_alpha_spline : bool, default=False
+            If True, compiles the "_alpha_spline" model variant (the "knots
+            method"), which replaces the default model's linear
+            interpolation over alpha_grid with a natural cubic spline (see
+            fancy.utils.helpers.natural_cubic_spline_matrix), evaluated using
+            a precomputed second-derivative matrix passed in as
+            alpha_spline_matrix. Kept as a fully separate Stan model file per
+            analysis_type so each default linear-interpolation model stays
+            unchanged and reproducible; intended for direct A/B comparison
+            against it on the same simulated dataset. Supported for every
+            analysis_type except the background-only variant (bg_only=True).
         """
         self.data = data
         self.gmf_model = gmf_model
         self.analysis_type = analysis_type
         self.bg_only = background_only
         self.use_rigidity_grid = use_rigidity_grid
+        self.use_with_systematics = use_with_systematics
+        self.use_alpha_spline = use_alpha_spline
 
         self.stan_model = None
         self.grid_config = None
@@ -237,16 +258,8 @@ class Analysis:
             effexp_model_kwargs
         )
 
-        # for the lnA grid parameters, use the detector's mass model
-        if lnA_energy_gridparams is not None:
-            lnA_energy_gridparams = lnA_energy_gridparams
-        else:
-            lnA_energy_gridparams = (
-                np.min(np.exp(self.data.detector.lnA_logE_grid)),
-                np.max(np.exp(self.data.detector.lnA_logE_grid)),
-                len(self.data.detector.lnA_logE_grid),
-            )
-
+        # lnA_energy_gridparams=None is resolved by GridGenerator to the
+        # detector's own lnA energy bins.
         grid_generator.get_energy_mass_grid(
             energy_gridparams,
             lnA_energy_gridparams,
@@ -276,6 +289,11 @@ class Analysis:
         self.fit_inputs["log_wexp_earth_grid"] = np.moveaxis(grid_generator.log_wexp_earth_grid, (0,1,2,3), (0,2,3,1))
         self.fit_inputs["log_wexp_src_grid"] = np.moveaxis(grid_generator.log_wexp_src_grid, (0,1,2,3), (0,2,3,1))
         self.fit_inputs["esrc_ratio_grid"] = grid_generator.esrc_ratio_grid.T
+
+        if self.use_alpha_spline:
+            self.fit_inputs["alpha_spline_matrix"] = grid_generator.alpha_spline_matrix
+            if "alpha_spline_matrix" not in self.fit_input_keys:
+                self.fit_input_keys.append("alpha_spline_matrix")
 
     def load_from_simulation(
         self : Self,
@@ -380,16 +398,19 @@ class Analysis:
             self.fit_inputs["log_wexp_earth_grid"] = np.moveaxis(simulation.log_wexp_earth_grid, (0,1,2,3), (0,2,3,1))
             self.fit_inputs["log_wexp_src_grid"] = np.moveaxis(simulation.log_wexp_src_grid, (0,1,2,3), (0,2,3,1))
 
-            # this analysis_type's Stan model still has a beta_egmf
-            # parameter/prior (unlike energy_only/mass_only/energy_mass,
-            # handled in the branch above), so it needs the per-source prior
-            # fields too -- prepare_fit_inputs's code path already sets
-            # these, but load_from_simulation is a separate path that never
-            # called it (missed initially: mass_spatial_model_rigidity_grid.stan
-            # declares beta_egmf_prior_mean_log10/sd_log10 unconditionally in
-            # its data block, so leaving them unset breaks the Stan data
-            # JSON with a dims-mismatch error at pathfinder()/sample() time).
+            # rigidity-grid model variants still declare
+            # beta_egmf_prior_mean_log10/sd_log10 unconditionally in their
+            # data block (per-source, log10 space); the non-rigidity-grid
+            # model now samples a single scalar beta_egmf with its prior
+            # fixed in the .stan file, so this is a no-op for that case.
             self._apply_beta_egmf_priors()
+
+        # needed by every *_alpha_spline.stan variant, including the ones
+        # without a beta_egmf axis (energy_only, mass_only, energy_mass)
+        if self.use_alpha_spline:
+            self.fit_inputs["alpha_spline_matrix"] = simulation.alpha_spline_matrix
+            if "alpha_spline_matrix" not in self.fit_input_keys:
+                self.fit_input_keys.append("alpha_spline_matrix")
 
         # for omega_det, deal with this depending on gmf model
         if self.gmf_model == "None":
@@ -478,6 +499,23 @@ class Analysis:
                     "use_rigidity_grid has no background-only variant."
                 )
             stan_ext = "_rigidity_grid.stan"
+        elif self.use_with_systematics:
+            if self.analysis_type != self.energy_mass_spatial_type:
+                raise ValueError(
+                    "use_with_systematics is only supported for "
+                    f"analysis_type={self.energy_mass_spatial_type}."
+                )
+            if self.bg_only:
+                raise ValueError(
+                    "use_with_systematics has no background-only variant."
+                )
+            stan_ext = "_with_systematics.stan"
+        elif self.use_alpha_spline:
+            if self.bg_only:
+                raise ValueError(
+                    "use_alpha_spline has no background-only variant."
+                )
+            stan_ext = "_alpha_spline.stan"
         else:
             stan_ext = "_background.stan" if self.bg_only else ".stan"
 
@@ -601,24 +639,11 @@ class Analysis:
                 if key not in self.fit_input_keys:
                     self.fit_input_keys.append(key)
         else:
-            # As of 2026-09-21: use a flat, non-categorised
-            # beta_egmf ~ normal(1, 10) LINEAR-space prior for every source,
-            # regardless of egmf_structure. Session-long testing found this
-            # flat default recovers CenA/M82's truth beta_egmf substantially
-            # better than the egmf_structure-derived category priors
-            # (whether in log10 space or via the linear delta-method
-            # conversion this branch used to apply), and the
-            # category-specific mean/sd values (EGMF_STRUCTURE_LOG10_PRIORS)
-            # were never independently validated. See
-            # project_beta_egmf_src_frac_degeneracy memory for the full
-            # investigation. mean_log10/sd_log10/has_category (resolved
-            # above) are intentionally unused here now.
-            n_src = self.data.source.N
-            self.fit_inputs["beta_egmf_prior_mean"] = np.full(n_src, 1.0)
-            self.fit_inputs["beta_egmf_prior_sd"] = np.full(n_src, 10.0)
-            for key in ("beta_egmf_prior_mean", "beta_egmf_prior_sd"):
-                if key not in self.fit_input_keys:
-                    self.fit_input_keys.append(key)
+            # Reverted to the single shared beta_egmf model (2026-09-28):
+            # the non-rigidity-grid Stan model now samples one scalar
+            # beta_egmf ~ normal(0, 10), written directly in the .stan
+            # file's model block -- no per-source prior fields to pass in.
+            pass
 
     def get_beta_egmf_priors(
         self: Self,
@@ -630,10 +655,11 @@ class Analysis:
         egmf_structure category (see fancy.utils.egmf_priors).
 
         Used by prepare_fit_inputs to populate beta_egmf_prior_mean_log10 /
-        beta_egmf_prior_sd_log10 (rigidity-grid model, which samples
-        log10_beta_egmf directly) or, after a linear-space conversion,
-        beta_egmf_prior_mean / beta_egmf_prior_sd (non-rigidity-grid model,
-        which samples beta_egmf directly in linear space).
+        beta_egmf_prior_sd_log10 for the rigidity-grid model, which samples
+        log10_beta_egmf directly (per source). The non-rigidity-grid model
+        samples a single scalar beta_egmf shared across all sources, with a
+        fixed normal(0, 10) prior written directly in the .stan file, so
+        this method's output is unused for that model variant.
 
         Parameters
         ----------
@@ -647,9 +673,7 @@ class Analysis:
         (mean_log10, sd_log10, has_category): tuple of np.ndarray, each
         shape (Nsrcs,). has_category is a bool mask, True where a source has
         an assigned egmf_structure (as opposed to falling back to
-        default_mean/default_sd) -- prepare_fit_inputs uses this to apply
-        the non-rigidity-grid model's exact linear-space default (rather
-        than a delta-method approximation) for uncategorised sources.
+        default_mean/default_sd).
         """
         egmf_structure = self.data.source.egmf_structure
         n_src = self.data.source.N
@@ -736,12 +760,13 @@ class Analysis:
         if init_model is None:
             print("Not using variational inference (VI) output as initial values for the parameters.")
             inits_dict={
-                "alphas" : [-1, 1],
+                "alphas" : np.zeros((self.fit_inputs["Nsrcs"]+1)),
                 "mass_fracs" : np.full((self.fit_inputs["Nsrcs"]+1, self.fit_inputs["NAsrcs"]), 1 / self.fit_inputs["NAsrcs"]),
+                # "mass_fracs" : np.tile(np.array([0.1, 0.3, 0.3, 0.3])[:, None], (1, self.fit_inputs["Nsrcs"] + 1)).T,
                 "logE_true" : [np.median(np.log(self.fit_inputs["Edet"]))] * self.fit_inputs['N'],
-                "flux_frac" : [0.1, 0.9],
+                "flux_frac" : np.full((self.fit_inputs["Nsrcs"]+1), 1 / (self.fit_inputs["Nsrcs"]+1)),
                 "log10_Ftot" : -2,
-                "log10_beta_egmf" : np.zeros(self.fit_inputs["Nsrcs"]),
+                **({"log10_beta_egmf": np.zeros(self.fit_inputs["Nsrcs"])} if self.use_rigidity_grid else {"beta_egmf": 1.0}),
                 "nu_lnAs": np.full(self.fit_inputs['N'], 0.5),
             }
         elif init_model == "pathfinder":
@@ -775,37 +800,64 @@ class Analysis:
             # model, see e.g. map_laplace_truths.py's docstring) if none of
             # the candidates validate, rather than handing sample() a point
             # known to be bad.
-            candidates = pathfinder.create_inits(chains=chains)
-            if isinstance(candidates, dict):
-                candidates = [candidates]
+            #
+            # Each chain must get its OWN PathFinder draw (identical inits
+            # across chains defeats the point of running multiple chains --
+            # e.g. R-hat can no longer detect between-chain disagreement).
+            # cmdstanpy's create_inits(chains=N) draws N candidates, but a
+            # candidate can fail validation, so requesting exactly `chains`
+            # candidates isn't enough to guarantee `chains` valid ones.
+            # Oversample instead: pull chains*4 candidates from the same
+            # PathFinder approximation and keep validating (drawing further
+            # batches if needed) until we have `chains` accepted, unique
+            # per-chain init dicts, or we give up and fall back.
+            oversample_factor = 4
+            max_attempts = 5  # hard cap so a pathological run can't loop forever
+            validated_inits = []
+            attempt = 0
+            n_requested_total = 0
+            while len(validated_inits) < chains and attempt < max_attempts:
+                n_candidates = chains * oversample_factor
+                candidates = pathfinder.create_inits(chains=n_candidates)
+                if isinstance(candidates, dict):
+                    candidates = [candidates]
+                n_requested_total += len(candidates)
 
-            inits_dict = None
-            for i, candidate in enumerate(candidates):
-                try:
-                    log_prob_df = self.stan_model.log_prob(candidate, data=self.fit_inputs)
-                except Exception as e:
-                    print(f"  PathFinder candidate {i} rejected (log_prob raised: {e}).")
-                    continue
+                for candidate in candidates:
+                    if len(validated_inits) >= chains:
+                        break
+                    try:
+                        log_prob_df = self.stan_model.log_prob(candidate, data=self.fit_inputs)
+                    except Exception as e:
+                        print(f"  PathFinder candidate rejected (log_prob raised: {e}).")
+                        continue
 
-                if np.all(np.isfinite(log_prob_df.to_numpy())):
-                    print(f"  PathFinder candidate {i} accepted (lp__={log_prob_df['lp__'].iloc[0]:.3f}).")
-                    inits_dict = candidate
-                    break
-                print(f"  PathFinder candidate {i} rejected (non-finite lp__/gradient).")
+                    if np.all(np.isfinite(log_prob_df.to_numpy())):
+                        print(f"  PathFinder candidate accepted for chain {len(validated_inits)} "
+                              f"(lp__={log_prob_df['lp__'].iloc[0]:.3f}).")
+                        validated_inits.append(candidate)
+                    else:
+                        print("  PathFinder candidate rejected (non-finite lp__/gradient).")
 
-            if inits_dict is None:
-                print(f"  All {len(candidates)} PathFinder candidates were invalid -- "
-                      "falling back to the fixed interior init dict instead of an "
-                      "init point known to be bad.")
+                attempt += 1
+
+            if len(validated_inits) < chains:
+                print(f"  Only {len(validated_inits)}/{chains} valid PathFinder candidates found "
+                      f"after {n_requested_total} draws over {attempt} attempt(s) -- "
+                      "falling back to the fixed interior init dict (broadcast to all "
+                      "chains) instead of an init point known to be bad.")
                 inits_dict = {
-                    "alphas": [-1, 1],
+                    "alphas": np.full(self.fit_inputs["Nsrcs"] + 1, 0.0),
                     "mass_fracs": np.full((self.fit_inputs["Nsrcs"] + 1, self.fit_inputs["NAsrcs"]), 1 / self.fit_inputs["NAsrcs"]),
                     "logE_true": [np.median(np.log(self.fit_inputs["Edet"]))] * self.fit_inputs['N'],
-                    "flux_frac": [0.1, 0.9],
+                    "flux_frac": np.full(self.fit_inputs["Nsrcs"] + 1, 1 / (self.fit_inputs["Nsrcs"] + 1)),
                     "log10_Ftot": -2,
-                    "log10_beta_egmf": np.zeros(self.fit_inputs["Nsrcs"]),
+                    **({"log10_beta_egmf": np.zeros(self.fit_inputs["Nsrcs"])} if self.use_rigidity_grid else {"beta_egmf": 0.5}),
                     "nu_lnAs": np.full(self.fit_inputs['N'], 0.5),
                 }
+            else:
+                # one distinct, validated init dict per chain
+                inits_dict = validated_inits
 
         elif init_model == "vi":
             print("Using variational inference (VI) output as initial values for the parameters.")
@@ -832,8 +884,19 @@ class Analysis:
             # inits_dict.pop("log10_Ftot")
             # inits_dict.pop("alphas")
             # inits_dict.pop("mass_fracs")
-            inits_dict["alpha_bg"] = 1
-            inits_dict["mass_fracs_bg"] = np.full((self.fit_inputs["NAsrcs"]), 1 / self.fit_inputs["NAsrcs"])
+            # inits_dict may now be either a single dict (broadcast to all
+            # chains) or a list of one dict per chain (pathfinder init_model,
+            # when per-chain validated candidates were found) -- add the
+            # bg-only keys to every dict in either case.
+            bg_only_extra = {
+                "alpha_bg": 1,
+                "mass_fracs_bg": np.full((self.fit_inputs["NAsrcs"]), 1 / self.fit_inputs["NAsrcs"]),
+            }
+            if isinstance(inits_dict, list):
+                for d in inits_dict:
+                    d.update(bg_only_extra)
+            else:
+                inits_dict.update(bg_only_extra)
         if inits is not None:
             print("Using user-provided initial values for the parameters.")
             inits_dict = inits
@@ -921,17 +984,29 @@ class Analysis:
                 diagnostics["diagnose_report"] = f["fit"]["diagnostics"].attrs["diagnose_report"]
             inits_dict = None
             if "inits" in f["fit"]:
-                inits_dict = {key: value[()] for key, value in f["fit"]["inits"].items()}
+                inits_handle = f["fit"]["inits"]
+                # per-chain layout (list of dicts saved as chain_0, chain_1, ...)
+                # vs. the flat single-dict layout -- see `save`.
+                if all(k.startswith("chain_") for k in inits_handle):
+                    n_chains = len(inits_handle.keys())
+                    inits_dict = [
+                        {key: value[()] for key, value in inits_handle[f"chain_{i}"].items()}
+                        for i in range(n_chains)
+                    ]
+                else:
+                    inits_dict = {key: value[()] for key, value in inits_handle.items()}
 
         log_post = samples.pop("log_post")
         diagnostics["log_post"] = log_post
 
         use_rigidity_grid = "log10_gmf_Rgrid" in fit_inputs
+        use_alpha_spline = "alpha_spline_matrix" in fit_inputs
 
         analysis = cls(
             data,
             gmf_model=gmf_model,
             use_rigidity_grid=use_rigidity_grid,
+            use_alpha_spline=use_alpha_spline,
         )
         analysis.fit_inputs = fit_inputs
         analysis.fit_input_keys = list(fit_inputs.keys())
@@ -979,10 +1054,21 @@ class Analysis:
             # initial values used to start the chains (fixed dict / pathfinder
             # / VI-derived / user-provided -- see `fit_model`), so the exact
             # inits can be recovered without re-running pathfinder/VI.
+            # `inits_dict` is either a single dict (broadcast to all chains)
+            # or a list of one dict per chain (pathfinder init_model, when
+            # per-chain validated candidates were found) -- store the list
+            # case as one subgroup per chain so each chain's distinct inits
+            # survive a round trip through `load`.
             if self.inits_dict is not None:
                 inits_handle = fit_handle.create_group("inits")
-                for key, value in self.inits_dict.items():
-                    create_dataset_compressed(inits_handle, key, value)
+                if isinstance(self.inits_dict, list):
+                    for chain_idx, chain_inits in enumerate(self.inits_dict):
+                        chain_handle = inits_handle.create_group(f"chain_{chain_idx}")
+                        for key, value in chain_inits.items():
+                            create_dataset_compressed(chain_handle, key, value)
+                else:
+                    for key, value in self.inits_dict.items():
+                        create_dataset_compressed(inits_handle, key, value)
 
             # samples (includes loglik_event, since it is a generated quantity
             # returned by stan_variables())

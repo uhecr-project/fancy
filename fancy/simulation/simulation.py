@@ -265,6 +265,7 @@ class Simulation:
         self.lnA_energy_grid = self.config["lnA_energy_grid"]
         self.energy_grid_widths = self.config["energy_grid_widths"]
         self.alpha_grid = self.config["alpha_grid"]
+        self.alpha_spline_matrix = self.config["alpha_spline_matrix"]
         self.mass_ids_grid = self.config["mass_ids_grid"]
         self.beta_egmf_grid = self.config["beta_egmf_grid"]
         self.rigidity_grid = self.config["rigidity_grid"]
@@ -299,11 +300,12 @@ class Simulation:
         self: Self,
         mass_fracs: np.ndarray,
         alphas: np.ndarray,
-        beta_egmf: Union[float, np.ndarray] = 1,
+        beta_egmf: float = 1,
         source_fraction: Union[float, None] = None,
         Lsrcs: Union[np.ndarray, None] = None,
         Nex: Union[int, None] = None,
         F0 : Union[float, None] = None,
+        seed: Union[int, None] = None,
     ) -> dict:
         """
         Set the truths for the simulation.
@@ -316,11 +318,9 @@ class Simulation:
         alphas : np.ndarray
             the spectral indices for the sources
             Shape should be (Nsrcs+1)
-        beta_egmf : float or np.ndarray, optional
-            the magnetic spread parameter(s) to use, per source, in
-            nG Mpc^1/2. A scalar is broadcast to all Nsrcs sources
-            (background has no EGMF deflection). By default set to
-            1 nG Mpc^1/2 for every source.
+        beta_egmf : float, optional
+            the magnetic spread parameter to use.
+            By default set to 1 nG Mpc^1/2
         source_fraction : float, optional
             fraction of sources to use, by default 0.5.
             If None, then Lsrcs or Nex must be provided.
@@ -339,6 +339,13 @@ class Simulation:
             If None, then Nex or source_fraction must be provided.
 
             This only works in tandem with Lsrcs at the moment.
+        seed : int, optional
+            random seed used to draw the per-source event counts
+            (`Nex_per_src`) from a multinomial distribution over the total
+            event count. If None, then no seed is set. See
+            `__calculate_flux_truths` for details -- this is what
+            distributes a fixed `Nex`/`Nex_src` across `Nsrcs+1` (or
+            `Nsrcs`) sources when there is more than one source.
 
         Returns
         -------
@@ -373,12 +380,6 @@ class Simulation:
                 "Either source_fraction or F0 must be provided. Both cannot be None."
             )
 
-        # broadcast a scalar beta_egmf to all sources; a per-source array
-        # must match Nsrcs exactly (no implicit truncation/padding)
-        beta_egmf = np.broadcast_to(np.atleast_1d(beta_egmf), (self.Nsrcs,))
-        if beta_egmf.shape != (self.Nsrcs,):
-            raise ValueError(f"beta_egmf must be a scalar or have shape ({self.Nsrcs},)")
-
         # set the truth values based on the input parameters
         fit_truths = {
             "alphas": alphas,
@@ -391,7 +392,7 @@ class Simulation:
             "F0" : F0
         }
 
-        fit_truths = self.__calculate_flux_truths(fit_truths)
+        fit_truths = self.__calculate_flux_truths(fit_truths, seed=seed)
 
         self.truths = fit_truths
 
@@ -419,18 +420,7 @@ class Simulation:
         w_exp_src = np.zeros(self.Nsrcs)
         esrc_ratios = np.zeros(self.Nsrcs)
 
-        # background row of wexp_earth_grid is computed at D=3000 Mpc (see
-        # EffectiveExposure.compute_effective_exposure), which drives
-        # kappa_egmf -> 0 for any beta_egmf -- the background exposure is
-        # beta-independent by construction, so any fixed reference value
-        # works for its interpolation.
-        log10_beta_egmf_bg = np.log10(self.beta_egmf_grid.value[0])
-
         for k in range(self.Nsrcs + 1):
-            log10_beta_egmf_k = (
-                fit_truths["log10_beta_egmf"][k] if k < self.Nsrcs else log10_beta_egmf_bg
-            )
-
             f_log10_wexp_earth = RegularGridInterpolator(
                 (self.alpha_grid, np.log10(self.beta_egmf_grid.value)),
                 np.log10(self.wexp_earth_grid[k, ...].value),
@@ -442,7 +432,7 @@ class Simulation:
                 fit_truths["mass_fracs"][:, k]
                 * 10.0
                 ** f_log10_wexp_earth(
-                    (fit_truths["alphas"][k], log10_beta_egmf_k)
+                    (fit_truths["alphas"][k], fit_truths["log10_beta_egmf"])
                 )
             )
 
@@ -463,14 +453,16 @@ class Simulation:
                     fit_truths["mass_fracs"][:, k]
                     * 10.0
                     ** f_log10_wexp_src(
-                        (fit_truths["alphas"][k], log10_beta_egmf_k)
+                        (fit_truths["alphas"][k], fit_truths["log10_beta_egmf"])
                     )
                 )
                 esrc_ratios[k] = f_esrc_ratio(fit_truths["alphas"][k])
 
         return w_exp_earth, w_exp_src, esrc_ratios
 
-    def __calculate_flux_truths(self: Self, fit_truths: dict) -> dict:
+    def __calculate_flux_truths(
+        self: Self, fit_truths: dict, seed: Union[int, None] = None
+    ) -> dict:
         """
         Calculate the truths related to the flux for the simulation.
 
@@ -478,6 +470,9 @@ class Simulation:
         ----------
         fit_truths : dict
             The truths dictionary containing the simulation parameters.
+        seed : int, optional
+            random seed for the multinomial draw of `Nex_per_src` (see
+            below). If None, then no seed is set.
 
         Returns
         -------
@@ -497,7 +492,13 @@ class Simulation:
             Nex_bg = fit_truths["Nex"] - Nex_src
 
             # here: calculate the total flux from the source at Earth
-            # here we have -1 to exclude the background source
+            # here we have -1 to exclude the background source.
+            # NB: this assumes an equal per-source contribution to Nex_src
+            # (Fearth_tot is the same scalar rate applied to every source's
+            # w_exp_earth), so with Nsrcs>1 every source is given the same
+            # Earth-frame flux here. Per-source flux asymmetry across
+            # multiple sources should be set via the Lsrcs branch below
+            # instead, where each source's Lsrcs is given explicitly.
             Fearth_tot = Nex_src / w_exp_earth[:-1]
 
             # then calcualte the particle rate by multiplying by distance factor
@@ -525,10 +526,6 @@ class Simulation:
             fit_truths["Nex_src"] = Nex_src
             fit_truths["Nex_bg"] = Nex_bg
             fit_truths["F0"] = Nex_bg / w_exp_earth[-1]
-
-            # fit_truths["Nex_per_src"] = np.ceil(
-            #     np.concatenate([Fearths_truths, [Nex_bg / w_exp_earth[-1]]]).T * w_exp_earth
-            # ).astype(int)
 
         elif fit_truths["Lsrcs"] is not None:
             Qsrcs_truths = fit_truths["Lsrcs"] / esrc_ratios
@@ -581,23 +578,36 @@ class Simulation:
         fit_truths["Ftot"] = np.sum(Fearths_truths) + fit_truths["F0"]
         fit_truths["log10_Ftot"] = np.log10(fit_truths["Ftot"])
 
-        # fit_truths["Nex_per_src"] = np.ceil(
-        #     np.concatenate([Fearths_truths, [fit_truths["F0"]]]).T * w_exp_earth
-        # ).astype(int)
-        # HACK!!! since we only have one source, we set the Nex_per_src manually
-        fit_truths["Nex_per_src"] = np.array([
-            fit_truths["Nex_src"], Nex_bg
-        ])
-
-        if np.sum(fit_truths["Nex_per_src"]) != Nex:
-            print(fit_truths["Nex_per_src"], np.sum(fit_truths["Nex_per_src"]), Nex)
-            raise ValueError(
-                "Nex_per_src does not sum to Nex. Something went wrong."
-            )
-
         fit_truths["flux_frac"] = (
             np.concatenate([Fearths_truths, [fit_truths["F0"]]]).T / fit_truths["Ftot"]
         )
+
+        # split the fixed total Nex across the Nsrcs+1 sources (Nsrcs point
+        # sources + background) via a multinomial draw, weighted by each
+        # population's share of the Earth-frame flux -- i.e.
+        # Nex_per_src ~ Multinomial(Nex, flux_frac). flux_frac is already
+        # Fearths_truths (and F0) normalised by Ftot, i.e. already the
+        # correct Earth-frame event-count share (Nex_src/Nex_bg above were
+        # derived via Fearth_tot = Nex_src / w_exp_earth, so flux is already
+        # exposure-weighted); multiplying by w_exp_earth again here would
+        # double-count the exposure weighting and bias the split away from
+        # Nex_src/Nex_bg (confirmed via smoke test: CenA-M82, Nsrcs=2, Nex=
+        # 500, src_frac=0.6 target gave Nex_per_src src-sum/bg fractions of
+        # 0.786/0.214 instead of ~0.6/0.4 under the old expected_share =
+        # flux_frac * w_exp_earth weighting). This generalises the old
+        # Nsrcs=1 hardcoded [Nex_src, Nex_bg] split, and replaces the
+        # previous deterministic np.ceil(...) allocation with proper
+        # per-event Poisson-consistent scatter: conditioned on a fixed Nex,
+        # a sum of independent per-source Poisson counts is exactly
+        # multinomial, so this is the correct way to get "Poisson per
+        # source, summed" while keeping the total event count Nex exactly
+        # fixed (as the rest of this method assumes). By construction,
+        # np.sum(Nex_per_src) == Nex exactly, so no post-hoc consistency
+        # check is needed.
+        multinomial_p = fit_truths["flux_frac"]
+
+        rng = np.random.default_rng(seed=seed)
+        fit_truths["Nex_per_src"] = rng.multinomial(Nex, multinomial_p)
 
         return fit_truths
 
@@ -729,7 +739,7 @@ class Simulation:
                     * (
                         theta_igmfs(
                             rigidity_samples * u.EV,
-                            self.truths["beta_egmf"][k] * (u.nG * u.Mpc ** (1 / 2)),
+                            self.truths["beta_egmf"] * (u.nG * u.Mpc ** (1 / 2)),
                             self.data.source.distance[k] * u.Mpc,
                         )
                         / (1 * u.deg)
@@ -754,8 +764,27 @@ class Simulation:
                 skycoord_gb.representation_type = "unitspherical"
                 skycoord_gb_truths.append(skycoord_gb)
 
-            N_prev_idx = Nex_per_src * sampling_factor
-            Nsamples_per_src.append(N_prev_idx)
+            # Nsamples_per_src stores THIS source's own sample count
+            # (Nex_per_src * sampling_factor), consumed downstream
+            # (get_skycoords_earth, apply_energy_directional_response) as a
+            # per-source width added to their own running offset -- NOT the
+            # cumulative N_next_idx. Bug fix: this previously reassigned
+            # N_prev_idx to `Nex_per_src * sampling_factor` alone (discarding
+            # the accumulated offset from prior sources) and stored that same
+            # wrong value here. For Nsrcs=1 this is latent (k=0 starts at
+            # N_prev_idx=0, so "own width" and "N_next_idx" coincide; nothing
+            # downstream reads the corrupted N_prev_idx after the final (bg)
+            # iteration). For Nsrcs>=2, source 1+ onward gets N_prev_idx reset
+            # to its own width instead of the true cumulative offset, so the
+            # next source's slice [N_prev_idx:N_next_idx] both overlaps
+            # earlier sources' already-written samples AND leaves the tail of
+            # Etruths (and rigidity/lnA/kappa_egmf_truths) at their np.zeros()
+            # initialisation -- surfaced downstream as Etrue=0 ->
+            # log(Etrue)=-inf -> NaN truncated-lognormal CDF bounds in
+            # apply_energy_directional_response's get_Edet() call.
+            own_width = Nex_per_src * sampling_factor
+            Nsamples_per_src.append(own_width)
+            N_prev_idx = N_next_idx
 
         skycoord_gb_truths = concatenate_skycoords(skycoord_gb_truths)
 

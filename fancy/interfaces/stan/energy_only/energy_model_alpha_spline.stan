@@ -1,12 +1,28 @@
 /**
- * Energy + lnA model
+ * Energy-only model -- "knots method" variant.
+ *
+ * Identical to energy_model.stan EXCEPT that every interpolation over
+ * alpha_grid (log_espect_at_alpha, log_wexp_earth_grid, log_wexp_src_grid,
+ * esrc_ratio_grid) uses a natural cubic spline instead of linear
+ * interpolation, evaluated via a precomputed second-derivative matrix
+ * (alpha_spline_matrix, built once in Python from alpha_grid alone -- see
+ * fancy.utils.helpers.natural_cubic_spline_matrix). This targets the
+ * grid-funneling pathology where alpha posteriors snapped to alpha_grid
+ * nodes under linear interpolation.
+ *
+ * Interpolation over logE_grid (energy_spectrum_lpdf) is UNCHANGED (still
+ * linear via interpolate()) -- only the alpha_grid axis is splined here.
+ *
+ * Ported from energy_mass_spatial_model_alpha_spline.stan. Deliberately kept
+ * as a separate file from energy_model.stan so the default
+ * linear-interpolation model stays untouched and reproducible.
  *
  * @author Keito Watanabe
- * @date March 2024
+ * @date September 2026
  */
 
 functions {
-    #include /utils.stan
+    #include /utils_alpha_spline.stan
 
      /**
     * sample from the energy spectrum at Earth
@@ -14,8 +30,11 @@ functions {
     * @param log_en_grid : grid of log(E) values for interpolation
     * @param espect_mfs : mass fraction weighted energy spectrum at Earth. Shape in (Nalphas, NEs)
     * @return log probability density of the energy spectrum at Earth
+    *
+    * NB: still linear interpolation over logE_grid -- only the alpha_grid
+    * axis is splined in this model variant.
     */
-    real energy_spectrum_lpdf(real logE, 
+    real energy_spectrum_lpdf(real logE,
                           vector log_en_grid,
                           vector log_espect_at_alpha) {
         return interpolate(log_en_grid, log_espect_at_alpha, logE);
@@ -75,8 +94,6 @@ data {
     int<lower=0> N;
     int<lower=0> NEbins;  /* number of energy bins for lnA measurements */
     vector[N] Edet;
-    array[NEbins] real mean_lnA_det;
-    array[NEbins] real var_lnA_det;
 
     /* model */
     int<lower=0> Nalphas;   /* number of alpha grid points */
@@ -86,11 +103,6 @@ data {
     array[NEs] real logE_grid;
     array[Nsrcs+1, NAsrcs] matrix [Nalphas, NEs] earth_spectrum_grid;
 
-    /* for lnA, binned via detected energies */
-    array[NEbins] real lnA_logE_grid; /* grid of energy bins for lnA model */
-    array[Nsrcs+1, NAsrcs] matrix [Nalphas, NEbins] mean_lnA_grid;
-    array[Nsrcs+1, NAsrcs] matrix [Nalphas, NEbins] var_lnA_grid;
-
 
     /* detector */
     real<lower=0> Emin;
@@ -98,19 +110,22 @@ data {
 
     /* statitistical uncertainty */
     real<lower=0> logE_stat_unc;
-    vector[NEbins] mean_lnA_stat_unc;
-    vector[NEbins] var_lnA_stat_unc;
 
     /* systematic uncertainties, as global shifts */
     real logE_sys_unc;
-    real mean_lnA_sys_unc;
-    real var_lnA_sys_unc;
 
     /* Nex */
     /* grid of weighted exposures at earth and source */
     array[Nsrcs+1, NAsrcs] vector[Nalphas] log_wexp_earth_grid;
     array[Nsrcs, NAsrcs] vector[Nalphas] log_wexp_src_grid;
     array[Nsrcs, NAsrcs] vector[Nalphas] esrc_ratio_grid;
+
+    /* "knots method": precomputed natural cubic spline second-derivative
+       matrix for alpha_grid (see fancy.utils.helpers.natural_cubic_spline_matrix).
+       Depends only on alpha_grid's knot locations, computed once in Python;
+       y2 = alpha_spline_matrix * y gives the spline's second derivatives at
+       the knots for any y sampled on alpha_grid this iteration. */
+    matrix[Nalphas, Nalphas] alpha_spline_matrix;
 
     /* computation parameters */
     int<lower=1> grain_size; /* for reduce_sum, generally N / (4 * ncores) is a good estimate */
@@ -131,7 +146,6 @@ transformed data {
   // --- precompute 1D arrays for interpolation ---
   vector[Nalphas] alpha_grid_vec = to_vector(alpha_grid);
   vector[NEs] logE_grid_vec = to_vector(logE_grid);
-  vector[NEbins] lnA_logE_grid_vec = to_vector(lnA_logE_grid);
 
   // number of events for reduced sum
     array[N] int event_ids;
@@ -162,16 +176,12 @@ transformed parameters {
     // --- only quantities needed downstream ---
     vector[Nsrcs+1] F;
     array[Nsrcs+1] matrix [Nalphas, NEs] espect_mfs;
-    array[Nsrcs+1] matrix [Nalphas, NEbins] mulnA_mfs;
-    array[Nsrcs+1] matrix [Nalphas, NEbins] varlnA_mfs;
     vector[Nsrcs+1] wexp_earths;
     array[Nsrcs+1] vector[NEs] log_espect_at_alpha;
 
     // initialise
     F = rep_vector(0.0, Nsrcs+1);
     espect_mfs = rep_array(rep_matrix(0.0, Nalphas, NEs), Nsrcs+1);
-    mulnA_mfs = rep_array(rep_matrix(0.0, Nalphas, NEbins), Nsrcs+1);
-    varlnA_mfs = rep_array(rep_matrix(0.0, Nalphas, NEbins), Nsrcs+1);
     wexp_earths = rep_vector(0.0, Nsrcs+1);
 
     for (k in 1:Nsrcs+1) {
@@ -181,12 +191,14 @@ transformed parameters {
         // accumulate spectra and weights
         for (j in 1:NAsrcs) {
         espect_mfs[k] += mass_fracs[k][j] * earth_spectrum_grid[k,j];
-        mulnA_mfs[k][,] += mass_fracs[k][j] * mean_lnA_grid[k,j];
-        varlnA_mfs[k][,] += mass_fracs[k][j] * var_lnA_grid[k,j];
 
-        wexp_earths[k] += mass_fracs[k][j] * exp(interpolate(
+        // "knots method": 1D natural cubic spline over alpha_grid
+        // (energy_only has no beta_egmf axis, so no interp2d here).
+        vector[Nalphas] log_wexp_earth_y2 = alpha_spline_matrix * log_wexp_earth_grid[k,j];
+        wexp_earths[k] += mass_fracs[k][j] * exp(interpolate_spline(
             alpha_grid_vec,
             log_wexp_earth_grid[k,j],
+            log_wexp_earth_y2,
             alphas[k]
         ));
 
@@ -194,32 +206,23 @@ transformed parameters {
 
         // since the alpha is only source dependent, and not dependent
         // per event, we can already just interpolate it here and store the
-        // spectrum per "distance". 
+        // spectrum per "distance".
         // this is fine since we are already in the transformed_parameters block.
-        for (ee in 1:NEs) {
-        log_espect_at_alpha[k][ee] = interpolate(alpha_grid_vec,
-                                                log(espect_mfs[k][, ee]),
-                                                alphas[k]);
+        //
+        // "knots method": natural cubic spline instead of linear interpolation
+        // over alpha_grid. log(espect_mfs[k]) is (Nalphas, NEs); batch the
+        // spline coefficient solve once across all NEs columns rather than
+        // recomputing alpha_spline_matrix * y inside this loop.
+        {
+          matrix[Nalphas, NEs] log_espect_mfs_k = log(espect_mfs[k]);
+          log_espect_at_alpha[k] = interpolate_spline_batch(
+            alpha_grid_vec, log_espect_mfs_k, alpha_spline_matrix, alphas[k]
+          );
         }
     }
 
     vector[Nsrcs+1] Nex_arr = F .* wexp_earths;
     real Nex = sum(Nex_arr);
-
-    // mean and sigma lnA values
-    vector[NEbins] mean_lnA_true = rep_vector(0.0, NEbins);
-    vector[NEbins] var_lnA_true = rep_vector(0.0, NEbins);
-
-    // --- binned lnA likelihood ---
-    for (l in 1:NEbins) {
-        for (k in 1:Nsrcs+1) {
-
-            /* calculate the mean and variance of lnA for each energy bin */
-            mean_lnA_true[l] += Nex_arr[k] * interpolate(alpha_grid_vec, to_vector(mulnA_mfs[k][,l]), alphas[k]) / Nex;
-            var_lnA_true[l] += Nex_arr[k] * interpolate(alpha_grid_vec, to_vector(varlnA_mfs[k][,l]), alphas[k]) / Nex;
-
-        }
-    }
 
 }
 
@@ -261,16 +264,6 @@ model {
   // --- Poisson normalization ---
   target += -Nex;
 
-  // --- binned lnA likelihood ---
-  for (l in 1:NEbins) {
-    target += left_truncated_normal_lpdf(mean_lnA_det[l] |
-              mean_lnA_true[l] + mean_lnA_sys_unc,
-              mean_lnA_stat_unc[l], 0.0);
-    target += left_truncated_normal_lpdf(var_lnA_det[l] |
-              var_lnA_true[l] + var_lnA_sys_unc,
-              var_lnA_stat_unc[l], -2.0);
-  }
-
 }
 
 
@@ -287,10 +280,15 @@ generated quantities {
       real wexp_src = 0.0;
 
       for (j in 1:NAsrcs) {
-        esrc_ratios += mass_fracs[k][j] * interpolate(alpha_grid_vec, esrc_ratio_grid[k,j], alphas[k]);
-        wexp_src += mass_fracs[k][j] * exp(interpolate(
+        vector[Nalphas] esrc_ratio_y2 = alpha_spline_matrix * esrc_ratio_grid[k,j];
+        esrc_ratios += mass_fracs[k][j] * interpolate_spline(
+          alpha_grid_vec, esrc_ratio_grid[k,j], esrc_ratio_y2, alphas[k]
+        );
+        vector[Nalphas] log_wexp_src_y2 = alpha_spline_matrix * log_wexp_src_grid[k,j];
+        wexp_src += mass_fracs[k][j] * exp(interpolate_spline(
           alpha_grid_vec,
           log_wexp_src_grid[k,j],
+          log_wexp_src_y2,
           alphas[k]
         ));
       }
@@ -307,7 +305,6 @@ generated quantities {
     // association probability as well
     array[N] vector[Nsrcs+1] loglik_event;
     array[N] vector[Nsrcs+1] loglik_event_energy;
-    array[NEbins] vector[Nsrcs+1] loglik_event_mass;
 
     for (i in 1:N) {
       loglik_event[i] = log(F);
@@ -317,16 +314,6 @@ generated quantities {
         loglik_event[i,k] += truncated_lognormal_lpdf(Edet[i] | logE_true[i] + logE_sys_unc, logE_stat_unc, Emin, Emax);
         loglik_event_energy[i,k] = loglik_event[i,k];
       }
-    }
-
-    for (l in 1:NEbins) {
-
-        loglik_event_mass[l] += left_truncated_normal_lpdf(mean_lnA_det[l] |
-            mean_lnA_true[l] + mean_lnA_sys_unc,
-            mean_lnA_stat_unc[l], 0.0);
-        loglik_event_mass[l] += left_truncated_normal_lpdf(var_lnA_det[l] |
-            var_lnA_true[l] + var_lnA_sys_unc,
-            var_lnA_stat_unc[l], -2.0);
     }
         
 }

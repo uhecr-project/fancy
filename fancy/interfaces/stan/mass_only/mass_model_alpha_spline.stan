@@ -1,12 +1,25 @@
 /**
- * Energy + lnA model
+ * Mass-only (lnA) model -- "knots method" variant.
+ *
+ * Identical to mass_model.stan EXCEPT that every interpolation over
+ * alpha_grid (mulnA_mfs/varlnA_mfs, log_wexp_earth_grid, log_wexp_src_grid,
+ * esrc_ratio_grid) uses a natural cubic spline instead of linear
+ * interpolation, evaluated via a precomputed second-derivative matrix
+ * (alpha_spline_matrix, built once in Python from alpha_grid alone -- see
+ * fancy.utils.helpers.natural_cubic_spline_matrix). This targets the
+ * grid-funneling pathology where alpha posteriors snapped to alpha_grid
+ * nodes under linear interpolation.
+ *
+ * Ported from energy_mass_spatial_model_alpha_spline.stan. Deliberately kept
+ * as a separate file from mass_model.stan so the default
+ * linear-interpolation model stays untouched and reproducible.
  *
  * @author Keito Watanabe
- * @date March 2024
+ * @date September 2026
  */
 
 functions {
-    #include /utils.stan
+    #include /utils_alpha_spline.stan
 }
 
 data {
@@ -42,6 +55,13 @@ data {
     array[Nsrcs+1, NAsrcs] vector[Nalphas] log_wexp_earth_grid;
     array[Nsrcs, NAsrcs] vector[Nalphas] log_wexp_src_grid;
     array[Nsrcs, NAsrcs] vector[Nalphas] esrc_ratio_grid;
+
+    /* "knots method": precomputed natural cubic spline second-derivative
+       matrix for alpha_grid (see fancy.utils.helpers.natural_cubic_spline_matrix).
+       Depends only on alpha_grid's knot locations, computed once in Python;
+       y2 = alpha_spline_matrix * y gives the spline's second derivatives at
+       the knots for any y sampled on alpha_grid this iteration. */
+    matrix[Nalphas, Nalphas] alpha_spline_matrix;
 
     /* computation parameters */
     int<lower=1> grain_size; /* for reduce_sum, generally N / (4 * ncores) is a good estimate */
@@ -100,9 +120,13 @@ transformed parameters {
       mulnA_mfs[k][,] += mass_fracs[k][j] * mean_lnA_grid[k,j];
       varlnA_mfs[k][,] += mass_fracs[k][j] * var_lnA_grid[k,j];
 
-      wexp_earths[k] += mass_fracs[k][j] * exp(interpolate(
+      // "knots method": 1D natural cubic spline over alpha_grid
+      // (mass_only has no beta_egmf axis, so no interp2d here).
+      vector[Nalphas] log_wexp_earth_y2 = alpha_spline_matrix * log_wexp_earth_grid[k,j];
+      wexp_earths[k] += mass_fracs[k][j] * exp(interpolate_spline(
         alpha_grid_vec,
         log_wexp_earth_grid[k,j],
+        log_wexp_earth_y2,
         alphas[k]
     ));
 
@@ -117,13 +141,25 @@ transformed parameters {
   vector[NEbins] var_lnA_true = rep_vector(0.0, NEbins);
 
    // --- binned lnA likelihood ---
-  for (l in 1:NEbins) {
+  // "knots method": batch the spline coefficient solve once per source k
+  // across all NEbins columns, instead of recomputing it per (l, k) pair.
+  {
+    array[Nsrcs+1] vector[NEbins] mulnA_spline_k;
+    array[Nsrcs+1] vector[NEbins] varlnA_spline_k;
     for (k in 1:Nsrcs+1) {
-
-        /* calculate the mean and variance of lnA for each energy bin */
-        mean_lnA_true[l] += Nex_arr[k] * interpolate(alpha_grid_vec, to_vector(mulnA_mfs[k][,l]), alphas[k]) / Nex;
-        var_lnA_true[l] += Nex_arr[k] * interpolate(alpha_grid_vec, to_vector(varlnA_mfs[k][,l]), alphas[k]) / Nex;
-
+      mulnA_spline_k[k] = interpolate_spline_batch(
+        alpha_grid_vec, mulnA_mfs[k], alpha_spline_matrix, alphas[k]
+      );
+      varlnA_spline_k[k] = interpolate_spline_batch(
+        alpha_grid_vec, varlnA_mfs[k], alpha_spline_matrix, alphas[k]
+      );
+    }
+    for (l in 1:NEbins) {
+      for (k in 1:Nsrcs+1) {
+          /* calculate the mean and variance of lnA for each energy bin */
+          mean_lnA_true[l] += Nex_arr[k] * mulnA_spline_k[k][l] / Nex;
+          var_lnA_true[l] += Nex_arr[k] * varlnA_spline_k[k][l] / Nex;
+      }
     }
   }
    
@@ -172,10 +208,15 @@ generated quantities {
       real wexp_src = 0.0;
 
       for (j in 1:NAsrcs) {
-        esrc_ratios += mass_fracs[k][j] * interpolate(alpha_grid_vec, esrc_ratio_grid[k,j], alphas[k]);
-        wexp_src += mass_fracs[k][j] * exp(interpolate(
+        vector[Nalphas] esrc_ratio_y2 = alpha_spline_matrix * esrc_ratio_grid[k,j];
+        esrc_ratios += mass_fracs[k][j] * interpolate_spline(
+          alpha_grid_vec, esrc_ratio_grid[k,j], esrc_ratio_y2, alphas[k]
+        );
+        vector[Nalphas] log_wexp_src_y2 = alpha_spline_matrix * log_wexp_src_grid[k,j];
+        wexp_src += mass_fracs[k][j] * exp(interpolate_spline(
           alpha_grid_vec,
           log_wexp_src_grid[k,j],
+          log_wexp_src_y2,
           alphas[k]
         ));
       }

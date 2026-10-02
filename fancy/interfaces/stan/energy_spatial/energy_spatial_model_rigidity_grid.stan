@@ -207,8 +207,8 @@ data {
 
     /* systematic uncertainties, as global shifts */
     real logE_sys_unc;
-    real mean_lnA_sys_unc;
-    real var_lnA_sys_unc;
+    vector[NEbins] mean_lnA_sys_unc;
+    vector[NEbins] var_lnA_sys_unc;
 
     /* Nex */
     int <lower=0> Nbeta_egmfs;
@@ -367,7 +367,7 @@ model {
   }
 
   // flux fraction weights: Dirichlet-like prior
-  flux_frac ~ dirichlet([2.0, 2.0]);
+  flux_frac ~ dirichlet(rep_vector(2.0, Nsrcs+1));
 
   // total flux : normal distribution in log10
   log10_Ftot ~ normal(-1.0, 3.0);

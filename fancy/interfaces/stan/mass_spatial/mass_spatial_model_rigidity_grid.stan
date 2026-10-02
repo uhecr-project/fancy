@@ -207,8 +207,8 @@ data {
 
     /* systematic uncertainties, as global shifts */
     real logE_sys_unc;
-    real mean_lnA_sys_unc;
-    real var_lnA_sys_unc;
+    vector[NEbins] mean_lnA_sys_unc;
+    vector[NEbins] var_lnA_sys_unc;
 
     /* Nex */
     int <lower=0> Nbeta_egmfs;
@@ -375,7 +375,7 @@ model {
   }
 
   // flux fraction weights: Dirichlet-like prior
-  flux_frac ~ dirichlet([2.0, 2.0]);
+  flux_frac ~ dirichlet(rep_vector(2.0, Nsrcs+1));
 
   // total flux : normal distribution in log10
   log10_Ftot ~ normal(-1.0, 3.0);
@@ -399,10 +399,10 @@ model {
   // --- binned lnA likelihood ---
   for (l in 1:NEbins) {
     target += left_truncated_normal_lpdf(mean_lnA_det[l] |
-              mean_lnA_true[l] + mean_lnA_sys_unc,
+              mean_lnA_true[l] + mean_lnA_sys_unc[l],
               mean_lnA_stat_unc[l], 0.0);
     target += left_truncated_normal_lpdf(var_lnA_det[l] |
-              var_lnA_true[l] + var_lnA_sys_unc,
+              var_lnA_true[l] + var_lnA_sys_unc[l],
               var_lnA_stat_unc[l], -2.0);
   }
 
@@ -509,10 +509,10 @@ generated quantities {
     for (l in 1:NEbins) {
 
         loglik_event_mass[l] += left_truncated_normal_lpdf(mean_lnA_det[l] |
-            mean_lnA_true[l] + mean_lnA_sys_unc,
+            mean_lnA_true[l] + mean_lnA_sys_unc[l],
             mean_lnA_stat_unc[l], 0.0);
         loglik_event_mass[l] += left_truncated_normal_lpdf(var_lnA_det[l] |
-            var_lnA_true[l] + var_lnA_sys_unc,
+            var_lnA_true[l] + var_lnA_sys_unc[l],
             var_lnA_stat_unc[l], -2.0);
     }
 

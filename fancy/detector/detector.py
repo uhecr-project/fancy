@@ -233,12 +233,14 @@ class Detector:
                 self.mean_lnA_sys = f_lnA_data["mean_sys"][()]
                 self.var_lnA_sys = f_lnA_data["var_sys"][()]
             else:
-                # for data, we set it to zero, but include the up and low values into a statistical uncertainty
+                # the systematic uncertainty here means the global shift, which we do not know apriori. So we set it to 0, and the variance to 0 as well. The systematic uncertainty will be treated as a free parameter in the fit.
                 self.mean_lnA_sys = 0.0
                 self.var_lnA_sys = 0.0
-
-                self.mean_lnA_stat = np.sqrt(self.mean_lnA_stat**2 + f_lnA_data["mean_sys_up"][()]**2 + f_lnA_data["mean_sys_low"][()]**2)
-                self.var_lnA_stat = np.sqrt(self.var_lnA_stat**2 + f_lnA_data["var_sys_up"][()]**2 + f_lnA_data["var_sys_low"][()]**2)
+                
+                # the "systematic uncertainties" in data is from e.g. calibration errors which are actually basically the 
+                # same for each model, so we can combine the statistical and systematic uncertainties in quadrature to get the total uncertainty.
+                self.mean_lnA_stat = np.sqrt(f_lnA_data["mean_stat"][()]**2 + f_lnA_data["mean_sys_up"][()]**2 + f_lnA_data["mean_sys_low"][()]**2)
+                self.var_lnA_stat = np.sqrt(f_lnA_data["var_stat"][()]**2 + f_lnA_data["var_sys_up"][()]**2 + f_lnA_data["var_sys_low"][()]**2)
     
     def sample_energies(self : Self, energy : float, n_samples : int = 1000) -> np.ndarray:
         """
