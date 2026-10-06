@@ -133,6 +133,7 @@ class Simulation:
         # grid related parameters
         self.energy_grid = None
         self.lnA_energy_grid = None
+        self.lnA_energy_grid_det = None
         self.energy_grid_widths = None
         self.alpha_grid = None
         self.mass_ids_grid = None
@@ -157,6 +158,7 @@ class Simulation:
         # shape parameters
         self.NEs = 0
         self.NElnAs = 0
+        self.NElnAs_det = 0
         self.Nalphas = 0
         self.Nmass_fracs = 0
         self.Nbeta_egmfs = 0
@@ -196,9 +198,16 @@ class Simulation:
             given as (E_min, E_max, Nbins), by default (32, 500, 50).
             The grid will be logarithmically spaced in energy.
         lnA_energy_gridparams : tuple, optional
-            The grid parameters for the lnA energy values.
-            given as (lnA_min, lnA_max, Nbins), by default (3, 100, 50).
-            The grid will be linearly spaced in lnA.
+            The grid parameters for the energies (in EeV) at which the true
+            mean / variance of lnA are modelled, given as (E_min, E_max, Nbins),
+            by default (1, 500, 50). The grid will be logarithmically spaced.
+            If None, the detector's own lnA energy bins are used.
+
+            NB: this is only the *model* grid. The simulated lnA moments
+            (mean_lnA_dets / var_lnA_dets) are always produced on the
+            detector's lnA energy bins (`lnA_energy_grid_det`, from
+            data.detector.lnA_logE_grid), by interpolating the model grid onto
+            them (see `apply_mass_response`).
         effexp_model_kwargs : dict, optional
             The keyword arguments for the effective exposure model.
             By default set to:
@@ -263,6 +272,15 @@ class Simulation:
 
         self.energy_grid = self.config["energy_grid"]
         self.lnA_energy_grid = self.config["lnA_energy_grid"]
+        # the detector's lnA energy bins (EeV), on which the "observed" lnA
+        # moments are simulated. Falls back to the model grid if the detector
+        # has no lnA data loaded.
+        if self.data.detector.lnA_logE_grid is not None:
+            self.lnA_energy_grid_det = np.exp(self.data.detector.lnA_logE_grid)
+        else:
+            self.lnA_energy_grid_det = self.lnA_energy_grid
+        self.NElnAs_det = len(self.lnA_energy_grid_det)
+        self.config["lnA_energy_grid_det"] = self.lnA_energy_grid_det
         self.energy_grid_widths = self.config["energy_grid_widths"]
         self.alpha_grid = self.config["alpha_grid"]
         self.alpha_spline_matrix = self.config["alpha_spline_matrix"]
@@ -713,12 +731,14 @@ class Simulation:
             # we then just sample normally to get lnA
             # TODO: should investigate whether we should extend the binning to incorporate
             # all energies valid within the energy uncertainty
-            mean_lnAs = mean_lnA_truths[
-                np.digitize(en_samples_src, self.lnA_energy_grid) - 1
-            ]
-            var_lnAs = var_lnA_truths[
-                np.digitize(en_samples_src, self.lnA_energy_grid) - 1
-            ]
+            # linear interpolation in lnE (clamped at the grid edges), the
+            # same as `interpolate` in the Stan models
+            mean_lnAs = np.interp(
+                np.log(en_samples_src), np.log(self.lnA_energy_grid), mean_lnA_truths
+            )
+            var_lnAs = np.interp(
+                np.log(en_samples_src), np.log(self.lnA_energy_grid), var_lnA_truths
+            )
             lnA_samples = rng.normal(
                 loc=mean_lnAs,
                 scale=np.sqrt(var_lnAs),
@@ -859,48 +879,78 @@ class Simulation:
         """
         Apply the detector response to the true values for the mean and variance of lnA.
 
+        The true moments (on the model grid `lnA_energy_grid`) are first
+        linearly interpolated in lnE onto the detector's lnA energy bins
+        (`lnA_energy_grid_det`), exactly as done in the Stan model, and the
+        detector response is applied there.
+
         Parameter:
         ----------
         mean_lnA_stat : float or np.ndarray
             The statistical uncertainty on the mean lnA.
             If a single value, then it is applied to all energy bins.
-            If an array, then it must have shape (NElnAs).
+            If an array, then it is interpolated onto the detector bins from
+            lnA_interp_energy_grid, or taken as-is if lnA_interp_energy_grid
+            is None and it has shape (NElnAs_det,).
         var_lnA_stat : float or np.ndarray
             The statistical uncertainty on the variance of lnA.
             If a single value, then it is applied to all energy bins.
-            If an array, then it must have shape (NElnAs).
+            If an array, then it is interpolated onto the detector bins from
+            lnA_interp_energy_grid, or taken as-is if lnA_interp_energy_grid
+            is None and it has shape (NElnAs_det,).
         mean_lnA_sys : float, optional
             The systematic uncertainty on the mean lnA.
             Default is 0.0.
         var_lnA_sys : float, optional
             The systematic uncertainty on the variance of lnA.
             Default is 0.0.
+        lnA_interp_energy_grid : np.ndarray, optional
+            ln(E / EeV) grid on which array-valued mean_lnA_stat / var_lnA_stat
+            are given (e.g. data.detector.lnA_logE_grid).
         """
+        log_E_det = np.log(self.lnA_energy_grid_det)
+
         if isinstance(mean_lnA_stat, float):
-            mean_lnA_stat = np.full(self.NElnAs, mean_lnA_stat)
+            mean_lnA_stat = np.full(self.NElnAs_det, mean_lnA_stat)
         else:
             # interpolate the mean_lnA_stat to the energy bins if it is an array
             if lnA_interp_energy_grid is not None:
                 mean_lnA_stat = np.interp(
-                    self.lnA_energy_grid, lnA_interp_energy_grid, mean_lnA_stat
+                    log_E_det, lnA_interp_energy_grid, mean_lnA_stat
                 )
-            else:
+            elif len(mean_lnA_stat) != self.NElnAs_det:
+                # arrays already on the detector bins (e.g. config values
+                # reused by PPC) are taken as-is
                 raise ValueError(
-                    "If mean_lnA_stat is an array, then lnA_interp_energy_grid must be provided."
+                    "If mean_lnA_stat is an array not on the detector lnA bins, "
+                    "then lnA_interp_energy_grid must be provided."
                 )
 
         if isinstance(var_lnA_stat, float):
-            var_lnA_stat = np.full(self.NElnAs, var_lnA_stat)
+            var_lnA_stat = np.full(self.NElnAs_det, var_lnA_stat)
         else:
             # interpolate the var_lnA_stat to the energy bins if it is an array
             if lnA_interp_energy_grid is not None:
                 var_lnA_stat = np.interp(
-                    self.lnA_energy_grid, lnA_interp_energy_grid, var_lnA_stat
+                    log_E_det, lnA_interp_energy_grid, var_lnA_stat
                 )
-            else:
+            elif len(var_lnA_stat) != self.NElnAs_det:
+                # arrays already on the detector bins (e.g. config values
+                # reused by PPC) are taken as-is
                 raise ValueError(
-                    "If var_lnA_stat is an array, then lnA_interp_energy_grid must be provided."
+                    "If var_lnA_stat is an array not on the detector lnA bins, "
+                    "then lnA_interp_energy_grid must be provided."
                 )
+
+        # true moments evaluated at the detector bins
+        mean_lnA_truths_det = np.interp(
+            log_E_det, np.log(self.lnA_energy_grid), self.truths["mean_lnA_truths"]
+        )
+        var_lnA_truths_det = np.interp(
+            log_E_det, np.log(self.lnA_energy_grid), self.truths["var_lnA_truths"]
+        )
+        self.truths["mean_lnA_truths_det"] = mean_lnA_truths_det
+        self.truths["var_lnA_truths_det"] = var_lnA_truths_det
 
         mean_lnA_dets = np.array(
             [
@@ -908,7 +958,7 @@ class Simulation:
                     mean_lnA + mean_lnA_sys,
                     mean_lnA_unc=mean_lnA_stat[ibin],
                 )
-                for ibin, mean_lnA in enumerate(self.truths["mean_lnA_truths"])
+                for ibin, mean_lnA in enumerate(mean_lnA_truths_det)
             ]
         ).flatten()
         var_lnA_dets = np.array(
@@ -917,7 +967,7 @@ class Simulation:
                     var_lnA + var_lnA_sys,
                     var_lnA_unc=var_lnA_stat[ibin],
                 )
-                for ibin, var_lnA in enumerate(self.truths["var_lnA_truths"])
+                for ibin, var_lnA in enumerate(var_lnA_truths_det)
             ]
         ).flatten()
 
@@ -1298,7 +1348,7 @@ class Simulation:
             simulated_data = det_grp.create_group(self.mass_model)
 
             create_dataset_compressed(
-                simulated_data, "mean_log10E", np.log10(self.lnA_energy_grid)
+                simulated_data, "mean_log10E", np.log10(self.lnA_energy_grid_det)
             )
 
             create_dataset_compressed(
@@ -1419,16 +1469,11 @@ class Simulation:
         # deterministic given `data.detector` -- restore them the same way
         # `generate_simulated_datasets.py` originally set them (mean/var_lnA_sys
         # at their function defaults, since that script never overrides them).
-        simulation.config["mean_lnA_stat"] = np.interp(
-            simulation.lnA_energy_grid,
-            data.detector.lnA_logE_grid,
-            data.detector.mean_lnA_stat,
-        )
-        simulation.config["var_lnA_stat"] = np.interp(
-            simulation.lnA_energy_grid,
-            data.detector.lnA_logE_grid,
-            data.detector.var_lnA_stat,
-        )
+        # `data.detector` was loaded from the lnA_h5 written by `save`, so its
+        # stat uncertainties are exactly the ones used in `apply_mass_response`,
+        # already on the detector lnA bins (lnA_energy_grid_det).
+        simulation.config["mean_lnA_stat"] = np.asarray(data.detector.mean_lnA_stat)
+        simulation.config["var_lnA_stat"] = np.asarray(data.detector.var_lnA_stat)
         simulation.config["mean_lnA_sys"] = 0.0
         simulation.config["var_lnA_sys"] = 0.0
         simulation.config["logE_stat"] = data.detector.logE_stat

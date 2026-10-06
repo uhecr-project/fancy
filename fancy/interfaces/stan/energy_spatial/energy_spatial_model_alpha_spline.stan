@@ -47,13 +47,13 @@ functions {
     * Calculate the deflection parameter of the vMF distribution.
     * Derived from Eq. 4 and Eq. 9 in Capel & Mortlock, 2018.
     * @param R rigidity in EV
-    * @param mag_beta magnetic spread in nG Mpc^(1/2)
+    * @param mag_beta_Z magnetic spread * charge in nG Mpc^(1/2) * Z
     * @param D distance in Mpc / 10
     * @return deflection parameter kappa
     */
-    real get_kappa(real R, real mag_beta, real D) {
+    real get_kappa_energy(real E, real mag_beta_Z, real D) {
     
-    return 7552.0 * inv_square(2.3 * inv(R / 50.0) * mag_beta * sqrt(D));
+    return 7552.0 * inv_square(2.3 * inv(E / 50.0) * mag_beta_Z * sqrt(D));
     }
 
     /**
@@ -85,10 +85,6 @@ functions {
       real logE_stat_unc,           // statistical energy uncertainty (log-normal)
       real logE_sys_unc,            // systematic energy uncertainty, global systematic shift
       real Emin, real Emax,          // energy range for truncated lognormal likelihood
-      vector mean_lnA_true,         // mean lnA per energy bin per source
-      vector var_lnA_true,          // variance of lnA per energy bin per source
-      vector lnA_logE_grid_vec,   // grid of energy bins for finding the mean and variance of lnA per energy
-      vector nu_lnAs,              // latent variable for sampling Zsrcs
       array [] vector omega_det,    // detected directions
       vector kappa_ds,              // deflection parameters including GMF and arrival direction uncertainty
       array [] vector omega_src,    // source directions
@@ -107,15 +103,6 @@ functions {
           // log likelihood per source + isotropic background
           vector[Nsrcs+1] lp_i = log(F);
 
-          // pre-computation for the rigidity
-          // computing the mean and variance of lnA through interpolation
-          real mean_lnA = interpolate(lnA_logE_grid_vec, mean_lnA_true, logE_true[i]);
-          real var_lnA  = interpolate(lnA_logE_grid_vec, var_lnA_true,  logE_true[i]);
-
-          // // calculating the true charge and rigidity
-          real Zsrc = 0.5 * exp(mean_lnA + sqrt(var_lnA) * nu_lnAs[i]);
-          real Rtrue = exp(logE_true[i]) / Zsrc;
-
           // iterate over sources + isotropic background
           for (k in 1:Nsrcs+1) {
               // energy sampling (spectrum at Earth + truncated lognormal -> now after the k-loop)
@@ -125,7 +112,8 @@ functions {
 
               if (k <= Nsrcs) {
                 /* GMF and EGMF deflections */
-                real kappa_egmf = get_kappa(Rtrue, beta_egmf, D[k]/10.0);
+                /* beta EGMF here assumes magnetic deflections * charge instead */
+                real kappa_egmf = get_kappa_energy(exp(logE_true[i]), beta_egmf, D[k]/10.0);
                 lp_i[k] += fik_lpdf(
                   omega_det[i] | omega_src[k],
                   kappa_egmf,
@@ -172,8 +160,6 @@ data {
     array[N] unit_vector[3] omega_det; /* arrival directions */
     vector[N] exposure_factor; /* exposure correction factors per event */
     vector[N] kappa_ds; /* deflection parameters, including GMF deflections + arrival direction uncertainty */
-    array[NEbins] real mean_lnA_det;
-    array[NEbins] real var_lnA_det;
 
     /* model */
     int<lower=0> Nalphas;   /* number of alpha grid points */
@@ -182,10 +168,6 @@ data {
     array[Nalphas] real alpha_grid;
     array[NEs] real logE_grid;
     array[Nsrcs+1, NAsrcs] matrix [Nalphas, NEs] earth_spectrum_grid;
-    /* for lnA, binned via detected energies */
-    array[NEbins] real lnA_logE_grid; /* grid of energy bins for lnA model */
-    array[Nsrcs+1, NAsrcs] matrix [Nalphas, NEbins] mean_lnA_grid;
-    array[Nsrcs+1, NAsrcs] matrix [Nalphas, NEbins] var_lnA_grid;
 
 
     /* detector */
@@ -194,13 +176,9 @@ data {
 
     /* statitistical uncertainty */
     real<lower=0> logE_stat_unc;
-    vector[NEbins] mean_lnA_stat_unc;
-    vector[NEbins] var_lnA_stat_unc;
 
     /* systematic uncertainties, as global shifts */
     real logE_sys_unc;
-    real mean_lnA_sys_unc;
-    real var_lnA_sys_unc;
 
     /* Nex */
     int <lower=0> Nbeta_egmfs;
@@ -239,7 +217,6 @@ transformed data {
   // --- precompute 1D arrays for interpolation ---
   vector[Nalphas] alpha_grid_vec = to_vector(alpha_grid);
   vector[NEs] logE_grid_vec = to_vector(logE_grid);
-  vector[NEbins] lnA_logE_grid_vec = to_vector(lnA_logE_grid);
 
   // number of events for reduced sum
     array[N] int event_ids;
@@ -266,27 +243,18 @@ parameters {
     /* latent parameters for energy */
     vector <lower=logEmin, upper=logEmax>[N] logE_true;
 
-    vector[N] nu_lnAs; /* latent variable for sampling lnA (Zsrcs) */
-    /* global systematic uncertainties (shift) for lnA */
-    // real mean_lnA_sys_unc;
-    // real var_lnA_sys_unc;
-
 }
 
 transformed parameters {
   // --- only quantities needed downstream ---
   vector[Nsrcs+1] F;
   array[Nsrcs+1] matrix [Nalphas, NEs] espect_mfs;
-  array[Nsrcs+1] matrix [Nalphas, NEbins] mulnA_mfs;
-  array[Nsrcs+1] matrix [Nalphas, NEbins] varlnA_mfs;
   vector[Nsrcs+1] wexp_earths;
   array[Nsrcs+1] vector[NEs] log_espect_at_alpha;
 
   // initialise
   F = rep_vector(0.0, Nsrcs+1);
   espect_mfs = rep_array(rep_matrix(0.0, Nalphas, NEs), Nsrcs+1);
-  mulnA_mfs = rep_array(rep_matrix(0.0, Nalphas, NEbins), Nsrcs+1);
-  varlnA_mfs = rep_array(rep_matrix(0.0, Nalphas, NEbins), Nsrcs+1);
   wexp_earths = rep_vector(0.0, Nsrcs+1);
 
   for (k in 1:Nsrcs+1) {
@@ -296,8 +264,6 @@ transformed parameters {
     // accumulate spectra and weights
     for (j in 1:NAsrcs) {
       espect_mfs[k] += mass_fracs[k][j] * earth_spectrum_grid[k,j];
-      mulnA_mfs[k][,] += mass_fracs[k][j] * mean_lnA_grid[k,j];
-      varlnA_mfs[k][,] += mass_fracs[k][j] * var_lnA_grid[k,j];
 
       wexp_earths[k] += mass_fracs[k][j] * exp(interp2d_alpha_spline(
         alphas[k], log10(beta_egmf),
@@ -328,32 +294,6 @@ transformed parameters {
   vector[Nsrcs+1] Nex_arr = F .* wexp_earths;
   real Nex = sum(Nex_arr);
 
-  // mean and sigma lnA values
-  vector[NEbins] mean_lnA_true = rep_vector(0.0, NEbins);
-  vector[NEbins] var_lnA_true = rep_vector(0.0, NEbins);
-
-   // --- binned lnA likelihood ---
-  // "knots method": batch the spline coefficient solve once per source k
-  // across all NEbins columns, instead of recomputing it per (l, k) pair.
-  {
-    array[Nsrcs+1] vector[NEbins] mulnA_spline_k;
-    array[Nsrcs+1] vector[NEbins] varlnA_spline_k;
-    for (k in 1:Nsrcs+1) {
-      mulnA_spline_k[k] = interpolate_spline_batch(
-        alpha_grid_vec, mulnA_mfs[k], alpha_spline_matrix, alphas[k]
-      );
-      varlnA_spline_k[k] = interpolate_spline_batch(
-        alpha_grid_vec, varlnA_mfs[k], alpha_spline_matrix, alphas[k]
-      );
-    }
-    for (l in 1:NEbins) {
-      for (k in 1:Nsrcs+1) {
-          /* calculate the mean and variance of lnA for each energy bin */
-          mean_lnA_true[l] += Nex_arr[k] * mulnA_spline_k[k][l] / Nex;
-          var_lnA_true[l] += Nex_arr[k] * varlnA_spline_k[k][l] / Nex;
-      }
-    }
-  }
 }
 
 model {
@@ -363,7 +303,7 @@ model {
 
   // mass fractions : Dirichlet distribution per source
   for (k in 1:Nsrcs+1) {
-    mass_fracs[k] ~ dirichlet([2.0, 2.0, 2.0, 2.0]);
+    mass_fracs[k] ~ dirichlet(rep_vector(2.0, NAsrcs));
   }
 
   // flux fraction weights: Dirichlet-like prior
@@ -375,24 +315,7 @@ model {
   // magnetic spread: normal distribution
   // prior uncertainty is 10 since we do not have enough
   // handle on it.
-  beta_egmf ~ normal(0.0, 10.0);
-
-  // latent variables for lnA : normal distribution
-  nu_lnAs ~ normal(0.0, 1.0);
-
-  // global systematic uncertainties (shift) for lnA : normal distribution
-  // mean_lnA_sys_unc ~ normal(0.0, 1.0);
-  // var_lnA_sys_unc ~ normal(0.0, 1.0);
-
-   // --- binned lnA likelihood ---
-  for (l in 1:NEbins) {
-    target += left_truncated_normal_lpdf(mean_lnA_det[l] |
-              mean_lnA_true[l] + mean_lnA_sys_unc,
-              mean_lnA_stat_unc[l], 0.0);
-    target += left_truncated_normal_lpdf(var_lnA_det[l] |
-              var_lnA_true[l] + var_lnA_sys_unc,
-              var_lnA_stat_unc[l], -2.0);
-  }
+  beta_egmf ~ normal(1.0, 10.0);
 
   // --- parallelized unbinned likelihood ---
   target += reduce_sum(
@@ -409,14 +332,10 @@ model {
     logE_stat_unc,                  // statistical energy uncertainty (log-normal)
     logE_sys_unc,                   // systematic energy uncertainty, global systematic shift
     Emin, Emax,     // energy range for truncated lognormal likelihood
-    mean_lnA_true,                  // mean lnA per energy bin per source
-    var_lnA_true,                   // variance of lnA per energy bin per source
-    lnA_logE_grid_vec,                      // grid of energy bins in lnA
-    nu_lnAs,                       // latent variable for sampling lnA
     omega_det,                      // detected directions
     kappa_ds,                       // deflection parameters including GMF and arrival direction uncertainty
     omega_src,                      // source directions
-    beta_egmf,                // EGMF spread parameter
+    beta_egmf,                      // EGMF spread parameter
     D,                              // source distances
     Nsrcs,                           // number of sources
     exposure_factor               // exposure correction factors per event
@@ -466,26 +385,17 @@ generated quantities {
     array[N] vector[Nsrcs+1] loglik_event;
     array[N] vector[Nsrcs+1] loglik_event_energy;
     array[N] vector[Nsrcs+1] loglik_event_spatial;
-    array[NEbins] vector[Nsrcs+1] loglik_event_mass;
 
     vector[N] kappa_egmfs;
-    vector[N] rigidities;
     for (i in 1:N) {
       loglik_event[i] = log(F);
-
-      real mean_lnA = interpolate(lnA_logE_grid_vec, mean_lnA_true, logE_true[i]);
-      real var_lnA = interpolate(lnA_logE_grid_vec, var_lnA_true, logE_true[i]);
-      real Zsrc = 0.5 * exp(mean_lnA + sqrt(var_lnA) * nu_lnAs[i]);
-      real Rtrue = exp(logE_true[i]) / Zsrc;
-
-      rigidities[i] = Rtrue;
 
       for (k in 1:(Nsrcs+1)) {
         loglik_event[i,k] += energy_spectrum_lpdf(logE_true[i] | logE_grid_vec, log_espect_at_alpha[k]);
         loglik_event[i,k] += truncated_lognormal_lpdf(Edet[i] | logE_true[i] + logE_sys_unc, logE_stat_unc, Emin, Emax);
         loglik_event_energy[i,k] = loglik_event[i,k];
         if (k <= Nsrcs) {
-          real kappa_egmf = get_kappa(Rtrue, beta_egmf, D[k]/10.0);
+          real kappa_egmf = get_kappa_energy(exp(logE_true[i]), beta_egmf, D[k]/10.0);
           loglik_event[i,k] += fik_lpdf(omega_det[i]|omega_src[k], kappa_egmf, kappa_ds[i]);
           loglik_event_spatial[i,k] = fik_lpdf(omega_det[i]|omega_src[k], kappa_egmf, kappa_ds[i]);
 
@@ -495,16 +405,6 @@ generated quantities {
           loglik_event_spatial[i,k] = -log(4*pi());
         }
       }
-    }
-
-    for (l in 1:NEbins) {
-
-        loglik_event[l] += left_truncated_normal_lpdf(mean_lnA_det[l] |
-            mean_lnA_true[l] + mean_lnA_sys_unc,
-            mean_lnA_stat_unc[l], 0.0);
-        loglik_event[l] += left_truncated_normal_lpdf(var_lnA_det[l] |
-            var_lnA_true[l] + var_lnA_sys_unc,
-            var_lnA_stat_unc[l], -2.0);
     }
         
 }

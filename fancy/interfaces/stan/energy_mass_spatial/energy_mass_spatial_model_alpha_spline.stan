@@ -172,6 +172,7 @@ data {
     array[N] unit_vector[3] omega_det; /* arrival directions */
     vector[N] exposure_factor; /* exposure correction factors per event */
     vector[N] kappa_ds; /* deflection parameters, including GMF deflections + arrival direction uncertainty */
+    array[NEbins] real lnA_logE_grid_det;
     array[NEbins] real mean_lnA_det;
     array[NEbins] real var_lnA_det;
 
@@ -183,9 +184,10 @@ data {
     array[NEs] real logE_grid;
     array[Nsrcs+1, NAsrcs] matrix [Nalphas, NEs] earth_spectrum_grid;
     /* for lnA, binned via detected energies */
-    array[NEbins] real lnA_logE_grid; /* grid of energy bins for lnA model */
-    array[Nsrcs+1, NAsrcs] matrix [Nalphas, NEbins] mean_lnA_grid;
-    array[Nsrcs+1, NAsrcs] matrix [Nalphas, NEbins] var_lnA_grid;
+    int<lower=0> NEbins_lnAgrid;
+    array[NEbins_lnAgrid] real lnA_logE_grid; /* grid of energy bins for lnA model */
+    array[Nsrcs+1, NAsrcs] matrix [Nalphas, NEbins_lnAgrid] mean_lnA_grid;
+    array[Nsrcs+1, NAsrcs] matrix [Nalphas, NEbins_lnAgrid] var_lnA_grid;
 
 
     /* detector */
@@ -239,7 +241,7 @@ transformed data {
   // --- precompute 1D arrays for interpolation ---
   vector[Nalphas] alpha_grid_vec = to_vector(alpha_grid);
   vector[NEs] logE_grid_vec = to_vector(logE_grid);
-  vector[NEbins] lnA_logE_grid_vec = to_vector(lnA_logE_grid);
+  vector[NEbins_lnAgrid] lnA_logE_grid_vec = to_vector(lnA_logE_grid);
 
   // number of events for reduced sum
     array[N] int event_ids;
@@ -277,16 +279,16 @@ transformed parameters {
   // --- only quantities needed downstream ---
   vector[Nsrcs+1] F;
   array[Nsrcs+1] matrix [Nalphas, NEs] espect_mfs;
-  array[Nsrcs+1] matrix [Nalphas, NEbins] mulnA_mfs;
-  array[Nsrcs+1] matrix [Nalphas, NEbins] varlnA_mfs;
+  array[Nsrcs+1] matrix [Nalphas, NEbins_lnAgrid] mulnA_mfs;
+  array[Nsrcs+1] matrix [Nalphas, NEbins_lnAgrid] varlnA_mfs;
   vector[Nsrcs+1] wexp_earths;
   array[Nsrcs+1] vector[NEs] log_espect_at_alpha;
 
   // initialise
   F = rep_vector(0.0, Nsrcs+1);
   espect_mfs = rep_array(rep_matrix(0.0, Nalphas, NEs), Nsrcs+1);
-  mulnA_mfs = rep_array(rep_matrix(0.0, Nalphas, NEbins), Nsrcs+1);
-  varlnA_mfs = rep_array(rep_matrix(0.0, Nalphas, NEbins), Nsrcs+1);
+  mulnA_mfs = rep_array(rep_matrix(0.0, Nalphas, NEbins_lnAgrid), Nsrcs+1);
+  varlnA_mfs = rep_array(rep_matrix(0.0, Nalphas, NEbins_lnAgrid), Nsrcs+1);
   wexp_earths = rep_vector(0.0, Nsrcs+1);
 
   // real logE_sys_unc = 0.0;
@@ -333,15 +335,15 @@ transformed parameters {
   real Nex = sum(Nex_arr);
 
   // mean and sigma lnA values
-  vector[NEbins] mean_lnA_true = rep_vector(0.0, NEbins);
-  vector[NEbins] var_lnA_true = rep_vector(0.0, NEbins);
+  vector[NEbins_lnAgrid] mean_lnA_true = rep_vector(0.0, NEbins_lnAgrid);
+  vector[NEbins_lnAgrid] var_lnA_true = rep_vector(0.0, NEbins_lnAgrid);
 
    // --- binned lnA likelihood ---
   // "knots method": batch the spline coefficient solve once per source k
   // across all NEbins columns, instead of recomputing it per (l, k) pair.
   {
-    array[Nsrcs+1] vector[NEbins] mulnA_spline_k;
-    array[Nsrcs+1] vector[NEbins] varlnA_spline_k;
+    array[Nsrcs+1] vector[NEbins_lnAgrid] mulnA_spline_k;
+    array[Nsrcs+1] vector[NEbins_lnAgrid] varlnA_spline_k;
     for (k in 1:Nsrcs+1) {
       mulnA_spline_k[k] = interpolate_spline_batch(
         alpha_grid_vec, mulnA_mfs[k], alpha_spline_matrix, alphas[k]
@@ -350,7 +352,7 @@ transformed parameters {
         alpha_grid_vec, varlnA_mfs[k], alpha_spline_matrix, alphas[k]
       );
     }
-    for (l in 1:NEbins) {
+    for (l in 1:NEbins_lnAgrid) {
       for (k in 1:Nsrcs+1) {
           /* calculate the mean and variance of lnA for each energy bin */
           mean_lnA_true[l] += Nex_arr[k] * mulnA_spline_k[k][l] / Nex;
@@ -390,11 +392,13 @@ model {
 
    // --- binned lnA likelihood ---
   for (l in 1:NEbins) {
+    real mean_lnA_data = interpolate(lnA_logE_grid_vec, mean_lnA_true, lnA_logE_grid_det[l]);
+    real var_lnA_data = interpolate(lnA_logE_grid_vec, var_lnA_true, lnA_logE_grid_det[l]);
     target += left_truncated_normal_lpdf(mean_lnA_det[l] |
-              mean_lnA_true[l] + mean_lnA_sys_unc,
+              mean_lnA_data + mean_lnA_sys_unc,
               mean_lnA_stat_unc[l], 0.0);
     target += left_truncated_normal_lpdf(var_lnA_det[l] |
-              var_lnA_true[l] + var_lnA_sys_unc,
+              var_lnA_data + var_lnA_sys_unc,
               var_lnA_stat_unc[l], -2.0);
   }
 
@@ -503,11 +507,17 @@ generated quantities {
 
     for (l in 1:NEbins) {
 
-        loglik_event[l] += left_truncated_normal_lpdf(mean_lnA_det[l] |
-            mean_lnA_true[l] + mean_lnA_sys_unc,
+        real mean_lnA_data = interpolate(lnA_logE_grid_vec, mean_lnA_true, lnA_logE_grid_det[l]);
+        real var_lnA_data = interpolate(lnA_logE_grid_vec, var_lnA_true, lnA_logE_grid_det[l]);
+
+        // binned (per detector lnA bin) term: identical for every source
+        // column, since the binned likelihood is not split by source
+        loglik_event_mass[l] = rep_vector(0.0, Nsrcs+1);
+        loglik_event_mass[l] += left_truncated_normal_lpdf(mean_lnA_det[l] |
+            mean_lnA_data + mean_lnA_sys_unc,
             mean_lnA_stat_unc[l], 0.0);
-        loglik_event[l] += left_truncated_normal_lpdf(var_lnA_det[l] |
-            var_lnA_true[l] + var_lnA_sys_unc,
+        loglik_event_mass[l] += left_truncated_normal_lpdf(var_lnA_det[l] |
+            var_lnA_data + var_lnA_sys_unc,
             var_lnA_stat_unc[l], -2.0);
     }
         

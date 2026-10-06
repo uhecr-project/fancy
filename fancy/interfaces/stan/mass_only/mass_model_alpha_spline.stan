@@ -174,7 +174,7 @@ model {
 
   // mass fractions : Dirichlet distribution per source
   for (k in 1:Nsrcs+1) {
-    mass_fracs[k] ~ dirichlet([2.0, 2.0, 2.0, 2.0]);
+    mass_fracs[k] ~ dirichlet(rep_vector(2.0, NAsrcs));
   }
 
   // flux fraction weights: Dirichlet-like prior

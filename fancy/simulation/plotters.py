@@ -356,7 +356,7 @@ def plot_detected_events(data: Data, truths: dict, gmf_model: str, config: dict)
     )
 
     axs[0].semilogx(
-        config["lnA_energy_grid"],
+        config.get("lnA_energy_grid_det", config["lnA_energy_grid"]),
         truths["mean_lnA_dets"],
         color="r",
         ls="--",
@@ -364,7 +364,7 @@ def plot_detected_events(data: Data, truths: dict, gmf_model: str, config: dict)
         label="det",
     )
     axs[1].semilogx(
-        config["lnA_energy_grid"],
+        config.get("lnA_energy_grid_det", config["lnA_energy_grid"]),
         truths["var_lnA_dets"],
         color="r",
         ls="--",

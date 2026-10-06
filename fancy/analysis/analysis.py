@@ -188,6 +188,11 @@ class Analysis:
             alpha_spline_matrix at all: the effective exposure is tabulated vs
             a single shared kappa_egmf instead (see `kappa_only`), loaded from
             the tables written by EffectiveExposureKappaOnly.
+
+            NB: for analysis_type=energy_mass_spatial this model also decouples
+            the lnA model grid (lnA_logE_grid, NEbins_lnAgrid bins, set by
+            lnA_energy_gridparams) from the detector's lnA bins
+            (lnA_logE_grid_det, NEbins bins), see `split_lnA_grid`.
         """
         self.data = data
         # the rest of the codebase compares against the string "None"
@@ -213,6 +218,71 @@ class Analysis:
         if self.kappa_only:
             self.fit_input_keys = list(self.kappa_only_fit_input_keys)
             self.fit_inputs = {key: None for key in self.fit_input_keys}
+
+        if self.split_lnA_grid:
+            for key in ("NEbins_lnAgrid", "lnA_logE_grid_det"):
+                self.fit_input_keys.append(key)
+                self.fit_inputs[key] = None
+
+    @property
+    def split_lnA_grid(self: Self) -> bool:
+        """
+        True if the Stan model takes a separate lnA model grid
+        (lnA_logE_grid, NEbins_lnAgrid) from the detector's lnA bins
+        (lnA_logE_grid_det, NEbins), interpolating between them.
+
+        Only energy_mass_spatial_model_alpha_spline.stan does so.
+        """
+        return (
+            self.analysis_type == self.energy_mass_spatial_type
+            and self.use_alpha_spline
+            and not self.use_rigidity_grid
+            and not self.use_with_systematics
+            and not self.bg_only
+        )
+
+    def _set_lnA_grid_inputs(
+        self: Self,
+        lnA_energy_grid: np.ndarray,
+        lnA_energy_grid_det: np.ndarray,
+    ) -> None:
+        """
+        Set the lnA energy-grid sizes / grids in fit_inputs.
+
+        Parameters
+        ----------
+        lnA_energy_grid : np.ndarray
+            energies (EeV) on which mean_lnA_grid / var_lnA_grid are tabulated
+            (the model grid).
+        lnA_energy_grid_det : np.ndarray
+            energies (EeV) of the detector's lnA bins, i.e. where
+            mean_lnA_det / var_lnA_det are given.
+        """
+        logE_grid = np.log(np.asarray(lnA_energy_grid, dtype=float))
+        logE_grid_det = np.log(np.asarray(lnA_energy_grid_det, dtype=float))
+
+        self.fit_inputs["NEbins"] = len(logE_grid_det)
+        self.fit_inputs["lnA_logE_grid"] = logE_grid
+
+        if self.split_lnA_grid:
+            # the Stan model interpolates the model grid onto the detector
+            # bins, clamping outside its range, so the model grid must cover them
+            tol = 1e-6
+            if logE_grid_det.min() < logE_grid.min() - tol or logE_grid_det.max() > logE_grid.max() + tol:
+                raise ValueError(
+                    "The lnA model energy grid "
+                    f"[{np.exp(logE_grid.min()):.3g}, {np.exp(logE_grid.max()):.3g}] EeV "
+                    "does not cover the detector lnA bins "
+                    f"[{np.exp(logE_grid_det.min()):.3g}, {np.exp(logE_grid_det.max()):.3g}] EeV."
+                )
+            self.fit_inputs["NEbins_lnAgrid"] = len(logE_grid)
+            self.fit_inputs["lnA_logE_grid_det"] = logE_grid_det
+        elif len(logE_grid) != len(logE_grid_det) or not np.allclose(logE_grid, logE_grid_det):
+            raise ValueError(
+                "This model requires the lnA model grid to be the detector's lnA "
+                "bins (use lnA_energy_gridparams=None). Only the energy_mass_spatial "
+                "alpha_spline model supports a separate lnA model grid."
+            )
 
     @property
     def kappa_only(self: Self) -> bool:
@@ -294,6 +364,10 @@ class Analysis:
             given as (E_min, E_max, Nbins), by default None.
 
             If None, the grid parameters will be set to match the energy grid of the detector's lnA mass model.
+
+            Only the energy_mass_spatial alpha_spline model (`split_lnA_grid`)
+            accepts a grid differing from the detector's lnA bins; it must
+            then cover the detector bins' energy range.
         effexp_model_kwargs : dict, optional
             The keyword arguments for the effective exposure model.
             By default set to:
@@ -351,7 +425,12 @@ class Analysis:
 
         self.grid_config = grid_generator.store_grids_to_dict()
 
-        self.fit_inputs["NEbins"] = len(grid_generator.lnA_energy_grid)
+        if self.data.detector.lnA_logE_grid is None:
+            raise ValueError("The detector's lnA data must be loaded.")
+        self._set_lnA_grid_inputs(
+            grid_generator.lnA_energy_grid,
+            np.exp(self.data.detector.lnA_logE_grid),
+        )
         self.fit_inputs["Nalphas"] = grid_generator.Nalphas
         self.fit_inputs["NEs"] = grid_generator.NEs
         self.fit_inputs["NAsrcs"] = grid_generator.Nmass_fracs
@@ -360,7 +439,6 @@ class Analysis:
         self.fit_inputs["Emin"] = np.min(grid_generator.energy_grid)
         self.fit_inputs["Emax"] = np.max(grid_generator.energy_grid)
         self.fit_inputs["earth_spectrum_grid"] = grid_generator.spectrum_grid.T
-        self.fit_inputs["lnA_logE_grid"] = np.log(grid_generator.lnA_energy_grid)
         self.fit_inputs["mean_lnA_grid"] = grid_generator.mean_lnA_grid.T
         self.fit_inputs["var_lnA_grid"] = grid_generator.var_lnA_grid.T
         self.fit_inputs["Nbeta_egmfs"] = len(grid_generator.beta_egmf_grid)
@@ -445,7 +523,9 @@ class Analysis:
         self.fit_inputs["mean_lnA_sys_unc"] = simulation.config["mean_lnA_sys"]
         self.fit_inputs["var_lnA_sys_unc"] = simulation.config["var_lnA_sys"]
 
-        self.fit_inputs["NEbins"] = len(simulation.lnA_energy_grid)
+        self._set_lnA_grid_inputs(
+            simulation.lnA_energy_grid, simulation.lnA_energy_grid_det
+        )
         self.fit_inputs["Nalphas"] = simulation.Nalphas
         self.fit_inputs["NEs"] = simulation.NEs
         self.fit_inputs["NAsrcs"] = simulation.Nmass_fracs
@@ -454,7 +534,6 @@ class Analysis:
         self.fit_inputs["Emin"] = np.min(simulation.energy_grid)
         self.fit_inputs["Emax"] = np.max(simulation.energy_grid)
         self.fit_inputs["earth_spectrum_grid"] = simulation.spectrum_grid.T
-        self.fit_inputs["lnA_logE_grid"] = np.log(simulation.lnA_energy_grid)
         self.fit_inputs["mean_lnA_grid"] = simulation.mean_lnA_grid.T
         self.fit_inputs["var_lnA_grid"] = simulation.var_lnA_grid.T
         self.fit_inputs["esrc_ratio_grid"] = simulation.esrc_ratio_grid.T
