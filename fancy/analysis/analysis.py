@@ -220,7 +220,7 @@ class Analysis:
             self.fit_inputs = {key: None for key in self.fit_input_keys}
 
         if self.split_lnA_grid:
-            for key in ("NEbins_lnAgrid", "lnA_logE_grid_det"):
+            for key in ("NEbins_lnAgrid", "lnA_logE_grid_det", "mean_lnA_sys_scale", "var_lnA_sys_scale"):
                 self.fit_input_keys.append(key)
                 self.fit_inputs[key] = None
 
@@ -231,7 +231,10 @@ class Analysis:
         (lnA_logE_grid, NEbins_lnAgrid) from the detector's lnA bins
         (lnA_logE_grid_det, NEbins), interpolating between them.
 
-        Only energy_mass_spatial_model_alpha_spline.stan does so.
+        Only energy_mass_spatial_model_alpha_spline.stan does so. That model
+        also treats the lnA systematics as one global shift per moment
+        (nu * mean/var_lnA_sys_scale, nu ~ N(0, 1)) with statistical-only
+        mean/var_lnA_stat_unc.
         """
         return (
             self.analysis_type == self.energy_mass_spatial_type
@@ -522,6 +525,10 @@ class Analysis:
         self.fit_inputs["logE_sys_unc"] = simulation.config["logE_sys"]
         self.fit_inputs["mean_lnA_sys_unc"] = simulation.config["mean_lnA_sys"]
         self.fit_inputs["var_lnA_sys_unc"] = simulation.config["var_lnA_sys"]
+        if self.split_lnA_grid:
+            no_shift = np.zeros_like(np.asarray(simulation.config["mean_lnA_stat"], dtype=float))
+            self.fit_inputs["mean_lnA_sys_scale"] = simulation.config.get("mean_lnA_sys_scale", no_shift)
+            self.fit_inputs["var_lnA_sys_scale"] = simulation.config.get("var_lnA_sys_scale", no_shift)
 
         self._set_lnA_grid_inputs(
             simulation.lnA_energy_grid, simulation.lnA_energy_grid_det
@@ -830,6 +837,12 @@ class Analysis:
         self.fit_inputs["var_lnA_stat_unc"] = self.data.detector.var_lnA_stat
         self.fit_inputs["mean_lnA_sys_unc"] = self.data.detector.mean_lnA_sys
         self.fit_inputs["var_lnA_sys_unc"] = self.data.detector.var_lnA_sys
+        if self.split_lnA_grid:
+            # statistical-only errors; the systematics enter as a global shift
+            self.fit_inputs["mean_lnA_stat_unc"] = self.data.detector.mean_lnA_stat_only
+            self.fit_inputs["var_lnA_stat_unc"] = self.data.detector.var_lnA_stat_only
+            self.fit_inputs["mean_lnA_sys_scale"] = self.data.detector.mean_lnA_sys_scale
+            self.fit_inputs["var_lnA_sys_scale"] = self.data.detector.var_lnA_sys_scale
 
         # for omega_det, deal with this depending on gmf model
         if self.gmf_model == "None":
@@ -1011,6 +1024,7 @@ class Analysis:
                 "log10_Ftot" : -2,
                 **({"log10_beta_egmf": np.zeros(self.fit_inputs["Nsrcs"])} if self.use_rigidity_grid else {"beta_egmf": 1.0}),
                 "nu_lnAs": np.full(self.fit_inputs['N'], 0.5),
+                **({"nu_mean_lnA_sys": 0.0, "nu_var_lnA_sys": 0.0} if self.split_lnA_grid else {}),
             }
         elif init_model == "pathfinder":
             print("Using PathFinder variational inference (VI) output as initial values for the parameters.")
@@ -1097,6 +1111,7 @@ class Analysis:
                     "log10_Ftot": -2,
                     **({"log10_beta_egmf": np.zeros(self.fit_inputs["Nsrcs"])} if self.use_rigidity_grid else {"beta_egmf": 0.5}),
                     "nu_lnAs": np.full(self.fit_inputs['N'], 0.5),
+                    **({"nu_mean_lnA_sys": 0.0, "nu_var_lnA_sys": 0.0} if self.split_lnA_grid else {}),
                 }
             else:
                 # one distinct, validated init dict per chain

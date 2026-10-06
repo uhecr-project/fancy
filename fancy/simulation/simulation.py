@@ -875,6 +875,10 @@ class Simulation:
         mean_lnA_sys: float = 0.0,
         var_lnA_sys: float = 0.0,
         lnA_interp_energy_grid: Union[np.ndarray, None] = None,
+        mean_lnA_sys_scale: Union[np.ndarray, None] = None,
+        var_lnA_sys_scale: Union[np.ndarray, None] = None,
+        nu_mean_lnA_sys: float = 0.0,
+        nu_var_lnA_sys: float = 0.0,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Apply the detector response to the true values for the mean and variance of lnA.
@@ -906,41 +910,45 @@ class Simulation:
             Default is 0.0.
         lnA_interp_energy_grid : np.ndarray, optional
             ln(E / EeV) grid on which array-valued mean_lnA_stat / var_lnA_stat
-            are given (e.g. data.detector.lnA_logE_grid).
+            (and the *_sys_scale arrays) are given (e.g. data.detector.lnA_logE_grid).
+        mean_lnA_sys_scale, var_lnA_sys_scale : np.ndarray, optional
+            per-bin 1-sigma systematic of the mean / variance of lnA, for the
+            global-shift treatment: every bin is shifted coherently by
+            nu * sys_scale[bin]. Same conventions as the stat arrays. Default
+            None (no shift).
+        nu_mean_lnA_sys, nu_var_lnA_sys : float, optional
+            the global shifts in units of the 1-sigma systematic (stored as
+            truths). Default 0.0.
         """
         log_E_det = np.log(self.lnA_energy_grid_det)
 
-        if isinstance(mean_lnA_stat, float):
-            mean_lnA_stat = np.full(self.NElnAs_det, mean_lnA_stat)
-        else:
-            # interpolate the mean_lnA_stat to the energy bins if it is an array
+        def _on_det_bins(name, values):
+            if isinstance(values, float):
+                return np.full(self.NElnAs_det, values)
+            # interpolate onto the detector bins if an energy grid is given;
+            # arrays already on the detector bins (e.g. config values reused
+            # by PPC) are taken as-is
             if lnA_interp_energy_grid is not None:
-                mean_lnA_stat = np.interp(
-                    log_E_det, lnA_interp_energy_grid, mean_lnA_stat
-                )
-            elif len(mean_lnA_stat) != self.NElnAs_det:
-                # arrays already on the detector bins (e.g. config values
-                # reused by PPC) are taken as-is
+                return np.interp(log_E_det, lnA_interp_energy_grid, values)
+            if len(values) != self.NElnAs_det:
                 raise ValueError(
-                    "If mean_lnA_stat is an array not on the detector lnA bins, "
+                    f"If {name} is an array not on the detector lnA bins, "
                     "then lnA_interp_energy_grid must be provided."
                 )
+            return np.asarray(values, dtype=float)
 
-        if isinstance(var_lnA_stat, float):
-            var_lnA_stat = np.full(self.NElnAs_det, var_lnA_stat)
-        else:
-            # interpolate the var_lnA_stat to the energy bins if it is an array
-            if lnA_interp_energy_grid is not None:
-                var_lnA_stat = np.interp(
-                    log_E_det, lnA_interp_energy_grid, var_lnA_stat
-                )
-            elif len(var_lnA_stat) != self.NElnAs_det:
-                # arrays already on the detector bins (e.g. config values
-                # reused by PPC) are taken as-is
-                raise ValueError(
-                    "If var_lnA_stat is an array not on the detector lnA bins, "
-                    "then lnA_interp_energy_grid must be provided."
-                )
+        mean_lnA_stat = _on_det_bins("mean_lnA_stat", mean_lnA_stat)
+        var_lnA_stat = _on_det_bins("var_lnA_stat", var_lnA_stat)
+        mean_lnA_sys_scale = (
+            np.zeros(self.NElnAs_det) if mean_lnA_sys_scale is None
+            else _on_det_bins("mean_lnA_sys_scale", mean_lnA_sys_scale)
+        )
+        var_lnA_sys_scale = (
+            np.zeros(self.NElnAs_det) if var_lnA_sys_scale is None
+            else _on_det_bins("var_lnA_sys_scale", var_lnA_sys_scale)
+        )
+        mean_lnA_shift = mean_lnA_sys + nu_mean_lnA_sys * mean_lnA_sys_scale
+        var_lnA_shift = var_lnA_sys + nu_var_lnA_sys * var_lnA_sys_scale
 
         # true moments evaluated at the detector bins
         mean_lnA_truths_det = np.interp(
@@ -955,7 +963,7 @@ class Simulation:
         mean_lnA_dets = np.array(
             [
                 get_mean_lnA_det(
-                    mean_lnA + mean_lnA_sys,
+                    mean_lnA + mean_lnA_shift[ibin],
                     mean_lnA_unc=mean_lnA_stat[ibin],
                 )
                 for ibin, mean_lnA in enumerate(mean_lnA_truths_det)
@@ -964,7 +972,7 @@ class Simulation:
         var_lnA_dets = np.array(
             [
                 get_var_lnA_det(
-                    var_lnA + var_lnA_sys,
+                    var_lnA + var_lnA_shift[ibin],
                     var_lnA_unc=var_lnA_stat[ibin],
                 )
                 for ibin, var_lnA in enumerate(var_lnA_truths_det)
@@ -980,6 +988,10 @@ class Simulation:
         self.config["var_lnA_stat"] = var_lnA_stat
         self.config["mean_lnA_sys"] = mean_lnA_sys
         self.config["var_lnA_sys"] = var_lnA_sys
+        self.config["mean_lnA_sys_scale"] = mean_lnA_sys_scale
+        self.config["var_lnA_sys_scale"] = var_lnA_sys_scale
+        self.truths["nu_mean_lnA_sys"] = nu_mean_lnA_sys
+        self.truths["nu_var_lnA_sys"] = nu_var_lnA_sys
 
         return mean_lnA_dets, var_lnA_dets
 
@@ -1369,6 +1381,14 @@ class Simulation:
             create_dataset_compressed(
                 simulated_data, "var_sys", self.config["var_lnA_sys"]
             )
+            create_dataset_compressed(
+                simulated_data, "mean_sys_scale",
+                self.config.get("mean_lnA_sys_scale", np.zeros(self.NElnAs_det)),
+            )
+            create_dataset_compressed(
+                simulated_data, "var_sys_scale",
+                self.config.get("var_lnA_sys_scale", np.zeros(self.NElnAs_det)),
+            )
 
     def save_truths(self: Self, outfile: str) -> None:
         """
@@ -1476,6 +1496,8 @@ class Simulation:
         simulation.config["var_lnA_stat"] = np.asarray(data.detector.var_lnA_stat)
         simulation.config["mean_lnA_sys"] = 0.0
         simulation.config["var_lnA_sys"] = 0.0
+        simulation.config["mean_lnA_sys_scale"] = np.asarray(data.detector.mean_lnA_sys_scale)
+        simulation.config["var_lnA_sys_scale"] = np.asarray(data.detector.var_lnA_sys_scale)
         simulation.config["logE_stat"] = data.detector.logE_stat
         simulation.config["logE_sys"] = data.detector.logE_sys
         simulation.config["kappa_det"] = data.detector.kappa_d

@@ -92,6 +92,13 @@ class Detector:
         self.var_lnA_stat = None
         self.mean_lnA_sys = None
         self.var_lnA_sys = None
+        # statistical-only uncertainties and per-bin 1-sigma systematic sizes,
+        # for models that treat the lnA systematics as one global shift
+        # (energy_mass_spatial_model_alpha_spline.stan)
+        self.mean_lnA_stat_only = None
+        self.var_lnA_stat_only = None
+        self.mean_lnA_sys_scale = None
+        self.var_lnA_sys_scale = None
 
         # timing information
         self.start_year = self.properties["start_year"]
@@ -200,7 +207,7 @@ class Detector:
             self.limiting_dec = (self.declination[m == 0])[declim_index] * u.rad
 
     def load_lnA_data(
-        self: Self, lnA_filename: str = "lnA_moments_data.h5"
+        self: Self, lnA_filename: str = "lnA_moments_data.h5", lnA_Emin: float = None
     ) -> None:
         """
         Load the lnA data (mean and variance of lnA) from a given HDF5 file.
@@ -211,6 +218,9 @@ class Detector:
             the filename of the HDF5 file containing the lnA data
             If there is no 'sim' label, then it will find this file from the 
             datafile path.
+        lnA_Emin : float, optional
+            if given, only keep the lnA bins with energy >= lnA_Emin (EeV), e.g.
+            to restrict the lnA data to the energy range the model describes.
         """
         if lnA_filename.find('sim') < 0:
             path_to_lnA_data = get_path_to_datafiles(lnA_filename)
@@ -227,21 +237,47 @@ class Detector:
             self.var_lnA = f_lnA_data["var_lnA"][()]
             self.mean_lnA_stat = f_lnA_data["mean_stat"][()]
             self.var_lnA_stat = f_lnA_data["var_stat"][()]
+            self.mean_lnA_stat_only = np.asarray(self.mean_lnA_stat, dtype=float)
+            self.var_lnA_stat_only = np.asarray(self.var_lnA_stat, dtype=float)
 
             # for the systematic uncertainty, if simulation, just take the value.
             if lnA_filename.find('sim') > 0:
                 self.mean_lnA_sys = f_lnA_data["mean_sys"][()]
                 self.var_lnA_sys = f_lnA_data["var_sys"][()]
+                # simulations made before the global-shift treatment have no
+                # systematic scale (their stat may already include sys)
+                if "mean_sys_scale" in f_lnA_data:
+                    self.mean_lnA_sys_scale = f_lnA_data["mean_sys_scale"][()]
+                    self.var_lnA_sys_scale = f_lnA_data["var_sys_scale"][()]
+                else:
+                    self.mean_lnA_sys_scale = np.zeros_like(self.mean_lnA_stat_only)
+                    self.var_lnA_sys_scale = np.zeros_like(self.var_lnA_stat_only)
             else:
                 # the systematic uncertainty here means the global shift, which we do not know apriori. So we set it to 0, and the variance to 0 as well. The systematic uncertainty will be treated as a free parameter in the fit.
                 self.mean_lnA_sys = 0.0
                 self.var_lnA_sys = 0.0
-                
+
+                # global-shift treatment: symmetrised per-bin 1-sigma systematic,
+                # the up / down systematics averaged in quadrature
+                self.mean_lnA_sys_scale = np.sqrt(0.5 * (f_lnA_data["mean_sys_up"][()]**2 + f_lnA_data["mean_sys_low"][()]**2))
+                self.var_lnA_sys_scale = np.sqrt(0.5 * (f_lnA_data["var_sys_up"][()]**2 + f_lnA_data["var_sys_low"][()]**2))
+
                 # the "systematic uncertainties" in data is from e.g. calibration errors which are actually basically the 
                 # same for each model, so we can combine the statistical and systematic uncertainties in quadrature to get the total uncertainty.
+
                 self.mean_lnA_stat = np.sqrt(f_lnA_data["mean_stat"][()]**2 + f_lnA_data["mean_sys_up"][()]**2 + f_lnA_data["mean_sys_low"][()]**2)
                 self.var_lnA_stat = np.sqrt(f_lnA_data["var_stat"][()]**2 + f_lnA_data["var_sys_up"][()]**2 + f_lnA_data["var_sys_low"][()]**2)
-    
+
+        if lnA_Emin is not None:
+            keep = self.lnA_logE_grid >= np.log(lnA_Emin)
+            for name in (
+                "lnA_logE_grid", "mean_lnA", "var_lnA",
+                "mean_lnA_stat", "var_lnA_stat",
+                "mean_lnA_stat_only", "var_lnA_stat_only",
+                "mean_lnA_sys_scale", "var_lnA_sys_scale",
+            ):
+                setattr(self, name, np.asarray(getattr(self, name))[keep])
+
     def sample_energies(self : Self, energy : float, n_samples : int = 1000) -> np.ndarray:
         """
         Sample the energies based on the energy uncertainty.

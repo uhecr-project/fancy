@@ -204,6 +204,13 @@ data {
     real mean_lnA_sys_unc;
     real var_lnA_sys_unc;
 
+    /* lnA systematics as one global shift per moment (correlated across all
+       bins): bin l is shifted by nu * sys_scale[l], with nu ~ N(0, 1) and
+       sys_scale the (symmetrised) 1-sigma systematic of that bin. The
+       *_stat_unc above are then statistical only. */
+    vector<lower=0>[NEbins] mean_lnA_sys_scale;
+    vector<lower=0>[NEbins] var_lnA_sys_scale;
+
     /* Nex */
     int <lower=0> Nbeta_egmfs;
     array [Nbeta_egmfs] real log10_beta_egmf_grid; /* grid of EGMF spread parameters */
@@ -269,9 +276,9 @@ parameters {
     vector <lower=logEmin, upper=logEmax>[N] logE_true;
 
     vector[N] nu_lnAs; /* latent variable for sampling lnA (Zsrcs) */
-    /* global systematic uncertainties (shift) for lnA */
-    // real mean_lnA_sys_unc;
-    // real var_lnA_sys_unc;
+    /* global systematic shifts for lnA, in units of the 1-sigma systematic */
+    real nu_mean_lnA_sys;
+    real nu_var_lnA_sys;
 
 }
 
@@ -386,19 +393,19 @@ model {
   // latent variables for lnA : normal distribution
   nu_lnAs ~ normal(0.0, 1.0);
 
-  // global systematic uncertainties (shift) for lnA : normal distribution
-  // mean_lnA_sys_unc ~ normal(0.0, 1.0);
-  // var_lnA_sys_unc ~ normal(0.0, 1.0);
+  // global systematic shifts for lnA
+  nu_mean_lnA_sys ~ normal(0.0, 1.0);
+  nu_var_lnA_sys ~ normal(0.0, 1.0);
 
    // --- binned lnA likelihood ---
   for (l in 1:NEbins) {
     real mean_lnA_data = interpolate(lnA_logE_grid_vec, mean_lnA_true, lnA_logE_grid_det[l]);
     real var_lnA_data = interpolate(lnA_logE_grid_vec, var_lnA_true, lnA_logE_grid_det[l]);
     target += left_truncated_normal_lpdf(mean_lnA_det[l] |
-              mean_lnA_data + mean_lnA_sys_unc,
+              mean_lnA_data + mean_lnA_sys_unc + nu_mean_lnA_sys * mean_lnA_sys_scale[l],
               mean_lnA_stat_unc[l], 0.0);
     target += left_truncated_normal_lpdf(var_lnA_det[l] |
-              var_lnA_data + var_lnA_sys_unc,
+              var_lnA_data + var_lnA_sys_unc + nu_var_lnA_sys * var_lnA_sys_scale[l],
               var_lnA_stat_unc[l], -2.0);
   }
 
@@ -514,10 +521,10 @@ generated quantities {
         // column, since the binned likelihood is not split by source
         loglik_event_mass[l] = rep_vector(0.0, Nsrcs+1);
         loglik_event_mass[l] += left_truncated_normal_lpdf(mean_lnA_det[l] |
-            mean_lnA_data + mean_lnA_sys_unc,
+            mean_lnA_data + mean_lnA_sys_unc + nu_mean_lnA_sys * mean_lnA_sys_scale[l],
             mean_lnA_stat_unc[l], 0.0);
         loglik_event_mass[l] += left_truncated_normal_lpdf(var_lnA_det[l] |
-            var_lnA_data + var_lnA_sys_unc,
+            var_lnA_data + var_lnA_sys_unc + nu_var_lnA_sys * var_lnA_sys_scale[l],
             var_lnA_stat_unc[l], -2.0);
     }
         
