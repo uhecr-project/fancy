@@ -4,7 +4,7 @@ import typing
 
 import astropy.units as u
 import numpy as np
-from astropy.coordinates import SkyCoord
+from astropy.coordinates import CartesianRepresentation, SkyCoord
 from typing_extensions import Self
 
 from fancy.utils.package_data import (
@@ -77,10 +77,19 @@ class GMFLensing:
                 self._lens_cache[self.gmf_model] = self.gmf_lens
 
     def apply_lens_with_particles(
-        self: Self, rigidities: np.ndarray, coordinates: SkyCoord
-    ) -> SkyCoord:
+        self: Self, rigidities: np.ndarray, coordinates: SkyCoord, return_mask: bool = False
+    ) -> typing.Union[SkyCoord, typing.Tuple[SkyCoord, np.ndarray]]:
         """
-        Apply GMF lensing by sampling & re-sampling. Returns same number of sampled events at earth as SkyCoord objects.
+        Apply GMF lensing particle by particle (crpropa MagneticLens.transformCosmicRay),
+        so that each particle keeps its own rigidity: Earth direction i is the
+        lensed direction of input particle i.
+
+        A particle is lost (does not reach Earth) with the lens' probability for
+        its Galactic-boundary pixel and rigidity; lost particles get NaN
+        directions. Dropping them reproduces the lensed sky distribution that the
+        previous map-based sampling (ParticleMapsContainer.getRandomParticles)
+        drew from, which however re-drew particles at random and so lost the
+        correspondence between each event's direction and its rigidity.
 
         Parameters
         ----------
@@ -88,42 +97,42 @@ class GMFLensing:
             rigidities from particle samples in EV
         coordinates: astropy.coordinates.SkyCoord
             arrival directions of samples at the Galacitc boundary in SkyCoord
+        return_mask: bool, default False
+            also return the boolean mask of particles that reached Earth
 
         Returns
         -------
         astropy.coordinates.SkyCoord
             arrival directions of samples at Earth in Galactic coordinates
+            (NaN for particles that did not reach Earth)
+        np.ndarray (only if return_mask)
+            True for particles that reached Earth
         """
-        if not self.disable_gmf:
-            self.__load_lens()
-
-        # now GMF lensing
-        particle_map = crpropa.ParticleMapsContainer()
         Nsamples = coordinates.shape[0]
+        coords_gb_xyz = coordinates.galactic.cartesian.xyz.value.T  # (Nsamples, 3)
 
-        for i in range(Nsamples):
-            # make coordinate system consistent
-            coord_gb_xyz = -1 * coordinates[i].cartesian.xyz.value
-            vector3d_gb = crpropa.Vector3d(*coord_gb_xyz)
+        if self.disable_gmf:
+            survived = np.ones(Nsamples, dtype=bool)
+            coords_earth_xyz = coords_gb_xyz.copy()
+        else:
+            self.__load_lens()
+            survived = np.zeros(Nsamples, dtype=bool)
+            coords_earth_xyz = np.full((Nsamples, 3), np.nan)
+            for i in range(Nsamples):
+                # the lens works with momentum vectors, i.e. minus the arrival direction
+                p = crpropa.Vector3d(*(-coords_gb_xyz[i]))
+                if self.gmf_lens.transformCosmicRay(rigidities[i] * crpropa.EeV, p):
+                    p_earth = np.array([p.x, p.y, p.z])
+                    coords_earth_xyz[i] = -p_earth / np.linalg.norm(p_earth)
+                    survived[i] = True
 
-            # adding rigidities instead of energy
-            particle_map.addParticle(
-                crpropa.nucleusId(1, 1), rigidities[i] * crpropa.EeV, vector3d_gb
-            )
-
-        # lens
-        if not self.disable_gmf:
-            particle_map.applyLens(self.gmf_lens)
-
-        # sample back same number of particles at earth
-        _, _, glon_earth, glat_earth = particle_map.getRandomParticles(int(Nsamples))
-
-        return SkyCoord(
-            glon_earth * u.rad,
-            glat_earth * u.rad,
-            frame="galactic",
-            representation_type="unitspherical",
+        coords_earth = SkyCoord(
+            CartesianRepresentation(*coords_earth_xyz.T), frame="galactic"
         )
+        coords_earth.representation_type = "unitspherical"
+        if return_mask:
+            return coords_earth, survived
+        return coords_earth
 
     def apply_lens_to_map(self: Self, weighted_map: np.ndarray, R: float) -> np.ndarray:
         """

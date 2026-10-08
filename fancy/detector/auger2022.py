@@ -69,7 +69,7 @@ f_E = 0.15
 Eth = 32
 
 # systematic uncertainty
-f_E_sys = -0.05
+f_E_sys = 0.05
 
 # For convenience
 detector_properties = {}

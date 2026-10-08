@@ -111,6 +111,10 @@ class Simulation:
         self.source_type = data.source.label
         self.gmf_model = gmf_model
         self.n_jobs = n_jobs if n_jobs is not None else int(0.75 * os.cpu_count())
+        # interpolate the weighted exposure grids with a natural cubic spline
+        # in (alpha, log10 beta_egmf), as the Stan alpha_spline model does with
+        # use_beta_spline = 1; False -> linear in both (the original behaviour)
+        self.use_beta_spline = False
 
         # source parameters
         self.Nsrcs = data.source.N
@@ -438,6 +442,9 @@ class Simulation:
         w_exp_src = np.zeros(self.Nsrcs)
         esrc_ratios = np.zeros(self.Nsrcs)
 
+        if self.use_beta_spline:
+            return self.__calculate_wexp_spline(fit_truths)
+
         for k in range(self.Nsrcs + 1):
             f_log10_wexp_earth = RegularGridInterpolator(
                 (self.alpha_grid, np.log10(self.beta_egmf_grid.value)),
@@ -475,6 +482,46 @@ class Simulation:
                     )
                 )
                 esrc_ratios[k] = f_esrc_ratio(fit_truths["alphas"][k])
+
+        return w_exp_earth, w_exp_src, esrc_ratios
+
+    def __calculate_wexp_spline(self: Self, fit_truths: dict) -> tuple:
+        """
+        As the linear version in the caller, but with the log weighted
+        exposures interpolated by a tensor-product natural cubic spline in
+        (alpha, log10 beta_egmf): spline in alpha, then in log10 beta_egmf.
+        Matches interp2d_spline in the Stan alpha_spline model.
+        """
+        log10_beta_grid = np.log10(self.beta_egmf_grid.value)
+
+        def spline2d(grid, alpha):
+            # grid: (Nalphas, Nbeta_egmfs, ...) of log10 weighted exposures
+            at_alpha = CubicSpline(self.alpha_grid, grid, axis=0, bc_type="natural")(alpha)
+            return CubicSpline(log10_beta_grid, at_alpha, axis=0, bc_type="natural")(
+                fit_truths["log10_beta_egmf"]
+            )
+
+        w_exp_earth = np.zeros(self.Nsrcs + 1)
+        w_exp_src = np.zeros(self.Nsrcs)
+        esrc_ratios = np.zeros(self.Nsrcs)
+
+        for k in range(self.Nsrcs + 1):
+            alpha = fit_truths["alphas"][k]
+            w_exp_earth[k] = np.sum(
+                fit_truths["mass_fracs"][:, k]
+                * 10.0 ** spline2d(np.log10(self.wexp_earth_grid[k, ...].value), alpha)
+            )
+            if k < self.Nsrcs:
+                esrc_ratios_mf = np.sum(
+                    self.esrc_ratio_grid[:, :, k]
+                    * fit_truths["mass_fracs"][:, k][np.newaxis, :],
+                    axis=1,
+                )
+                w_exp_src[k] = np.sum(
+                    fit_truths["mass_fracs"][:, k]
+                    * 10.0 ** spline2d(np.log10(self.wexp_src_grid[k, :, :, :].value), alpha)
+                )
+                esrc_ratios[k] = CubicSpline(self.alpha_grid, esrc_ratios_mf, axis=0)(alpha)
 
         return w_exp_earth, w_exp_src, esrc_ratios
 
@@ -517,7 +564,8 @@ class Simulation:
             # Earth-frame flux here. Per-source flux asymmetry across
             # multiple sources should be set via the Lsrcs branch below
             # instead, where each source's Lsrcs is given explicitly.
-            Fearth_tot = Nex_src / w_exp_earth[:-1]
+            # equal share of Nex_src per source, i.e. Fearth_k * w_exp_earth_k = Nex_src / Nsrcs
+            Fearth_tot = (Nex_src / self.Nsrcs) / w_exp_earth[:-1]
 
             # then calcualte the particle rate by multiplying by distance factor
 
@@ -601,28 +649,17 @@ class Simulation:
         )
 
         # split the fixed total Nex across the Nsrcs+1 sources (Nsrcs point
-        # sources + background) via a multinomial draw, weighted by each
-        # population's share of the Earth-frame flux -- i.e.
-        # Nex_per_src ~ Multinomial(Nex, flux_frac). flux_frac is already
-        # Fearths_truths (and F0) normalised by Ftot, i.e. already the
-        # correct Earth-frame event-count share (Nex_src/Nex_bg above were
-        # derived via Fearth_tot = Nex_src / w_exp_earth, so flux is already
-        # exposure-weighted); multiplying by w_exp_earth again here would
-        # double-count the exposure weighting and bias the split away from
-        # Nex_src/Nex_bg (confirmed via smoke test: CenA-M82, Nsrcs=2, Nex=
-        # 500, src_frac=0.6 target gave Nex_per_src src-sum/bg fractions of
-        # 0.786/0.214 instead of ~0.6/0.4 under the old expected_share =
-        # flux_frac * w_exp_earth weighting). This generalises the old
-        # Nsrcs=1 hardcoded [Nex_src, Nex_bg] split, and replaces the
-        # previous deterministic np.ceil(...) allocation with proper
-        # per-event Poisson-consistent scatter: conditioned on a fixed Nex,
-        # a sum of independent per-source Poisson counts is exactly
-        # multinomial, so this is the correct way to get "Poisson per
-        # source, summed" while keeping the total event count Nex exactly
-        # fixed (as the rest of this method assumes). By construction,
-        # np.sum(Nex_per_src) == Nex exactly, so no post-hoc consistency
-        # check is needed.
-        multinomial_p = fit_truths["flux_frac"]
+        # sources + background) via a multinomial draw with each population's
+        # EXPECTED event share, F_k * w_exp_earth_k / sum_j F_j * w_exp_earth_j,
+        # the same share as Nex_arr = F .* wexp_earths in the Stan models.
+        # (Previously the flux share F_k / Ftot was used, which is not the event
+        # share unless all w_exp_earth are equal: M82 src_frac 0.710 was drawn
+        # with p = 0.750.) Conditioned on a fixed Nex, independent per-source
+        # Poisson counts are multinomial, so np.sum(Nex_per_src) == Nex exactly.
+        expected_share = fit_truths["flux_frac"] * w_exp_earth
+        expected_share = expected_share / np.sum(expected_share)
+        fit_truths["Nex_expected_per_src"] = Nex * expected_share
+        multinomial_p = expected_share
 
         rng = np.random.default_rng(seed=seed)
         fit_truths["Nex_per_src"] = rng.multinomial(Nex, multinomial_p)
@@ -690,15 +727,19 @@ class Simulation:
         f_varlnA = CubicSpline(y=var_lnA_mfs, x=self.alpha_grid, axis=1)
 
         # binned likelihood (lnA) sampling
+        # weighted by the EXPECTED event share of each population (as the Stan
+        # models do with Nex_arr / Nex), not the realised Nex_per_src: the lnA
+        # data (FD Xmax) are an event sample independent of the arrival-direction
+        # events, so they do not share the latter's multinomial scatter.
+        Nex_expected = np.asarray(self.truths.get("Nex_expected_per_src", self.truths["Nex_per_src"]), dtype=float)
         for k in range(self.Nsrcs + 1):
-            Nex_per_src = self.truths["Nex_per_src"][k]
             alpha_truth = self.truths["alphas"][k]
             # now calculate the mean and var lnA at Earth
             mean_lnA_truths += (
-                Nex_per_src * f_mulnA(alpha_truth)[:, k] / self.truths["Nex"]
+                Nex_expected[k] * f_mulnA(alpha_truth)[:, k] / np.sum(Nex_expected)
             )
             var_lnA_truths += (
-                Nex_per_src * f_varlnA(alpha_truth)[:, k] / self.truths["Nex"]
+                Nex_expected[k] * f_varlnA(alpha_truth)[:, k] / np.sum(Nex_expected)
             )
 
         N_prev_idx = 0
@@ -715,13 +756,16 @@ class Simulation:
             en_spect = np.exp(
                 f_log_espect((np.log(self.energy_grid), alpha_truth))[:, k]
             )
-            en_prob = (en_spect * self.energy_grid_widths) / np.sum(
-                en_spect * self.energy_grid_widths
-            )
-
-            en_samples_src = rng.choice(
-                self.energy_grid, size=Nex_per_src * sampling_factor, p=en_prob
-            )
+            # continuous true energies by inverse-CDF sampling of the spectrum
+            # as the Stan models evaluate it: ln(dN/dE) linear in ln E between
+            # the grid nodes, times the Jacobian E for a density in ln E
+            lnE_grid = np.log(self.energy_grid)
+            lnE_fine = np.linspace(lnE_grid[0], lnE_grid[-1], 20001)
+            dens_lnE = np.exp(np.interp(lnE_fine, lnE_grid, np.log(np.maximum(en_spect, 1e-300))) + lnE_fine)
+            cdf = np.concatenate([[0.0], np.cumsum(0.5 * (dens_lnE[1:] + dens_lnE[:-1]) * np.diff(lnE_fine))])
+            en_samples_src = np.exp(np.interp(
+                rng.uniform(size=Nex_per_src * sampling_factor) * cdf[-1], cdf, lnE_fine
+            ))
             Etruths[N_prev_idx:N_next_idx] = en_samples_src
 
             # the rigidities at the source can also be easily calculated
@@ -843,28 +887,36 @@ class Simulation:
                 "GMF is disabled. Will not run this code and set the skycoords_earth to the skycoords_gb."
             )
             self.truths["skycoord_earth_truths"] = skycoords_gb
+            self.truths["lens_survived"] = np.ones(len(skycoords_gb), dtype=bool)
             return skycoords_gb
 
         # initialise gmf lens object
         gmflens = GMFLensing(self.gmf_model)
 
         skycoords_earth = []
-        # need to apply lens per source to ensure correct ratio
+        survived = []
+        # lensed particle by particle, so each sample keeps its own rigidity;
+        # samples that do not reach Earth are skipped in the detection step
         N_prev_idx = 0
         for k in range(self.Nsrcs + 1):  # +1 for the background source
 
             N_next_idx = self.config["Nsamples_per_src"][k] + N_prev_idx
-            defl_skycoord = gmflens.apply_lens_with_particles(
+            defl_skycoord, survived_k = gmflens.apply_lens_with_particles(
                 self.truths["rigidity_truths_samples"][N_prev_idx:N_next_idx],
                 skycoords_gb[N_prev_idx:N_next_idx],
+                return_mask=True,
             )
 
             skycoords_earth.append(defl_skycoord)
+            survived.append(survived_k)
             N_prev_idx = N_next_idx
 
         skycoords_earth = concatenate_skycoords(skycoords_earth)
+        survived = np.concatenate(survived)
+        print(f"GMF lens: {survived.sum()}/{len(survived)} samples reach Earth")
 
         self.truths["skycoord_earth_truths"] = skycoords_earth
+        self.truths["lens_survived"] = survived
 
         return skycoords_earth
 
@@ -1000,6 +1052,8 @@ class Simulation:
         logE_stat: Union[float, None] = None,
         kappa_det: Union[float, None] = None,
         logE_sys: Union[float, None] = None,
+        logE_sys_scale: float = 0.0,
+        nu_logE_sys: float = 0.0,
     ) -> Tuple[np.ndarray, List[SkyCoord]]:
         """
         Apply the detector response to the true values for the energy and direction.
@@ -1021,6 +1075,13 @@ class Simulation:
             The systematic uncertainty on the log energy.
             If None, then the value from the data.detector is used.
             TODO: move this to when initialising the grid for the weighted exposure calculation.
+        logE_sys_scale : float, optional
+            signed 1-sigma energy-scale systematic for the global-shift
+            treatment (e.g. data.detector.logE_sys_scale). Default 0.0.
+        nu_logE_sys : float, optional
+            the global energy-scale shift in units of logE_sys_scale (stored
+            as a truth); all log energies are shifted by
+            logE_sys + nu_logE_sys * logE_sys_scale. Default 0.0.
         """
         # if None then use the energy uncertainty reported in
         # data.detector
@@ -1068,6 +1129,10 @@ class Simulation:
             rigidities_per_src = self.truths["rigidity_truths_samples"][
                 N_starting_idx:Nsample_per_src + N_starting_idx
             ]
+            # samples lost in the GMF lens (older truths: all reached Earth)
+            survived_per_src = np.asarray(self.truths.get(
+                "lens_survived", np.ones(len(self.truths["rigidity_truths_samples"]), dtype=bool)
+            ))[N_starting_idx:Nsample_per_src + N_starting_idx]
 
             # here we randomise the order of the samples to ensure
             # that we do not introduce any bias in the accept-reject
@@ -1076,6 +1141,8 @@ class Simulation:
             rng_det.shuffle(sample_idces)
 
             for i in sample_idces:
+                if not survived_per_src[i]:
+                    continue
                 # sample reconstruction uncertainty using vMF
                 # and calculate if the direction is within the
                 # exposure boundary or not.
@@ -1095,7 +1162,7 @@ class Simulation:
                 )
 
                 Edet = get_Edet(
-                    np.log(Etrue) + logE_sys,
+                    np.log(Etrue) + logE_sys + nu_logE_sys * logE_sys_scale,
                     en_unc=logE_stat,
                     Eth=self.Emin,
                     Emax=self.Emax,
@@ -1169,7 +1236,10 @@ class Simulation:
         # also set the uncertainties here
         self.config["logE_stat"] = logE_stat
         self.config["logE_sys"] = logE_sys
+        self.config["logE_sys_scale"] = logE_sys_scale
         self.config["kappa_det"] = kappa_det
+        self.truths["logE_sys"] = logE_sys
+        self.truths["nu_logE_sys"] = nu_logE_sys
 
         return Edets, skycoord_earth_dets
 
@@ -1499,7 +1569,12 @@ class Simulation:
         simulation.config["mean_lnA_sys_scale"] = np.asarray(data.detector.mean_lnA_sys_scale)
         simulation.config["var_lnA_sys_scale"] = np.asarray(data.detector.var_lnA_sys_scale)
         simulation.config["logE_stat"] = data.detector.logE_stat
-        simulation.config["logE_sys"] = data.detector.logE_sys
+        # the fixed energy shift actually used; simulations saved before it
+        # was stored as a truth fall back to the detector's f_E_sys
+        simulation.config["logE_sys"] = simulation.truths.get("logE_sys", data.detector.logE_sys)
+        simulation.config["logE_sys_scale"] = (
+            data.detector.logE_sys_scale if "nu_logE_sys" in simulation.truths else 0.0
+        )
         simulation.config["kappa_det"] = data.detector.kappa_d
 
         return simulation

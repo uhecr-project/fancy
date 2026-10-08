@@ -78,7 +78,11 @@ class Detector:
         self.coord_uncertainty = np.sqrt(7552.0 / self.kappa_d)
 
         self.logE_stat = self.properties["f_E"]
-        self.logE_sys = self.properties["f_E_sys"]
+        # f_E_sys is a fractional energy-scale offset in E -> shift in ln E
+        self.logE_sys = float(np.log1p(self.properties["f_E_sys"]))
+        # signed 1-sigma energy-scale systematic, for the global-shift
+        # treatment (shift = nu_logE_sys * logE_sys_scale, nu ~ N(0, 1))
+        self.logE_sys_scale = self.properties["f_E_sys"]
 
         self.Eth = float(self.properties["Eth"])
         self.Eth_max = 500 # set default to 500 EeV

@@ -7,6 +7,7 @@ import cmdstanpy
 import h5py
 import astropy.units as u
 import numpy as np
+from scipy.stats import truncnorm
 from scipy.interpolate import interp1d
 from cmdstanpy import CmdStanModel
 from typing_extensions import Self  # change to typing for py>3.11
@@ -143,6 +144,9 @@ class Analysis:
         use_rigidity_grid : bool = False,
         use_with_systematics : bool = False,
         use_alpha_spline : bool = False,
+        fit_logE_sys : bool = False,
+        beta_egmf_max : Union[float, None] = None,
+        use_beta_spline : bool = True,
     ) -> None:
         """
         Container to manage the inputs and outputs of the fits.
@@ -171,6 +175,22 @@ class Analysis:
             additional latent nuisance parameters (nu_logE_sys,
             nu_kappa_gmf_sys, nu_mean_lnA_sys, nu_var_lnA_sys) to marginalise
             over the systematic uncertainties instead of ignoring them.
+        beta_egmf_max : float or None, default=None
+            Only for the split lnA grid model: upper bound on beta_egmf
+            (nG Mpc^1/2), applied in Stan as min(beta grid maximum,
+            beta_egmf_max). None -> the beta grid's maximum.
+        use_beta_spline : bool, default=True
+            Only for the split lnA grid model: interpolate the log weighted
+            exposure grids with a natural cubic spline in log10(beta_egmf) as
+            well as alpha. If False, linear in log10(beta_egmf), which leaves
+            kinks at the beta grid nodes that a sharp likelihood pins
+            beta_egmf to.
+        fit_logE_sys : bool, default=False
+            Only for the split lnA grid model (see `split_lnA_grid`). If True,
+            the energy-scale systematic is fitted as a global shift
+            nu_logE_sys * f_E_sys (nu_logE_sys ~ N(0, 1)). If False, the
+            detector's f_E_sys is applied as a fixed shift (logE_sys_scale = 0,
+            so nu_logE_sys decouples from the data).
         use_alpha_spline : bool, default=False
             If True, compiles the "_alpha_spline" model variant (the "knots
             method"), which replaces the default model's linear
@@ -202,6 +222,9 @@ class Analysis:
         self.use_rigidity_grid = use_rigidity_grid
         self.use_with_systematics = use_with_systematics
         self.use_alpha_spline = use_alpha_spline
+        self.fit_logE_sys = fit_logE_sys
+        self.beta_egmf_max = beta_egmf_max
+        self.use_beta_spline = use_beta_spline
 
         self.stan_model = None
         self.grid_config = None
@@ -220,7 +243,7 @@ class Analysis:
             self.fit_inputs = {key: None for key in self.fit_input_keys}
 
         if self.split_lnA_grid:
-            for key in ("NEbins_lnAgrid", "lnA_logE_grid_det", "mean_lnA_sys_scale", "var_lnA_sys_scale"):
+            for key in ("NEbins_lnAgrid", "lnA_logE_grid_det", "mean_lnA_sys_scale", "var_lnA_sys_scale", "logE_sys_scale", "beta_egmf_ub", "use_beta_spline"):
                 self.fit_input_keys.append(key)
                 self.fit_inputs[key] = None
 
@@ -234,7 +257,8 @@ class Analysis:
         Only energy_mass_spatial_model_alpha_spline.stan does so. That model
         also treats the lnA systematics as one global shift per moment
         (nu * mean/var_lnA_sys_scale, nu ~ N(0, 1)) with statistical-only
-        mean/var_lnA_stat_unc.
+        mean/var_lnA_stat_unc, and the energy-scale systematic as a global
+        shift nu_logE_sys * logE_sys_scale (nu ~ N(0, 1)).
         """
         return (
             self.analysis_type == self.energy_mass_spatial_type
@@ -529,6 +553,10 @@ class Analysis:
             no_shift = np.zeros_like(np.asarray(simulation.config["mean_lnA_stat"], dtype=float))
             self.fit_inputs["mean_lnA_sys_scale"] = simulation.config.get("mean_lnA_sys_scale", no_shift)
             self.fit_inputs["var_lnA_sys_scale"] = simulation.config.get("var_lnA_sys_scale", no_shift)
+            self.fit_inputs["logE_sys_scale"] = self.data.detector.logE_sys_scale if self.fit_logE_sys else 0.0
+            # no cap -> a value above any beta grid; Stan takes min(grid max, this)
+            self.fit_inputs["beta_egmf_ub"] = 1e6 if self.beta_egmf_max is None else float(self.beta_egmf_max)
+            self.fit_inputs["use_beta_spline"] = int(self.use_beta_spline)
 
         self._set_lnA_grid_inputs(
             simulation.lnA_energy_grid, simulation.lnA_energy_grid_det
@@ -843,6 +871,15 @@ class Analysis:
             self.fit_inputs["var_lnA_stat_unc"] = self.data.detector.var_lnA_stat_only
             self.fit_inputs["mean_lnA_sys_scale"] = self.data.detector.mean_lnA_sys_scale
             self.fit_inputs["var_lnA_sys_scale"] = self.data.detector.var_lnA_sys_scale
+            # energy-scale systematic: either fitted (nu_logE_sys) or the
+            # detector's f_E_sys applied as a fixed shift
+            if self.fit_logE_sys:
+                self.fit_inputs["logE_sys_unc"] = 0.0
+                self.fit_inputs["logE_sys_scale"] = self.data.detector.logE_sys_scale
+            else:
+                self.fit_inputs["logE_sys_scale"] = 0.0
+            self.fit_inputs["beta_egmf_ub"] = 1e6 if self.beta_egmf_max is None else float(self.beta_egmf_max)
+            self.fit_inputs["use_beta_spline"] = int(self.use_beta_spline)
 
         # for omega_det, deal with this depending on gmf model
         if self.gmf_model == "None":
@@ -950,6 +987,45 @@ class Analysis:
                 has_category[i] = True
         return means, sds, has_category
 
+    def _prior_inits(self: Self, chains: int, seed: Union[int, None] = None) -> list:
+        """
+        One initial-value dict per chain, drawn from the priors of
+        energy_mass_spatial_model_alpha_spline.stan (truncated to the
+        parameter bounds). The per-event true energies all start at the median
+        of the detected log energies; the per-event nu_lnAs are drawn from their
+        N(0, 1) prior.
+        """
+        rng = np.random.default_rng(seed)
+        nk = self.fit_inputs["Nsrcs"] + 1
+        na = self.fit_inputs["NAsrcs"]
+        alpha_min = float(np.min(self.fit_inputs["alpha_grid"]))
+        alpha_max = float(np.max(self.fit_inputs["alpha_grid"]))
+        beta_min = float(10 ** np.min(self.fit_inputs["log10_beta_egmf_grid"]))
+        beta_max = float(10 ** np.max(self.fit_inputs["log10_beta_egmf_grid"]))
+        if self.split_lnA_grid:
+            beta_max = min(beta_max, float(self.fit_inputs["beta_egmf_ub"]))
+
+        def truncated_normal(mu, sigma, lo, hi, size=None):
+            a, b = (lo - mu) / sigma, (hi - mu) / sigma
+            return truncnorm.rvs(a, b, loc=mu, scale=sigma, size=size, random_state=rng)
+
+        logE_init = float(np.median(np.log(self.fit_inputs["Edet"])))
+        inits = []
+        for _ in range(chains):
+            init = {
+                "alphas": truncated_normal(0.0, 2.0, alpha_min, alpha_max, size=nk),
+                "mass_fracs": rng.dirichlet(np.full(na, 2.0), size=nk),
+                "flux_frac": rng.dirichlet(np.full(nk, 2.0)),
+                "log10_Ftot": float(rng.normal(-1.0, 3.0)),
+                "beta_egmf": float(truncated_normal(0.0, 10.0, beta_min, beta_max)),
+                "logE_true": np.full(self.fit_inputs["N"], logE_init),
+                "nu_lnAs": rng.normal(0.0, 1.0, size=self.fit_inputs["N"]),
+            }
+            if self.split_lnA_grid:
+                init.update({k: float(rng.normal()) for k in ("nu_mean_lnA_sys", "nu_var_lnA_sys", "nu_logE_sys")})
+            inits.append(init)
+        return inits
+
     def fit_model(
         self: Self,
         iterations: int = 1000,
@@ -981,6 +1057,12 @@ class Analysis:
         init_model : Union[str, None], default=None
             whether to use the variational inference (VI) output as initial values for the parameters.
             Default is None. If "pathfinder", the PathFinder output will be used as initial values for the parameters.
+            If "stacking", each chain gets its own initial values drawn from the
+            model's priors (see `_prior_inits`), so that the chains start
+            dispersed and can find different posterior modes; the chains are
+            then meant to be combined by chain stacking (see
+            new_uhecr_model/3_simulate_and_fit/stack_chains.py) rather than
+            pooled.
         kwargs : dict
             additional arguments to pass to the fit method
 
@@ -1024,8 +1106,11 @@ class Analysis:
                 "log10_Ftot" : -2,
                 **({"log10_beta_egmf": np.zeros(self.fit_inputs["Nsrcs"])} if self.use_rigidity_grid else {"beta_egmf": 1.0}),
                 "nu_lnAs": np.full(self.fit_inputs['N'], 0.5),
-                **({"nu_mean_lnA_sys": 0.0, "nu_var_lnA_sys": 0.0} if self.split_lnA_grid else {}),
+                **({"nu_mean_lnA_sys": 0.0, "nu_var_lnA_sys": 0.0, "nu_logE_sys": 0.0} if self.split_lnA_grid else {}),
             }
+        elif init_model == "stacking":
+            print("Drawing per-chain initial values from the priors.")
+            inits_dict = self._prior_inits(chains, seed)
         elif init_model == "pathfinder":
             print("Using PathFinder variational inference (VI) output as initial values for the parameters.")
             pathfinder = self.stan_model.pathfinder(
@@ -1111,7 +1196,7 @@ class Analysis:
                     "log10_Ftot": -2,
                     **({"log10_beta_egmf": np.zeros(self.fit_inputs["Nsrcs"])} if self.use_rigidity_grid else {"beta_egmf": 0.5}),
                     "nu_lnAs": np.full(self.fit_inputs['N'], 0.5),
-                    **({"nu_mean_lnA_sys": 0.0, "nu_var_lnA_sys": 0.0} if self.split_lnA_grid else {}),
+                    **({"nu_mean_lnA_sys": 0.0, "nu_var_lnA_sys": 0.0, "nu_logE_sys": 0.0} if self.split_lnA_grid else {}),
                 }
             else:
                 # one distinct, validated init dict per chain

@@ -96,7 +96,7 @@ Eth = 57
 # Eth = 32 # make same as Auger threshold for comparison
 
 # systematic uncertainty
-f_E_sys = 0.05
+f_E_sys = -0.05
 
 # For convenience
 detector_properties = {}

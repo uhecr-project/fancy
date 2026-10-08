@@ -15,6 +15,10 @@
  * only the alpha_grid axis is splined here, since that's where the
  * funneling was diagnosed.
  *
+ * With use_beta_spline = 1, the log weighted exposure grids are also splined
+ * in log10_beta_egmf (tensor-product natural spline, interp2d_spline): the
+ * linear beta interpolation pinned M82's beta_egmf to beta grid nodes.
+ *
  * Deliberately kept as a separate file from energy_mass_spatial_model.stan
  * so the default linear-interpolation model stays untouched and
  * reproducible, and the two can be run side by side on the same simulated
@@ -40,7 +44,9 @@ functions {
     real energy_spectrum_lpdf(real logE,
                           vector log_en_grid,
                           vector log_espect_at_alpha) {
-        return interpolate(log_en_grid, log_espect_at_alpha, logE);
+        // log_espect_at_alpha is dN/dE (a density in E), while logE is ln E:
+        // + logE is the Jacobian dE/dlnE = E
+        return interpolate(log_en_grid, log_espect_at_alpha, logE) + logE;
     }
 
     /**
@@ -211,6 +217,16 @@ data {
     vector<lower=0>[NEbins] mean_lnA_sys_scale;
     vector<lower=0>[NEbins] var_lnA_sys_scale;
 
+    /* energy-scale systematic as a global shift in log energy:
+       logE_sys_unc + nu_logE_sys * logE_sys_scale, nu_logE_sys ~ N(0, 1).
+       logE_sys_scale is signed (detector f_E_sys). */
+    real logE_sys_scale;
+
+    /* upper bound on beta_egmf (nG Mpc^1/2), below the beta grid's maximum if
+       smaller: keeps a source from being deflected into an isotropic
+       "second background" */
+    real<lower=0> beta_egmf_ub;
+
     /* Nex */
     int <lower=0> Nbeta_egmfs;
     array [Nbeta_egmfs] real log10_beta_egmf_grid; /* grid of EGMF spread parameters */
@@ -228,6 +244,12 @@ data {
        y2 = alpha_spline_matrix * y gives the spline's second derivatives at
        the knots for any y sampled on alpha_grid this iteration. */
     matrix[Nalphas, Nalphas] alpha_spline_matrix;
+
+    /* 1: natural cubic spline of log_wexp in log10_beta_egmf as well as alpha
+       (interp2d_spline); 0: linear in log10_beta_egmf (interp2d_alpha_spline).
+       The linear version leaves kinks at the beta grid nodes that a sharp
+       likelihood (e.g. M82) pins beta_egmf to. */
+    int<lower=0, upper=1> use_beta_spline;
 }
 
 transformed data {
@@ -240,13 +262,25 @@ transformed data {
   // real alpha_max = 3.0;
 
   real beta_egmf_min = pow(10.0, min(log10_beta_egmf_grid));
-  real beta_egmf_max = pow(10.0, max(log10_beta_egmf_grid));
+  real beta_egmf_max = fmin(pow(10.0, max(log10_beta_egmf_grid)), beta_egmf_ub);
 
   // --- distance conversion once ---
   vector[Nsrcs] D_flux = D * 3.08567758e19;
 
   // --- precompute 1D arrays for interpolation ---
   vector[Nalphas] alpha_grid_vec = to_vector(alpha_grid);
+  vector[Nbeta_egmfs] log10_beta_egmf_grid_vec = to_vector(log10_beta_egmf_grid);
+  // beta-direction spline matrix and alpha-direction second derivatives of
+  // the log weighted exposure grids (both fixed data), for interp2d_spline
+  matrix[Nbeta_egmfs, Nbeta_egmfs] beta_spline_matrix = natural_cubic_spline_matrix(log10_beta_egmf_grid_vec);
+  array[Nsrcs+1, NAsrcs] matrix[Nalphas, Nbeta_egmfs] log_wexp_earth_y2;
+  array[Nsrcs, NAsrcs] matrix[Nalphas, Nbeta_egmfs] log_wexp_src_y2;
+  for (k in 1:Nsrcs+1) {
+    for (j in 1:NAsrcs) {
+      log_wexp_earth_y2[k, j] = alpha_spline_matrix * log_wexp_earth_grid[k, j];
+      if (k <= Nsrcs) log_wexp_src_y2[k, j] = alpha_spline_matrix * log_wexp_src_grid[k, j];
+    }
+  }
   vector[NEs] logE_grid_vec = to_vector(logE_grid);
   vector[NEbins_lnAgrid] lnA_logE_grid_vec = to_vector(lnA_logE_grid);
 
@@ -279,6 +313,8 @@ parameters {
     /* global systematic shifts for lnA, in units of the 1-sigma systematic */
     real nu_mean_lnA_sys;
     real nu_var_lnA_sys;
+    /* global energy-scale shift, in units of logE_sys_scale */
+    real nu_logE_sys;
 
 }
 
@@ -312,12 +348,14 @@ transformed parameters {
       mulnA_mfs[k][,] += mass_fracs[k][j] * mean_lnA_grid[k,j];
       varlnA_mfs[k][,] += mass_fracs[k][j] * var_lnA_grid[k,j];
 
-      wexp_earths[k] += mass_fracs[k][j] * exp(interp2d_alpha_spline(
-        alphas[k], log10(beta_egmf),
-        alpha_grid_vec, alpha_grid, log10_beta_egmf_grid,
-        to_array_2d(log_wexp_earth_grid[k,j]),
-        alpha_spline_matrix
-      ));
+      wexp_earths[k] += mass_fracs[k][j] * exp(use_beta_spline
+        ? interp2d_spline(alphas[k], log10(beta_egmf),
+            alpha_grid_vec, log10_beta_egmf_grid_vec,
+            log_wexp_earth_grid[k,j], log_wexp_earth_y2[k, j], beta_spline_matrix)
+        : interp2d_alpha_spline(alphas[k], log10(beta_egmf),
+            alpha_grid_vec, alpha_grid, log10_beta_egmf_grid,
+            to_array_2d(log_wexp_earth_grid[k,j]), alpha_spline_matrix)
+      );
 
     }
 
@@ -396,6 +434,7 @@ model {
   // global systematic shifts for lnA
   nu_mean_lnA_sys ~ normal(0.0, 1.0);
   nu_var_lnA_sys ~ normal(0.0, 1.0);
+  nu_logE_sys ~ normal(0.0, 1.0);
 
    // --- binned lnA likelihood ---
   for (l in 1:NEbins) {
@@ -422,7 +461,7 @@ model {
     logE_true,                      // latent true energies
     Edet,                           // detected energies
     logE_stat_unc,                  // statistical energy uncertainty (log-normal)
-    logE_sys_unc,                   // systematic energy uncertainty, global systematic shift
+    logE_sys_unc + nu_logE_sys * logE_sys_scale,  // total global energy-scale shift
     Emin, Emax,     // energy range for truncated lognormal likelihood
     mean_lnA_true,                  // mean lnA per energy bin per source
     var_lnA_true,                   // variance of lnA per energy bin per source
@@ -460,12 +499,14 @@ generated quantities {
         esrc_ratios += mass_fracs[k][j] * interpolate_spline(
           alpha_grid_vec, esrc_ratio_grid[k,j], esrc_ratio_y2, alphas[k]
         );
-        wexp_src += mass_fracs[k][j] * exp(interp2d_alpha_spline(
-          alphas[k], log10_beta_egmf,
-          alpha_grid_vec, alpha_grid, log10_beta_egmf_grid,
-          to_array_2d(log_wexp_src_grid[k,j]),
-          alpha_spline_matrix
-        ));
+        wexp_src += mass_fracs[k][j] * exp(use_beta_spline
+          ? interp2d_spline(alphas[k], log10_beta_egmf,
+              alpha_grid_vec, log10_beta_egmf_grid_vec,
+              log_wexp_src_grid[k,j], log_wexp_src_y2[k, j], beta_spline_matrix)
+          : interp2d_alpha_spline(alphas[k], log10_beta_egmf,
+              alpha_grid_vec, alpha_grid, log10_beta_egmf_grid,
+              to_array_2d(log_wexp_src_grid[k,j]), alpha_spline_matrix)
+        );
       }
 
       Lsrcs[k] = F[k] * wexp_src / wexp_earths[k] * 4*pi() * square(D_flux[k]) * esrc_ratios;
@@ -497,7 +538,7 @@ generated quantities {
 
       for (k in 1:(Nsrcs+1)) {
         loglik_event[i,k] += energy_spectrum_lpdf(logE_true[i] | logE_grid_vec, log_espect_at_alpha[k]);
-        loglik_event[i,k] += truncated_lognormal_lpdf(Edet[i] | logE_true[i] + logE_sys_unc, logE_stat_unc, Emin, Emax);
+        loglik_event[i,k] += truncated_lognormal_lpdf(Edet[i] | logE_true[i] + logE_sys_unc + nu_logE_sys * logE_sys_scale, logE_stat_unc, Emin, Emax);
         loglik_event_energy[i,k] = loglik_event[i,k];
         if (k <= Nsrcs) {
           real kappa_egmf = get_kappa(Rtrue, beta_egmf, D[k]/10.0);
