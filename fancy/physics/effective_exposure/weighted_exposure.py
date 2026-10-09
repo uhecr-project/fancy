@@ -180,6 +180,40 @@ class WeightedExposure:
 
         return P_Eth
 
+    def lnA_rigidity_nodes(
+        self: Self,
+        method: str = "gauss-hermite",
+        n_nodes: int = 20,
+        seed: Union[int, None] = None,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Rigidity nodes and weights for the expectation over lnA ~ N(mean_lnA, var_lnA)
+        in every (energy, alpha, mass fraction, component) cell:
+        E[f(R)] = sum_n w_n f(R_n), R_n = E / (0.5 exp(lnA_n)).
+
+        method="gauss-hermite": lnA_n = mean + sqrt(2 var) x_n with the n_nodes
+            Gauss-Hermite nodes x_n, weights w_n / sqrt(pi) (deterministic).
+        method="mc": n_nodes random draws (np.random.default_rng(seed)), weights
+            1 / n_nodes -- the earlier compute_rigidities() behaviour (seed=None).
+
+        Returns
+        -------
+        rigidities (n_nodes, NEs, Nalphas, Nmass_fracs, Nsrcs + 1) in EV, weights (n_nodes,)
+        """
+        if method == "gauss-hermite":
+            x, w = np.polynomial.hermite.hermgauss(n_nodes)
+            lnA = self.mean_lnA_grid[None] + np.sqrt(2 * self.var_lnA_grid)[None] * x[:, None, None, None, None]
+            weights = w / np.sqrt(np.pi)
+        elif method == "mc":
+            rng = np.random.default_rng(seed)
+            lnA = self.mean_lnA_grid[None] + np.sqrt(self.var_lnA_grid)[None] * rng.standard_normal(
+                (n_nodes,) + self.mean_lnA_grid.shape
+            )
+            weights = np.full(n_nodes, 1.0 / n_nodes)
+        else:
+            raise ValueError(f"Unknown lnA quadrature {method}.")
+        return self.energy_grid[None, :, None, None, None] / (0.5 * np.exp(lnA)), weights
+
     def compute_rigidities(self: Self, Nsamples: int = 100) -> np.ndarray:
         """
         Compute the mean rigidities from the energies and lnA grids.
@@ -218,6 +252,10 @@ class WeightedExposure:
         self: Self,
         Nsamples: Union[int, None] = 100,
         wexp_lim: Union[float, None] = 1e-40,
+        lnA_quadrature: str = "gauss-hermite",
+        n_quad: int = 80,
+        seed: Union[int, None] = None,
+        clamp_rigidity: bool = True,
     ) -> np.ndarray:
         """
         One-shot approach to calculate the spectrum-weighted effective exposure from each source + background.
@@ -228,11 +266,19 @@ class WeightedExposure:
             Number of samples to draw from the lnA distribution, by default 100
         wexp_lim : float, optional
             Minimum value for the weighted exposure to avoid numerical issues, by default 1e-10 km^2 yr
+        lnA_quadrature : str, optional
+            "gauss-hermite" (default, n_quad nodes, deterministic; 80 nodes converge to <= 2.4e-4 in every cell of the auger2022 grids, 20 nodes to 3e-3) or "mc" (Nsamples random
+            draws with the given seed; seed=None is the earlier unseeded behaviour, whose
+            ~1-2% noise in w_exp moved real-data MAPs by tens of nats)
+        clamp_rigidity : bool, optional
+            evaluate the effective exposure at rigidities clamped to its rigidity grid
+            (flat continuation) instead of extrapolating its cubic spline, by default True
         """
-        # get the mean rigidity from the energy & mean lnA grids
-        rigidity_samples = self.compute_rigidities(
-            Nsamples=Nsamples
-        )  # shape (Nsamples, NEs, Nalphas, Nmass_fracs, Nsrcs + 1)
+        # rigidity nodes & weights over the lnA distribution of every grid cell
+        rigidity_samples, quad_weights = self.lnA_rigidity_nodes(
+            method=lnA_quadrature, n_nodes=n_quad if lnA_quadrature == "gauss-hermite" else Nsamples, seed=seed
+        )  # shapes (Nnodes, NEs, Nalphas, Nmass_fracs, Nsrcs + 1), (Nnodes,)
+        log_rig_grid = np.log(self.eff_exp.rigidity_grid.to_value(u.EV))
 
         # detector threshold efficiency calculation
         # P_Eths = self.calculate_threshold_prob()
@@ -250,10 +296,13 @@ class WeightedExposure:
             )
             for j in range(self.Nmass_fracs):
                 log_rig = np.log(rigidity_samples[:, :, :, j, k])
+                if clamp_rigidity:
+                    log_rig = np.clip(log_rig, log_rig_grid[0], log_rig_grid[-1])
 
                 # here the weights are:
                 # wexp(alpha, beta, massfrac) = int dE (dN/dE)(E, alpha, massfrac) * A_eff(E/Z, beta) * P_det(E)
-                self.weighted_exposure[k, :, :, j] = np.mean(
+                self.weighted_exposure[k, :, :, j] = np.tensordot(
+                    quad_weights,
                     np.trapz(
                         self.spectrum_grid[None, :, :, None, j, k]
                         * f_effexp_logrig(log_rig),
@@ -261,7 +310,7 @@ class WeightedExposure:
                         x=self.energy_grid,
                         axis=1,
                     ),
-                    axis=0,
+                    axes=1,
                 )
 
 
@@ -277,6 +326,10 @@ class WeightedExposure:
         self: Self,
         Nsamples: Union[int, None] = 100,
         wexp_lim: Union[float, None] = 1e-10,
+        lnA_quadrature: str = "gauss-hermite",
+        n_quad: int = 80,
+        seed: Union[int, None] = None,
+        clamp_rigidity: bool = True,
     ) -> np.ndarray:
         """
         Calculate the weighted exposure from each source, considering the source spectrum instead of the observed spectrum.
@@ -291,11 +344,19 @@ class WeightedExposure:
             Number of samples to draw from the lnA distribution, by default 100
         wexp_lim : float, optional
             Minimum value for the weighted exposure to avoid numerical issues, by default 1e-10 km^2 yr
+        lnA_quadrature : str, optional
+            "gauss-hermite" (default, n_quad nodes, deterministic; 80 nodes converge to <= 2.4e-4 in every cell of the auger2022 grids, 20 nodes to 3e-3) or "mc" (Nsamples random
+            draws with the given seed; seed=None is the earlier unseeded behaviour, whose
+            ~1-2% noise in w_exp moved real-data MAPs by tens of nats)
+        clamp_rigidity : bool, optional
+            evaluate the effective exposure at rigidities clamped to its rigidity grid
+            (flat continuation) instead of extrapolating its cubic spline, by default True
         """
-        # get the mean rigidity from the energy & mean lnA grids
-        rigidity_samples = self.compute_rigidities(
-            Nsamples=Nsamples
-        )  # shape (Nsamples, NEs, Nalphas, Nmass_fracs, Nsrcs + 1)
+        # rigidity nodes & weights over the lnA distribution of every grid cell
+        rigidity_samples, quad_weights = self.lnA_rigidity_nodes(
+            method=lnA_quadrature, n_nodes=n_quad if lnA_quadrature == "gauss-hermite" else Nsamples, seed=seed
+        )  # shapes (Nnodes, NEs, Nalphas, Nmass_fracs, Nsrcs + 1), (Nnodes,)
+        log_rig_grid = np.log(self.eff_exp.rigidity_grid.to_value(u.EV))
 
         # detector threshold efficiency calculation
         P_Eths = self.calculate_threshold_prob()
@@ -313,10 +374,13 @@ class WeightedExposure:
             )
             for j in range(self.Nmass_fracs):
                 log_rig = np.log(rigidity_samples[:, :, :, j, k])
+                if clamp_rigidity:
+                    log_rig = np.clip(log_rig, log_rig_grid[0], log_rig_grid[-1])
 
                 # here the weights are:
                 # wexp(alpha, beta, massfrac) = int dE (dN/dE)(E, alpha, massfrac) * A_eff(E/Z, beta) * P_det(E)
-                self.src_weighted_exposure[k, :, :, j] = np.mean(
+                self.src_weighted_exposure[k, :, :, j] = np.tensordot(
+                    quad_weights,
                     np.trapz(
                         self.src_spectrum_grid[None, :, :, None, j, k]
                         * f_effexp_logrig(log_rig),
@@ -324,7 +388,7 @@ class WeightedExposure:
                         x=self.energy_grid,
                         axis=1,
                     ),  # shape (Nsamples, Nalphas, Nbeta_egmfs)
-                    axis=0,
+                    axes=1,
                 ) # shape (Nalphas, Nbeta_egmfs)
 
 

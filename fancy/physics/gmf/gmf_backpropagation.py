@@ -27,6 +27,142 @@ try:
 except ImportError:
     cr = None
 
+# directory with the pre-generated turbulent field realisations used by the batched
+# backpropagation (see generate_turb_realisation_library). ~205 MB per realisation.
+DEFAULT_TURB_LIBRARY_DIR = os.environ.get(
+    "FANCY_GMF_TURB_LIBRARY_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "tables", "turb_realisations"),
+)
+
+# random grids of CRPropa's JF12Field::randomStriated / randomTurbulent (inherited by
+# UF23Field). Both are generated with unit strength and scaled on evaluation, so the
+# same grids are valid for JF12 and all UF23*Turb models: (N per axis, spacing in pc)
+_STRIATED_GRID = (100, 100.0)
+_TURBULENT_GRID = (256, 4.0)
+
+
+def _is_turbulent(gmf_model: str) -> bool:
+    """GMF models whose field setup draws random striated / turbulent grids."""
+    return gmf_model == "JF12" or gmf_model.find("Turb") != -1
+
+
+def _set_omp_num_threads(nthreads: int) -> list:
+    """
+    Set the number of OpenMP threads for CRPropa's ModuleList.run(CandidateVector).
+
+    numpy (MKL) loads Intel's libiomp5 next to libgomp, and the CRPropa omp_* calls
+    resolve to whichever came first, so set it on every loaded OpenMP runtime.
+    Returns the previous values, to pass to _restore_omp_num_threads.
+    """
+    import ctypes
+    import re
+
+    with open("/proc/self/maps") as f:
+        paths = sorted({l.split()[-1] for l in f if re.search(r"lib(gomp|iomp5)[^/]*\.so", l)})
+    libs = [ctypes.CDLL(p) for p in paths]
+    prev = [(lib, lib.omp_get_max_threads()) for lib in libs]
+    for lib in libs:
+        lib.omp_set_num_threads(int(nthreads))
+    return prev
+
+
+def _restore_omp_num_threads(prev: list) -> None:
+    for lib, n in prev:
+        lib.omp_set_num_threads(n)
+
+
+def _turb_library_index_file(gmf_model: str, library_dir: str = None) -> str:
+    library_dir = DEFAULT_TURB_LIBRARY_DIR if library_dir is None else library_dir
+    return os.path.join(library_dir, f"gmf_turb_realisations_{gmf_model}.pkl")
+
+
+def generate_turb_realisation_library(
+    gmf_model: str,
+    n_realisations: int = 50,
+    library_dir: str = None,
+    seed: int = None,
+    overwrite: bool = False,
+) -> str:
+    """
+    Pre-generate `n_realisations` striated + turbulent field realisations, exactly as
+    `GMFBackPropagation.__setup_simulation` draws them (randomStriated(s) and
+    randomTurbulent(s) with the same seed s), and dump the grids with CRPropa's
+    dumpGrid (raw float32) so that they can be loaded back with cr.loadGrid instead
+    of regenerated.
+
+    Writes `<library_dir>/gmf_turb_realisations_{gmf_model}/{striated,turbulent}_XXX.raw`
+    and the index `<library_dir>/gmf_turb_realisations_{gmf_model}.pkl` (written last,
+    so an interrupted run never leaves a usable but incomplete library).
+
+    Returns the path of the index file.
+    """
+    assert _is_turbulent(gmf_model), f"{gmf_model} has no random field components."
+    library_dir = DEFAULT_TURB_LIBRARY_DIR if library_dir is None else library_dir
+    index_file = _turb_library_index_file(gmf_model, library_dir)
+    if os.path.exists(index_file) and not overwrite:
+        print(f"Turbulent realisation library already exists: {index_file}")
+        return index_file
+
+    grid_dir = os.path.join(library_dir, f"gmf_turb_realisations_{gmf_model}")
+    os.makedirs(grid_dir, exist_ok=True)
+    # keep the ~GB grids out of the fancy git repository
+    with open(os.path.join(library_dir, ".gitignore"), "w") as f:
+        f.write("*\n")
+
+    rng = np.random.default_rng(seed)
+    # seed 0 means "unseeded" in CRPropa, so draw from [1, 1e7)
+    seeds = [int(s) for s in rng.choice(np.arange(1, 10_000_000), size=n_realisations, replace=False)]
+    files = []
+    for r, s in enumerate(tqdm(seeds, desc=f"Generating {n_realisations} turbulent realisations")):
+        field = cr.JF12Field()  # UF23Field inherits these generators unchanged
+        field.randomStriated(s)
+        field.randomTurbulent(s)
+        striated_file = f"striated_{r:03d}.raw"
+        turbulent_file = f"turbulent_{r:03d}.raw"
+        cr.dumpGrid(field.getStriatedGrid(), os.path.join(grid_dir, striated_file))
+        cr.dumpGrid(field.getTurbulentGrid(), os.path.join(grid_dir, turbulent_file))
+        files.append((striated_file, turbulent_file))
+        del field
+
+    index = {
+        "gmf_model": gmf_model,
+        "n_realisations": n_realisations,
+        "seeds": seeds,
+        "files": files,
+        "grid_dir": os.path.basename(grid_dir),
+        "striated_grid": _STRIATED_GRID,
+        "turbulent_grid": _TURBULENT_GRID,
+        "crpropa_version": getattr(cr, "__version__", None),
+    }
+    with open(index_file, "wb") as f:
+        pickle.dump(index, f, protocol=-1)
+    print(f"Wrote turbulent realisation library: {index_file}")
+    return index_file
+
+
+def load_turb_realisation_library(gmf_model: str, library_dir: str = None) -> dict:
+    """Load the index of a turbulent realisation library (the grids are loaded lazily)."""
+    index_file = _turb_library_index_file(gmf_model, library_dir)
+    with open(index_file, "rb") as f:
+        index = pickle.load(f)
+    index["grid_dir"] = os.path.join(os.path.dirname(index_file), index["grid_dir"])
+    return index
+
+
+def load_turb_realisation(index: dict, r: int) -> tuple:
+    """Load realisation `r` of a library as (striated Grid1f, turbulent Grid3f)."""
+    Ns, ds = index["striated_grid"]
+    Nt, dt = index["turbulent_grid"]
+    striated_file, turbulent_file = (os.path.join(index["grid_dir"], f) for f in index["files"][r])
+    # cr.loadGrid does not check the file length
+    assert os.path.getsize(striated_file) == 4 * Ns**3, f"corrupt grid file {striated_file}"
+    assert os.path.getsize(turbulent_file) == 12 * Nt**3, f"corrupt grid file {turbulent_file}"
+    striated = cr.Grid1f(cr.Vector3d(0.0), Ns, ds * cr.parsec)
+    turbulent = cr.Grid3f(cr.Vector3d(0.0), Nt, dt * cr.parsec)
+    cr.loadGrid(striated, striated_file)
+    cr.loadGrid(turbulent, turbulent_file)
+    return striated, turbulent
+
 
 class GMFBackPropagation:
     """Class to simulate back propagation of UHECRs within a given dataset (simulated or real data) and obtain the deflected events and their individual kappa values."""
@@ -54,7 +190,16 @@ class GMFBackPropagation:
         "nebCor" : 7
     }
 
-    def __init__(self: Self, data: Data, gmf_model: str = "JF12") -> None:
+    # number of consecutive samples traced through one field realisation
+    _SAMPLES_PER_FIELD: int = 50
+
+    def __init__(
+        self: Self,
+        data: Data,
+        gmf_model: str = "JF12",
+        turb_library_dir: str = None,
+        n_turb_realisations: int = 50,
+    ) -> None:
         """
         Class to simulate back propagation of UHECRs within a given dataset (simulated or real data).
 
@@ -64,8 +209,16 @@ class GMFBackPropagation:
             object generated from fancy.interfaces.data
         gmf_model : str
             the GMF model considered for backpropagation.
+        turb_library_dir : str, optional
+            directory of the pre-generated turbulent realisations used by the batched
+            backpropagation of turbulent models. Defaults to DEFAULT_TURB_LIBRARY_DIR.
+        n_turb_realisations : int, default=50
+            number of realisations to generate if the library does not exist yet.
         """
         self.gmf_model = gmf_model
+        self.turb_library_dir = turb_library_dir
+        self.n_turb_realisations = n_turb_realisations
+        self.turb_library = None
 
         # settings for the detector
         self.mean_lnA_grid = None
@@ -128,10 +281,153 @@ class GMFBackPropagation:
             model_name="vMF",
             stanc_options=stanc_options,
         )
+        # same model for many independent fits at once (see _fit_kappa_gmf_batch)
+        self.vMF_batch_model = CmdStanModel(
+            stan_file=str(get_path_to_stan_file("vMF", "fit_from_vMF_batch.stan")),
+            model_name="vMF_batch",
+            stanc_options=stanc_options,
+        )
+
+    def _get_turb_library(self: Self) -> dict:
+        """Index of the turbulent realisation library, generated on first use if missing."""
+        if self.turb_library is None:
+            if not os.path.exists(_turb_library_index_file(self.gmf_model, self.turb_library_dir)):
+                generate_turb_realisation_library(
+                    self.gmf_model, self.n_turb_realisations, self.turb_library_dir
+                )
+            self.turb_library = load_turb_realisation_library(self.gmf_model, self.turb_library_dir)
+        return self.turb_library
+
+    def _assign_fields(self: Self, Nsamples: int, Nsets: int, rng: np.random.Generator) -> np.ndarray:
+        """
+        Field assignment for the samples of ONE event, traced as `Nsets` sets of
+        `Nsamples` samples (one set per rigidity grid node, or a single set).
+
+        As in run_single_backpropagation, a field is set up for every block of
+        `_SAMPLES_PER_FIELD` consecutive samples, and the UF23 model number of a block
+        is that of its first sample. For turbulent models, every block of the event
+        gets a different library realisation (drawn without replacement per UF23
+        model), as long as the library is large enough.
+
+        Returns int array (Nsets, Nsamples, 2): (UF23 model number, realisation or -1).
+        """
+        k0 = (np.arange(Nsamples) // self._SAMPLES_PER_FIELD) * self._SAMPLES_PER_FIELD
+        if self.gmf_model.find("UF23all") != -1:
+            mt = k0 // (Nsamples // self.__Nmodels_UF23)
+        else:
+            mt = np.zeros(Nsamples, dtype=int)
+        fields = np.empty((Nsets, Nsamples, 2), dtype=int)
+        fields[..., 0] = mt
+        fields[..., 1] = -1
+        if not _is_turbulent(self.gmf_model):
+            return fields
+
+        n_real = self._get_turb_library()["n_realisations"]
+        block = np.arange(Nsamples) // self._SAMPLES_PER_FIELD
+        block_mt = mt[:: self._SAMPLES_PER_FIELD]
+        for m in np.unique(block_mt):
+            blocks = np.flatnonzero(block_mt == m)
+            n_draw = Nsets * len(blocks)
+            if n_draw > n_real and not getattr(self, "_warned_library_size", False):
+                print(
+                    f"Warning: {n_draw} field blocks per event and model but only {n_real} "
+                    "turbulent realisations, so some blocks of an event share a realisation."
+                )
+                self._warned_library_size = True
+            draw = np.concatenate(
+                [rng.permutation(n_real) for _ in range(-(-n_draw // n_real))]
+            )[:n_draw].reshape(Nsets, len(blocks))
+            per_block = np.full((Nsets, len(block_mt)), -1)
+            per_block[:, blocks] = draw
+            sel = block_mt[block] == m
+            fields[:, sel, 1] = per_block[:, block[sel]]
+        return fields
+
+    def _backprop_batched(
+        self: Self,
+        uvs: np.ndarray,
+        Rs: np.ndarray,
+        fields: np.ndarray,
+        nthreads: int,
+        chunk: int = 200_000,
+    ) -> tuple:
+        """
+        Backtrack M (arrival direction, rigidity) samples, grouped by field: for each
+        field (UF23 model, realisation), all of its samples -- across all events and
+        rigidities -- are traced in one OpenMP-parallel CRPropa call
+        (ModuleList.run(CandidateVector)). Each turbulent realisation is loaded from
+        the library once and shared by the UF23 models that use it.
+
+        Parameters
+        ----------
+        uvs : np.ndarray
+            sampled arrival directions, shape (M, 3).
+        Rs : np.ndarray
+            sampled rigidities in EV, shape (M,).
+        fields : np.ndarray
+            (UF23 model number, realisation or -1) per sample, shape (M, 2).
+        nthreads : int
+            number of OpenMP threads.
+
+        Returns
+        -------
+        deflected directions at the GB (M, 3) and time delays in years (M,).
+        """
+        defl_uvs = np.full((len(Rs), 3), np.nan)
+        time_delays = np.full(len(Rs), np.nan)
+
+        pos_earth = cr.Vector3d(-8.5, 0, 0) * cr.kpc
+        pid = -cr.nucleusId(1, 1)  # protons, charge via rigidity, negative to backtrack
+        obs = cr.Observer()
+        obs.add(cr.ObserverSurface(cr.Sphere(cr.Vector3d(0), 20 * cr.kpc)))
+        rng = np.random.default_rng()
+
+        prev_threads = _set_omp_num_threads(nthreads)
+        try:
+            realisations = np.unique(fields[:, 1])
+            for r in tqdm(realisations, desc=f"Backpropagating ({len(realisations)} field realisations, {nthreads} threads)"):
+                grids = None if r < 0 else load_turb_realisation(self._get_turb_library(), r)
+                in_r = fields[:, 1] == r
+                for mt in np.unique(fields[in_r, 0]):
+                    sim = self.__setup_simulation(obs, int(mt), grids=grids)
+                    # CRPropa schedules static blocks of 100 candidates, so shuffle to
+                    # spread the slow low-rigidity trajectories over the threads
+                    idx = rng.permutation(np.flatnonzero(in_r & (fields[:, 0] == mt)))
+                    for s in range(0, len(idx), chunk):
+                        cands = [
+                            cr.Candidate(cr.ParticleState(pid, Rs[k] * cr.EeV, pos_earth, cr.Vector3d(*uvs[k])))
+                            for k in idx[s : s + chunk]
+                        ]
+                        cv = cr.CandidateVector()
+                        for c in cands:
+                            cv.push_back(cr.CandidateRefPtr(c))
+                        sim.run(cv, False)  # no secondaries in pure B-field backtracking
+                        for k, c in zip(idx[s : s + chunk], cands):
+                            d = c.current.getDirection()
+                            defl_uvs[k] = (d.x, d.y, d.z)
+                            time_delays[k] = self.__get_time_delay(c, pos_earth)
+                        del cv, cands
+                    del sim
+                del grids
+        finally:
+            _restore_omp_num_threads(prev_threads)
+
+        return defl_uvs, time_delays
+
+    @staticmethod
+    def _mean_direction(defl_uvs: np.ndarray) -> np.ndarray:
+        """Normalised mean of the deflected directions over axis -2, ignoring NaN vectors."""
+        ok = np.all(np.isfinite(defl_uvs), axis=-1, keepdims=True)
+        mean = np.where(ok, defl_uvs, 0.0).sum(axis=-2)
+        return mean / np.linalg.norm(mean, axis=-1, keepdims=True)
 
     # parallelize for each UHECR
     def run_backpropagation(
-        self: Self, Nsamples: int = 500, njobs: int = 4, parallel: bool = True
+        self: Self,
+        Nsamples: int = 500,
+        njobs: int = 4,
+        parallel: bool = True,
+        batched: bool = True,
     ) -> None:
         """
         Run backpropagation for all UHECRs.
@@ -141,9 +437,15 @@ class GMFBackPropagation:
         Nsamples : int
             number of samples to generate for each UHECR.
         njobs : int, default=4
-            number of jobs to run in parallel. not used if parallel=False
+            number of jobs (joblib) or OpenMP threads (batched) to run in parallel.
+            not used if parallel=False
         parallel : bool
             flag whether to run in parallel or not.
+        batched : bool, default=True
+            trace all samples of all UHECRs grouped by field realisation in OpenMP-parallel
+            CRPropa calls (`_backprop_batched`), with turbulent realisations taken from the
+            pre-generated library. If False, use the original per-UHECR joblib path, which
+            draws a fresh turbulent realisation every 50 samples.
         """
         # if UF23, make sure that number of samples are divisible by
         # number of models in UF23 (8 models)
@@ -160,8 +462,25 @@ class GMFBackPropagation:
         # generate backtrakcing arguments for all uhecrs
         bt_args = self._generate_backtracking_arguments(Nsamples)
 
+        if batched:
+            rng = np.random.default_rng()
+            self.arr_sampled_uvs = np.array([uvs for _, uvs, _ in bt_args])
+            Rs = np.array([Rs for _, _, Rs in bt_args])
+            self.realisation_ids = np.array(
+                [self._assign_fields(Nsamples, 1, rng)[0] for _ in range(self.Nuhecrs)]
+            )
+            defl_uvs, time_delays = self._backprop_batched(
+                self.arr_sampled_uvs.reshape(-1, 3),
+                Rs.ravel(),
+                self.realisation_ids.reshape(-1, 2),
+                nthreads=njobs if parallel else 1,
+            )
+            self.defl_sampled_uvs = defl_uvs.reshape(self.Nuhecrs, Nsamples, 3)
+            self.time_delays = time_delays.reshape(self.Nuhecrs, Nsamples)
+            self.defl_mean_uvs = self._mean_direction(self.defl_sampled_uvs)
+            results = []
         # use joblib to run parallel jobs otherwise use serial
-        if parallel:
+        elif parallel:
             results = ParallelPbar("Running Backpropagation: ")(n_jobs=njobs)(
                 delayed(self.run_single_backpropagation)(arg) for arg in bt_args
             )
@@ -196,9 +515,17 @@ class GMFBackPropagation:
         )
         self.uhecr_coords_gb.representation_type = "unitspherical"
 
-    def compute_kappa_gmf(self: Self, njobs : int = 4) -> None:
-        """Compute kappa gmf & theta by fitting to vMF distribution pre-computed via stan."""
-        self.kappa_gmfs = ParallelPbar("Calculating kappa_GMF: ")(n_jobs=njobs)(delayed(self._get_kappa_gmf)(uhecr_idx) for uhecr_idx in range(self.Nuhecrs))
+    def compute_kappa_gmf(self: Self, njobs : int = 4, batched: bool = True) -> None:
+        """
+        Compute kappa gmf & theta by fitting to vMF distribution pre-computed via stan.
+
+        If batched, all UHECRs are fitted in a few Stan runs (`_fit_kappa_gmf_batch`)
+        instead of one Stan run per UHECR.
+        """
+        if batched:
+            self.kappa_gmfs = self._fit_kappa_gmf_batch(self.defl_sampled_uvs, self.defl_mean_uvs, njobs=njobs)
+        else:
+            self.kappa_gmfs = ParallelPbar("Calculating kappa_GMF: ")(n_jobs=njobs)(delayed(self._get_kappa_gmf)(uhecr_idx) for uhecr_idx in range(self.Nuhecrs))
         self.thetaPs = self.f_theta(self.kappa_gmfs)  # for plotting purposes
     
 
@@ -377,7 +704,7 @@ class GMFBackPropagation:
             / (60 * 60 * 24 * 365)
         )
 
-    def __setup_simulation(self: Self, obs, mt_num: int, seed: int = None):
+    def __setup_simulation(self: Self, obs, mt_num: int, seed: int = None, grids: tuple = None):
         """
         Prepare the crpropa backtracking simulation.
 
@@ -394,6 +721,9 @@ class GMFBackPropagation:
             not change existing behaviour when omitted. Only needed to force
             multiple calls to reuse the SAME field realization (e.g. for the
             turbulence-correlation test in new_uhecr_model/lnA_sensitivity/).
+        grids : tuple, optional
+            pre-generated (striated Grid1f, turbulent Grid3f) realisation, set on the
+            field instead of drawing new random grids (see load_turb_realisation).
 
         Returns
         -------
@@ -406,40 +736,37 @@ class GMFBackPropagation:
         def _resolve_seed():
             return seed if seed is not None else int(rng.integers(low=0, high=10000000))
 
+        def _add_random_fields(gmf_cr):
+            if grids is not None:
+                gmf_cr.setStriatedGrid(grids[0])
+                gmf_cr.setTurbulentGrid(grids[1])
+            else:
+                field_seed = _resolve_seed()
+                gmf_cr.randomStriated(field_seed)
+                gmf_cr.randomTurbulent(field_seed)
+
         # setup magnetic field
         if self.gmf_model == "JF12":
-            field_seed = _resolve_seed()
             gmf_cr = cr.JF12Field()
-            gmf_cr.randomStriated(field_seed)
-            gmf_cr.randomTurbulent(field_seed)
+            _add_random_fields(gmf_cr)
 
         elif self.gmf_model == "UF23all":
             gmf_cr = cr.UF23Field(mt_num)
 
         elif self.gmf_model == "UF23allTurb":
-            field_seed = _resolve_seed()
-
             gmf_cr = cr.UF23Field(mt_num)
-            gmf_cr.randomStriated(field_seed)
-            gmf_cr.randomTurbulent(field_seed)
+            _add_random_fields(gmf_cr)
 
         elif self.gmf_model.find("UF23") != -1:
             uf23_model = self.gmf_model.replace("UF23", "").replace("Turb", "")
             gmf_cr = cr.UF23Field(self.__UF23_models[uf23_model])
 
             if self.gmf_model.find("Turb") != -1:
-                field_seed = _resolve_seed()
-
-
-                gmf_cr.randomStriated(field_seed)
-                gmf_cr.randomTurbulent(field_seed)
+                _add_random_fields(gmf_cr)
 
         elif self.gmf_model == "UF23baseTurb":
-            field_seed = _resolve_seed()
-
             gmf_cr = cr.UF23Field(0)
-            gmf_cr.randomStriated(field_seed)
-            gmf_cr.randomTurbulent(field_seed)
+            _add_random_fields(gmf_cr)
 
         elif self.gmf_model == "PT11":
             gmf_cr = cr.PT11Field()
@@ -587,6 +914,50 @@ class GMFBackPropagation:
 
         return np.mean(fit.stan_variable("kappa"))
 
+    def _fit_kappa_vmf_chunk(self: Self, N: np.ndarray, sum_cos: np.ndarray) -> np.ndarray:
+        """Posterior mean kappa of len(N) independent fits in one Stan run."""
+        rng_kgmf = np.random.default_rng()
+        fit = self.vMF_batch_model.sample(
+            data={"M": len(N), "N": N, "sum_cos": sum_cos},
+            iter_warmup=1000,
+            iter_sampling=2000,
+            chains=2,  # same sampler settings as _fit_kappa_gmf
+            seed=int(rng_kgmf.integers(low=1, high=10000)),
+            show_progress=False,
+        )
+        return np.mean(fit.stan_variable("kappa"), axis=0)
+
+    def _fit_kappa_gmf_batch(
+        self: Self, defl_uvs: np.ndarray, defl_mean_uvs: np.ndarray, njobs: int = 4, chunk: int = 2000
+    ) -> np.ndarray:
+        """
+        Same posterior mean kappa_GMF as `_fit_kappa_gmf` for many fits at once.
+
+        The vMF likelihood of fit_from_vMF.stan depends on the samples only through
+        the number of samples N and sum_i dot(n_i, mu), so fit_from_vMF_batch.stan
+        loops over the fits with these sufficient statistics. The fits are split into
+        chunks of `chunk` (to keep the Stan output small), run in parallel.
+
+        Parameters
+        ----------
+        defl_uvs : np.ndarray
+            deflected unit vectors, shape (..., Nsamples, 3)
+        defl_mean_uvs : np.ndarray
+            mean direction of each fit, shape (..., 3)
+
+        Returns
+        -------
+        kappa_GMF, shape (...)
+        """
+        shape = defl_mean_uvs.shape[:-1]
+        sum_cos = np.einsum("...ij,...j->...", defl_uvs, defl_mean_uvs).reshape(-1)
+        N = np.full(sum_cos.shape, defl_uvs.shape[-2], dtype=int)
+        starts = range(0, len(N), chunk)
+        kappas = ParallelPbar(f"Calculating kappa_GMF ({len(N)} fits, {len(starts)} Stan runs): ")(
+            n_jobs=min(njobs, len(starts))
+        )(delayed(self._fit_kappa_vmf_chunk)(N[s : s + chunk], sum_cos[s : s + chunk]) for s in starts)
+        return np.concatenate(kappas).reshape(shape)
+
     def __f_theta_scalar(self: Self, kappa: float, P: float = 0.683) -> float:
         """
         Compute the Pth containment angle for a given kappa value.
@@ -665,15 +1036,37 @@ class RigidityResolvedGMFBackPropagation(GMFBackPropagation):
     # rigidity grid (in EV) validated via new_uhecr_model/lnA_sensitivity/gmf_backpropagation:
     # log-spaced, densified below R=20 EV where kappa_GMF(R) and the interpolation
     # error both vary fastest.
-    DEFAULT_R_GRID = np.array(
+    R_GRID_8NODE = np.array(
         [2.0, 2.517, 3.169, 3.988, 5.02, 7.96, 12.62, 20.0]
     )
+    # 14 log-spaced nodes (2026-10-09): the mean deflected direction moves by
+    # ~1 bubble width kappa_GMF(R)^-1/2 per node above 5 EV (2-3 widths with
+    # R_GRID_8NODE), so a natural spline of omega_shift_grid / ln kappa_GMF(R)
+    # interpolates to within the run-to-run (turbulent realisation) noise
+    DEFAULT_R_GRID = np.geomspace(2.0, 20.0, 14)
+
+    @staticmethod
+    def omega_shift_table(omega: np.ndarray, R_means: np.ndarray) -> np.ndarray:
+        """
+        Tangent vectors at omega (N, 3) that carry it to the mean deflected
+        direction at each rigidity node, R_means (N, Nr, 3): the logarithmic map
+        v = theta * unit(m - cos(theta) omega), |v| = theta in radians. The Stan
+        model rotates omega back along the interpolated v (exponential map).
+
+        Returns (N, Nr, 3).
+        """
+        c = np.clip(np.einsum("irk,ik->ir", R_means, omega), -1.0, 1.0)
+        perp = R_means - c[..., None] * omega[:, None, :]
+        norm = np.linalg.norm(perp, axis=-1, keepdims=True)
+        return np.arccos(c)[..., None] * np.where(norm > 0, perp / np.maximum(norm, 1e-300), 0.0)
 
     def run_backpropagation_rigidity_grid(
         self: Self,
         R_grid: np.ndarray = None,
         Nsamples_per_R: int = 300,
         njobs: int = 4,
+        batched: bool = True,
+        centre_on_marginal: bool = False,
     ) -> None:
         """
         Backpropagate at each fixed rigidity in R_grid (no lnA/rigidity
@@ -704,8 +1097,24 @@ class RigidityResolvedGMFBackPropagation(GMFBackPropagation):
             number of backpropagation samples per event per rigidity grid
             point (must be >=8 for UF23-family models).
         njobs : int, default=4
-            number of parallel jobs for backpropagation.
+            number of parallel jobs for backpropagation (OpenMP threads if batched).
+        batched : bool, default=True
+            trace all (event, rigidity, sample) candidates grouped by field realisation
+            in OpenMP-parallel CRPropa calls, with turbulent realisations from the
+            pre-generated library (see `run_backpropagation`). Every block of 50 samples
+            of an event still gets its own realisation, so no realisation is shared
+            between the rigidity nodes of an event. The kappa_GMF(R) fits are done in a
+            few Stan runs over all (event, rigidity) pairs (`_fit_kappa_gmf_batch`).
+        centre_on_marginal : bool, default=False
+            fit kappa_GMF(R) about the rigidity-marginalised mean direction
+            (`self.defl_mean_uvs`, i.e. omega_det, from `run_backpropagation`)
+            instead of about the mean direction at each rigidity, so that the
+            offset of the rigidity-R deflections from omega_det widens kappa_GMF(R).
         """
+        if centre_on_marginal:
+            assert getattr(self, "defl_mean_uvs", None) is not None and len(self.defl_mean_uvs) == self.Nuhecrs, (
+                "centre_on_marginal requires run_backpropagation first (omega_det)."
+            )
         if R_grid is None:
             R_grid = self.DEFAULT_R_GRID
         R_grid = np.asarray(R_grid, dtype=float)
@@ -737,10 +1146,28 @@ class RigidityResolvedGMFBackPropagation(GMFBackPropagation):
                 bt_args.append((i, uhecr_sampled_uvs, uhecr_fixed_Rs))
                 ij_index.append((i, j))
 
-        # --- flat parallel dispatch over all Nuhecrs * Nr backprop jobs ---
-        results = ParallelPbar(
-            f"Backpropagating on rigidity grid ({self.Nuhecrs} events x {Nr} rigidities): "
-        )(n_jobs=njobs)(delayed(self.run_single_backpropagation)(arg) for arg in bt_args)
+        if batched:
+            rng = np.random.default_rng()
+            uvs = np.empty((self.Nuhecrs, Nr, Nsamples, 3))
+            for (i, j), (_, uhecr_sampled_uvs, _) in zip(ij_index, bt_args):
+                uvs[i, j] = uhecr_sampled_uvs
+            Rs = np.broadcast_to(R_grid[None, :, None], (self.Nuhecrs, Nr, Nsamples))
+            self.realisation_ids_grid = np.array(
+                [self._assign_fields(Nsamples, Nr, rng) for _ in range(self.Nuhecrs)]
+            )
+            defl_uvs, _ = self._backprop_batched(
+                uvs.reshape(-1, 3), Rs.ravel(), self.realisation_ids_grid.reshape(-1, 2), nthreads=njobs
+            )
+            defl_uvs = defl_uvs.reshape(self.Nuhecrs, Nr, Nsamples, 3)
+            defl_means = self._mean_direction(defl_uvs)
+            results = [
+                (i, uvs[i, j], defl_uvs[i, j], defl_means[i, j], None) for (i, j) in ij_index
+            ]
+        else:
+            # --- flat parallel dispatch over all Nuhecrs * Nr backprop jobs ---
+            results = ParallelPbar(
+                f"Backpropagating on rigidity grid ({self.Nuhecrs} events x {Nr} rigidities): "
+            )(n_jobs=njobs)(delayed(self.run_single_backpropagation)(arg) for arg in bt_args)
 
         # grid-shaped buffers (event, rigidity) instead of the single
         # per-pass scratch buffers the sequential-per-rigidity version reused
@@ -756,6 +1183,12 @@ class RigidityResolvedGMFBackPropagation(GMFBackPropagation):
             defl_sampled_uvs_grid[i, j, ...] = dls
             defl_mean_uvs_grid[i, j, :] = dlm
 
+        # kept for diagnostics (e.g. offsets between the rigidity-R and marginalised centres)
+        self.defl_mean_uvs_grid = defl_mean_uvs_grid.copy()
+        self.defl_sampled_uvs_grid = defl_sampled_uvs_grid
+        if centre_on_marginal:
+            defl_mean_uvs_grid[:] = self.defl_mean_uvs[:, None, :]
+
         # --- flat parallel dispatch over all Nuhecrs * Nr kappa_GMF fits ---
         # (this step was previously a serial `for i in range(self.Nuhecrs)`
         # loop repeated once per rigidity grid point -- unparallelized,
@@ -763,6 +1196,11 @@ class RigidityResolvedGMFBackPropagation(GMFBackPropagation):
         # takes its inputs directly rather than reading self.defl_sampled_uvs
         # / self.defl_mean_uvs by index, so this is safe under concurrent
         # (i, j) jobs.)
+        if batched:
+            self.kappa_gmf_grid = self._fit_kappa_gmf_batch(
+                defl_sampled_uvs_grid, defl_mean_uvs_grid, njobs=njobs
+            )
+            return
         kappa_results = ParallelPbar(
             f"Calculating kappa_GMF on rigidity grid ({self.Nuhecrs} events x {Nr} rigidities): "
         )(n_jobs=njobs)(

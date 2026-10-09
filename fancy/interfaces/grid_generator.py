@@ -248,7 +248,11 @@ class GridGenerator:
     def get_weighted_exposures(
         self: Self,
         Nsamples : int = 100,
-        wexp_min : float = 1e-10
+        wexp_min : float = 1e-10,
+        lnA_quadrature : str = "gauss-hermite",
+        n_quad : int = 80,
+        seed : int = None,
+        clamp_rigidity : bool = True,
     ) -> None:
         """
         Get the weighted exposure grid.
@@ -277,11 +281,13 @@ class GridGenerator:
             lnA_energy_grid=self.lnA_energy_grid,
             energy_grid_widths=self.energy_grid_widths,
         )
-        self.wexp_earth_grid = weighted_exposure.calculate_weighted_exposure(Nsamples=Nsamples, wexp_lim=wexp_min)
+        quad_kwargs = dict(lnA_quadrature=lnA_quadrature, n_quad=n_quad, seed=seed, clamp_rigidity=clamp_rigidity)
+        self.weighted_exposure_model = weighted_exposure  # kept for diagnostics
+        self.wexp_earth_grid = weighted_exposure.calculate_weighted_exposure(Nsamples=Nsamples, wexp_lim=wexp_min, **quad_kwargs)
         self.log_wexp_earth_grid = np.log(self.wexp_earth_grid.to_value(u.km**2 * u.yr))
 
         # also compute the source weighted exposure
-        self.wexp_src_grid = weighted_exposure.calculate_src_weighted_exposure(Nsamples=Nsamples, wexp_lim=wexp_min)
+        self.wexp_src_grid = weighted_exposure.calculate_src_weighted_exposure(Nsamples=Nsamples, wexp_lim=wexp_min, **quad_kwargs)
         self.log_wexp_src_grid = np.log(self.wexp_src_grid.to_value(u.km**2 * u.yr))
 
     def get_loss_length_grid(
